@@ -195,6 +195,10 @@ pub fn picker_card(app: &App) -> El {
         let mut item = el().key(format!("picker-row:{index}")).w(cw).h(row_h).absolute(0.0, index as f32 * row_h)
             .transition(rune::Transition::none()).instant_changes();
         if row.header {
+            // A project heading carries its folder, in the tree's colour.
+            if let Some(Icon::Glyph(folder)) = row.icon.clone().filter(|_| picker.kind == Kind::Session) {
+                item = item.child(text(folder).font(TextStyle::new(13.0 * s, 400.0).family(NERD)).color(rgb(p.folder)).absolute(22.0 * s, 19.0 * s));
+            }
             if !row.title.is_empty() {
                 let x = if row.icon.is_some() { 48.0 } else { 22.0 } * s;
                 item = item.child(text(row.title.clone()).font(sans(11.5 * s, 600.0)).color(rgb(p.muted)).truncate().w(cw - x - 22.0 * s).absolute(x, 20.0 * s));

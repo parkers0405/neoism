@@ -4,7 +4,7 @@
 
 use super::catalog::{self, ADD_ACCOUNT, ADD_PROVIDER, DISCONNECT_PROVIDER, DONE, RETRY};
 use super::effects::{self, Effect, Running};
-use super::picker::{Activity, Kind, Picker, Row, Status};
+use super::picker::{Activity, Icon, Kind, Picker, Row, Status};
 use super::plan::{COMMANDS, SlashAction, plan};
 use super::ConnectFlow;
 use crate::app::App;
@@ -12,6 +12,9 @@ use crate::tabs::TabKind;
 use neoism_protocol::agent::{AgentClientMessage as Client, AgentServerMessage as Server, HistoryMessage, HistoryMessageKind, Role};
 use rune::{Key, KeyEvent, Tx};
 use serde_json::Value;
+
+/// A "Load more" row in `/sessions`, followed by its project's directory.
+const MORE: &str = "more:";
 
 /// How often a catalog that is not ready is asked for again before giving up.
 const CATALOG_TRIES: u8 = 12;
@@ -198,24 +201,7 @@ impl App {
             SlashAction::OpenConnectPicker => self.open_connect(),
             SlashAction::ShowMcp => self.open_mcp(),
             SlashAction::OpenSessionsPicker => {
-                // As the sidebar lists them: pinned first, the project's name, and what each is
-                // doing (or how long ago it was last touched).
-                let home = crate::startup::home();
-                let mut threads: Vec<&neoism_protocol::agent::ThreadSummary> = self.threads.iter().collect();
-                threads.sort_by_key(|t| !t.pinned);
-                let rows = threads.into_iter().map(|t| {
-                    let directory = t.directory.as_deref().unwrap_or_default().trim_end_matches('/');
-                    let project = if directory.is_empty() { "No project".to_owned() } else if directory == home.trim_end_matches('/') { "~".to_owned() } else { crate::agent::sidebar::project_name(directory) };
-                    let (state, status) = match self.activity_of(t) {
-                        "running" => ("working".to_owned(), Some(Status::Good)),
-                        "background" => ("background".to_owned(), Some(Status::Error)),
-                        "permission" => ("needs you".to_owned(), Some(Status::Warning)),
-                        _ if self.finished.contains(&t.session_id) => ("finished".to_owned(), Some(Status::Muted)),
-                        _ => (crate::agent::sidebar::ago(t.updated_at), None),
-                    };
-                    Row::new(t.title.clone(), if t.pinned { format!("{project}  \u{b7}  pinned") } else { project }, state, t.session_id.clone())
-                        .status(status).current(Some(&t.session_id) == session.as_ref())
-                }).collect();
+                let rows = self.session_rows();
                 self.composer.picker = Some(Picker::new(Kind::Session, "Sessions", rows).select_value(session.as_deref().unwrap_or_default()));
                 self.refresh_threads();
             }
@@ -352,6 +338,40 @@ impl App {
         let request_id = self.composer.request_id("models");
         self.agent_send(Client::ListModelCatalog { request_id, directory: Some(self.cwd.clone()) });
         None
+    }
+
+    /// `/sessions` lists what the conversations sidebar lists, by the same rules: one
+    /// project's chats in a project, every project's under folder headings on the
+    /// all-projects view, five to a project with "Load more" under it.
+    pub(super) fn session_rows(&self) -> Vec<Row> {
+        use crate::agent::ConvRow;
+        let home = crate::startup::home();
+        let current = match &self.active_tab().kind { TabKind::Agent { session } => session.clone(), _ => None };
+        self.conversation_rows().into_iter().filter_map(|entry| match entry {
+            ConvRow::Project { label, open, .. } => Some(Row::header(label).icon(Some(Icon::Glyph(if open { crate::ui::icons::FOLDER_OPEN } else { crate::ui::icons::FOLDER_CLOSED })))),
+            ConvRow::Thread { thread: t, .. } => {
+                let directory = t.directory.as_deref().unwrap_or_default().trim_end_matches('/');
+                let project = if directory.is_empty() { "No project".to_owned() } else if directory == home.trim_end_matches('/') { "~".to_owned() } else { crate::agent::sidebar::project_name(directory) };
+                let (state, status) = match self.activity_of(t) {
+                    "running" => ("working".to_owned(), Some(Status::Good)),
+                    "background" => ("background".to_owned(), Some(Status::Error)),
+                    "permission" => ("needs you".to_owned(), Some(Status::Warning)),
+                    _ if self.finished.contains(&t.session_id) => ("finished".to_owned(), Some(Status::Muted)),
+                    _ => (crate::agent::sidebar::ago(t.updated_at), None),
+                };
+                Some(Row::new(t.title.clone(), if t.pinned { format!("{project}  \u{b7}  pinned") } else { project }, state, t.session_id.clone())
+                    .status(status).current(Some(&t.session_id) == current.as_ref()))
+            }
+            ConvRow::More { directory } => Some(Row::new(if self.catalog.loading(&directory) { "Loading\u{2026}" } else { "Load more" }, "", "", format!("{MORE}{directory}"))),
+            ConvRow::Child { .. } => None,
+        }).collect()
+    }
+
+    /// The open `/sessions` menu follows the catalog as pages land.
+    pub(crate) fn refresh_sessions_menu(&mut self) {
+        if !self.composer.picker.as_ref().is_some_and(|p| p.kind == Kind::Session) { return; }
+        let rows = self.session_rows();
+        if let Some(picker) = self.composer.picker.as_mut() { picker.replace(rows); }
     }
 
     /// Starred models, read from disk the first time they are asked for.
@@ -572,7 +592,11 @@ impl App {
             }
             Kind::Agent => { self.set_agent(row.value); self.close_prompt_picker(); }
             Kind::Thinking => { self.set_thinking(row.value); self.close_prompt_picker(); }
-            Kind::Session => { self.close_prompt_picker(); self.open_conversation(&row.value); }
+            Kind::Session => match row.value.strip_prefix(MORE) {
+                // "Load more": the project's next five; the menu stays open and fills in.
+                Some(directory) => { self.load_more_chats(directory); self.refresh_sessions_menu(); }
+                None => { self.close_prompt_picker(); self.open_conversation(&row.value); }
+            },
             Kind::Usage => { if row.value == "refresh" { self.open_usage(); } },
             Kind::Tasks | Kind::Goals | Kind::Context => {},
             Kind::Subagent => { self.close_prompt_picker(); self.view_session(&row.value); }

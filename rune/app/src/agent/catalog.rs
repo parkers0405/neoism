@@ -122,6 +122,7 @@ impl App {
         self.catalog.pending = 0;
         for directory in self.catalog.projects[..wanted].to_vec() { self.request_project_page(&directory, None); }
         if self.conversations_dashboard() { self.threads = self.catalog.flat(); }
+        self.refresh_sessions_menu();
     }
 
     pub(crate) fn apply_project_page(&mut self, identity: &str, directory: &str, requested: Option<String>, threads: Vec<ThreadSummary>, next: Option<String>) {
@@ -151,6 +152,7 @@ impl App {
             page.next = next;
         }
         if self.conversations_dashboard() { self.threads = self.catalog.flat(); }
+        self.refresh_sessions_menu();
     }
 
     pub(crate) fn project_page_failed(&mut self, identity: &str, directory: &str, requested: Option<String>) {

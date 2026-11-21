@@ -51,7 +51,7 @@ pub struct ThreadPaging {
     extended: bool,
     loading: bool,
 }
-pub use sidebar::{ConvHeader, catalog_scope, conversations};
+pub use sidebar::{ConvHeader, ConvRow, catalog_scope, conversations};
 pub use timeline::pane;
 
 use crate::app::App;
@@ -967,6 +967,7 @@ impl App {
                     paging.next = next_cursor;
                     self.threads = threads;
                 }
+                self.refresh_sessions_menu();
             }
             AgentServerMessage::ThreadCreated { session_id, .. } => {
                 if let Some(index) = self.tabs.iter().position(|t| t.kind == TabKind::Agent { session: None } && t.pending_prompt.is_some()) {

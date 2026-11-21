@@ -36,6 +36,33 @@ def verify_windows_payload(bundle):
 def run(*args):
     return subprocess.check_output([str(arg) for arg in args], text=True, stderr=subprocess.STDOUT).strip()
 
+# macOS signing. Without an identity the bundle is ad-hoc signed, as local builds always were.
+# NEOISM_CODESIGN_IDENTITY names a Developer ID Application certificate in the keychain;
+# NEOISM_NOTARY_PROFILE names `notarytool store-credentials` credentials (in
+# NEOISM_NOTARY_KEYCHAIN when they are not in the login keychain).
+IDENTITY = os.environ.get('NEOISM_CODESIGN_IDENTITY') or '-'
+NOTARY_PROFILE = os.environ.get('NEOISM_NOTARY_PROFILE')
+MACH_O = {b'\xcf\xfa\xed\xfe', b'\xce\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xca\xfe\xba\xbf'}
+
+def sign(path):
+    # Notarization requires the hardened runtime and a secure timestamp on every executable.
+    release = [] if IDENTITY == '-' else ['--options', 'runtime', '--timestamp']
+    run('codesign', '--force', '--sign', IDENTITY, *release, path)
+
+def sign_executables(root):
+    for path in sorted(root.rglob('*')):
+        if path.is_file() and not path.is_symlink() and path.open('rb').read(4) in MACH_O:
+            sign(path)
+
+def notarize(path):
+    keychain = os.environ.get('NEOISM_NOTARY_KEYCHAIN')
+    auth = ['--keychain-profile', NOTARY_PROFILE, *(['--keychain', keychain] if keychain else [])]
+    result = json.loads(subprocess.run(['xcrun', 'notarytool', 'submit', str(path), *auth, '--wait',
+        '--output-format', 'json'], text=True, stdout=subprocess.PIPE, check=True).stdout)
+    if result.get('status') != 'Accepted':
+        log = subprocess.run(['xcrun', 'notarytool', 'log', result['id'], *auth], text=True, stdout=subprocess.PIPE).stdout
+        sys.exit(f"Apple rejected {path.name} for notarization ({result.get('status')}):\n{log}")
+
 with tempfile.TemporaryDirectory(prefix='neoism-package-') as temporary:
     stage = Path(temporary)
     bundle = stage / NAME
@@ -92,20 +119,34 @@ with tempfile.TemporaryDirectory(prefix='neoism-package-') as temporary:
         shutil.copy2(ROOT / 'misc/macos/neoism.icns', resources / 'neoism.icns')
         plist = (ROOT / 'misc/macos/Info.plist').read_text()
         (contents / 'Info.plist').write_text(plist.replace('{{RELEASE_VERSION}}', VERSION).replace('{{VERSION}}', VERSION.split('-')[0]))
-        for name in [*LIBRARIES, 'neoism-update-helper']:
-            run('codesign', '--force', '--sign', '-', resources / 'web/native' / name)
-        for name in ['neoism', 'neoism-workspace-daemon', 'neoism-agent', 'neoism-agent-lua-runner']:
-            run('codesign', '--force', '--sign', '-', macos / name)
-        run('codesign', '--force', '--deep', '--sign', '-', app)
+        # Nested code first, then the bundle that seals it. The loose copies beside the app
+        # ship in the archive, so they carry the same identity.
+        sign_executables(bundle)
+        sign(app)
         run('codesign', '--verify', '--deep', '--strict', app)
         assert VERSION in run(macos / 'neoism', '--version')
         run(macos / 'neoism', '--neoism-verify-runtime')
+        if NOTARY_PROFILE:
+            assert IDENTITY != '-', 'Notarization needs NEOISM_CODESIGN_IDENTITY'
+            # One submission covers the app and the loose executables; the ticket is
+            # stapled so a first launch offline still passes Gatekeeper.
+            submission = stage / f'{NAME}.zip'
+            run('ditto', '-c', '-k', '--keepParent', bundle, submission)
+            notarize(submission)
+            run('xcrun', 'stapler', 'staple', app)
+            run('spctl', '--assess', '--type', 'execute', app)
         dmg_source = stage / 'dmg'
         dmg_source.mkdir()
         shutil.copytree(app, dmg_source / 'Neoism.app')
         os.symlink('/Applications', dmg_source / 'Applications')
+        dmg = OUT / f'{NAME}.dmg'
         run('hdiutil', 'create', '-volname', 'Neoism', '-srcfolder', dmg_source,
-            '-ov', '-format', 'UDZO', OUT / f'{NAME}.dmg')
+            '-ov', '-format', 'UDZO', dmg)
+        if IDENTITY != '-':
+            run('codesign', '--force', '--sign', IDENTITY, '--timestamp', dmg)
+        if NOTARY_PROFILE:
+            notarize(dmg)
+            run('xcrun', 'stapler', 'staple', dmg)
     archive = OUT / (NAME + ('.zip' if SYSTEM == 'windows' else '.tar.gz'))
     if SYSTEM == 'windows':
         # MSI tooling consumes DIST directly. Never merge into a stale browser tree.

@@ -621,7 +621,6 @@ mod macos {
     unsafe extern "C" {
         fn AXUIElementCreateApplication(pid: i32) -> Ref;
         fn AXUIElementCreateSystemWide() -> Ref;
-        fn AXIsProcessTrusted() -> bool;
         fn AXUIElementCopyAttributeValue(
             element: Ref,
             attribute: Ref,
@@ -705,8 +704,8 @@ mod macos {
     }
     pub(super) fn focused_id() -> anyhow::Result<Option<u32>> {
         ensure!(
-            unsafe { AXIsProcessTrusted() },
-            "Accessibility permission required to query exact foreground window"
+            crate::computer_use::platform::accessibility_granted(),
+            "Accessibility permission required to query exact foreground window. Enable Neoism in System Settings > Privacy & Security > Accessibility, then retry."
         );
         let system = Owned(unsafe { AXUIElementCreateSystemWide() });
         ensure!(!system.0.is_null(), "Cannot create AX system element");

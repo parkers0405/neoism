@@ -179,6 +179,38 @@ jobs:
           SERVICE_CACHE: ${{ steps.service-cache.outputs.cache-matched-key }}
         run: |
           printf 'Cache scope: %s\nApp cache: %s\nService cache: %s\n' "$GITHUB_REF" "${APP_CACHE:-MISS (cold build)}" "${SERVICE_CACHE:-MISS (cold build)}" | tee -a "$GITHUB_STEP_SUMMARY"
+      # Without the certificate secret the macOS bundle stays ad-hoc signed.
+      - name: Load the Developer ID certificate and notarization credentials
+        if: runner.os == 'macOS' && !inputs.validate_only
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          if [ -z "$CERTIFICATE" ]; then
+            echo 'No Developer ID certificate configured: this build is ad-hoc signed.' | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/neoism-signing.keychain-db"
+          password="$(openssl rand -hex 24)"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          printf '%s' "$CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          identity="$(security find-identity -v -p codesigning "$keychain" | awk -F'"' '/Developer ID Application/ {print $2; exit}')"
+          [ -n "$identity" ] || { echo 'The certificate is not a Developer ID Application identity.'; exit 1; }
+          echo "NEOISM_CODESIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+          if [ -n "$APPLE_APP_PASSWORD" ]; then
+            xcrun notarytool store-credentials neoism-notary --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --keychain "$keychain"
+            echo 'NEOISM_NOTARY_PROFILE=neoism-notary' >> "$GITHUB_ENV"
+            echo "NEOISM_NOTARY_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+          fi
       - name: Build, test, and package the app and services
         id: bundle
         run: python scripts/build-rune-release.py ${{ inputs.validate_only && '--test-app-only' || '' }}

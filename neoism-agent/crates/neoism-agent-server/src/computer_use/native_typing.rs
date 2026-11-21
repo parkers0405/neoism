@@ -123,13 +123,9 @@ fn readiness() -> Result<()> {
 }
 #[cfg(target_os = "macos")]
 fn readiness() -> Result<()> {
-    #[link(name = "ApplicationServices", kind = "framework")]
-    unsafe extern "C" {
-        fn AXIsProcessTrusted() -> bool;
-    }
     ensure!(
-        unsafe { AXIsProcessTrusted() },
-        "Accessibility permission is required for native typing"
+        super::accessibility_granted(),
+        "Accessibility permission is required for native typing. Enable Neoism in System Settings > Privacy & Security > Accessibility, then retry."
     );
     #[link(name = "CoreGraphics", kind = "framework")]
     unsafe extern "C" {

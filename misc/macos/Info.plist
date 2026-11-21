@@ -26,6 +26,8 @@
   <string>11.0</string>
   <key>LSApplicationCategoryType</key>
   <string>public.app-category.developer-tools</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>A program running in Neoism wants to control another app.</string>
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key>

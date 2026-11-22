@@ -52,12 +52,11 @@
   </categories>
 
   <releases>
-    <release version="0.7.164" date="2026-11-22">
+    <release version="0.7.165" date="2026-11-22">
       <description>
-        <p>The focused Agent view now has two clear states: folded to a work row and the Agent's writing, or open as the full trace. The macOS app and disk image are signed with a Developer ID and notarized by Apple.</p>
-        <p>Keeps the Agent working after long conversations are compacted, stops it from waiting on delegated work it never started, and asks macOS for Accessibility when computer use needs it.</p>
+        <p>Makes the Agent model picker scroll smoothly with a trackpad or touch, restores keyboard navigation in the skill picker opened by $, and keeps the Crafting indicator steady when folded steps finish.</p>
       </description>
-      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.164</url>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.165</url>
     </release>
     <release version="0.7.159" date="2026-11-19">
       <description>

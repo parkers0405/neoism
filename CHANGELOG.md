@@ -2,6 +2,16 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.165] - 2026-11-22
+
+### Smoother Agent pickers and steadier activity
+
+- The model picker follows trackpad and touchscreen gestures in both its inline and expanded layouts instead of scrolling a row at a time.
+- The skill picker opened by `$` keeps keyboard focus in the composer, so you can type to filter, use the arrow keys, and insert a skill with Enter or Tab.
+- When a hidden step succeeds, the arrow beside Working hops without restarting the Crafting animation. Open tool cards keep their own icon hop.
+
+Stable platform bundles and the daemon image use one immutable tagged source. Local and platform checks, publication, and independent download verification are reported separately.
+
 ## [0.7.164] - 2026-11-22
 
 ### A simpler focused Agent view

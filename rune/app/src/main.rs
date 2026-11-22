@@ -137,6 +137,7 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     macro_rules! wake { ($name:expr, $d:expr) => {{ let d = $d; if *TRACE_POLL { wakes.push(($name, d)); } tx.wake_after(d); }} }
     // Terminal output is parsed as it arrives; blocks and grids are re-read once per frame.
     let changed = drive::tick(app, clock, tx) | replay::tick(app, clock, tx) | app.poll_usage();
+    app.git_review_tick(tx);
     let changed = changed | glass_selection::poll(app, tx);
     let changed = changed | goal_celebration::poll(app, tx);
     let changed = changed | connection_celebration::poll(app, tx);
@@ -365,6 +366,7 @@ fn main() {
             ("git-panel", |s| git::fixture(s, false)),
             ("git-review", |s| git::fixture(s, true)),
             ("git-review-long", git::long_fixture),
+            ("git-review-split", |s| { git::fixture(s, true); s.git_panel.review.split = true; s.git_review_fixture_relayout(); }),
             ("agent-new", |s| { s.open_tab(tabs::TabKind::Agent { session: None }); }),
             ("usage", |s| s.usage_fixture("accounts")),
             ("usage-loading", |s| s.usage_fixture("loading")),

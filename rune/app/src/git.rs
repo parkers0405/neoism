@@ -6,12 +6,16 @@ use crate::tabs::TabKind;
 use crate::daemon::Family;
 use crate::ui::theme::{panel_bg, rgb};
 use crate::ui::ChildIf;
-use neoism_protocol::git::{GitChangeStatus, GitClientMessage, GitFileChange, GitServerMessage};
+use neoism_protocol::git::{GitChangeStatus, GitClientMessage, GitFileChange, GitFileDiff, GitServerMessage};
 use rune::{El, Key, KeyEvent, ScrollSpec, TextEdit, Tx, WheelEvent, col, el, row, text};
 use std::{cell::Cell, rc::Rc};
 
 mod actions;
+mod review;
 pub use actions::{Step, Sync, Tab};
+pub use review::{Review, review};
+use review::Scope;
+use review::{review_key, ROW};
 
 pub const WIDTH: f32 = 340.0;
 
@@ -32,7 +36,7 @@ pub struct State {
     diff_error: Option<String>,
     diff_dirty: bool,
     cursor: usize,
-    lines: Vec<Line>,
+    pub review: Review,
     file_scroll: Rc<Cell<(f32, f32)>>,
     pub tab: Tab,
     upstream: Option<String>,
@@ -152,39 +156,6 @@ impl App {
         self.git_run(steps);
     }
 
-    pub fn open_git_review(&mut self, path: &str) {
-        if let Some(id) = self.tabs.iter().find(|t| t.kind == TabKind::GitDiff).map(|t| t.id) {
-            self.select_tab(id);
-        } else { self.open_tab(TabKind::GitDiff); }
-        self.focus = Focus::Content;
-        self.git_panel.message.focused = false;
-        self.git_panel.selected = Some(path.into());
-        self.git_panel.lines.clear();
-        self.git_panel.diff_error = None;
-        self.git_panel.epoch = self.git_panel.epoch.wrapping_add(1);
-        self.git_panel.diff_scroll = Rc::default();
-        self.git_panel.diff_pending = None;
-        self.load_git_review();
-    }
-
-    /// Open the diff of what changed, starting at the file under the cursor.
-    pub fn open_git_changes(&mut self) {
-        if let Some(path) = self.git_panel.files.get(self.git_panel.cursor).map(|f| f.path.clone()) { self.open_git_review(&path); }
-    }
-
-    fn load_git_review(&mut self) {
-        let Some(path) = self.git_panel.selected.clone() else { return; };
-        if self.git_panel.diff_pending.is_some() {
-            self.git_panel.diff_dirty = true;
-            return;
-        }
-        self.git_panel.diff_dirty = false;
-        self.git_panel.diff_pending = self.git_request(GitClientMessage::DiffFiles { paths: vec![path.clone()] }, Operation::Diff(path));
-        if self.git_panel.diff_pending.is_none() {
-            self.git_panel.diff_error = self.git_panel.error.clone();
-        }
-    }
-
     pub fn close_git_review(&mut self) {
         if let Some(index) = self.tabs.iter().position(|t| t.kind == TabKind::GitDiff) {
             self.close_tab_now(index);
@@ -196,7 +167,7 @@ impl App {
         self.git_panel.selected = None;
         self.git_panel.diff_pending = None;
         self.git_panel.diff_dirty = false;
-        self.git_panel.lines.clear();
+        self.git_panel.review = Review { split: self.git_panel.review.split, hide_files: self.git_panel.review.hide_files, ..Review::default() };
     }
 
     pub fn apply_git_panel(&mut self, message: GitServerMessage, request_id: u64) {
@@ -216,18 +187,8 @@ impl App {
         }
         if self.git_panel.diff_pending.as_ref().is_some_and(|p| p.matches(request_id, &self.cwd)) {
             let pending = self.git_panel.diff_pending.take().unwrap();
-            let Operation::Diff(path) = pending.kind else { return; };
-            if self.git_panel.selected.as_deref() != Some(&path) { return; }
-            match message {
-                GitServerMessage::FileDiffs { diffs } => {
-                    self.git_panel.lines = diffs.into_iter().find(|d| d.path == path)
-                        .map(|d| parse_patch(&d.patch)).unwrap_or_default();
-                    self.git_panel.diff_error = None;
-                    self.git_panel.epoch = self.git_panel.epoch.wrapping_add(1);
-                }
-                GitServerMessage::Error { message } => self.git_panel.diff_error = Some(message),
-                _ => self.git_panel.diff_error = Some("Unexpected Git diff response.".into()),
-            }
+            let Operation::Diff(key) = pending.kind else { return; };
+            self.git_review_reply(message, &key);
             if self.git_panel.diff_dirty { self.load_git_review(); }
             return;
         }
@@ -292,7 +253,7 @@ impl App {
         // Let window shortcuts run first; no review keystroke may reach the terminal below.
         let s = self.ty.scale();
         let delta = match event.key {
-            Key::Up => Some(-24.0 * s), Key::Down => Some(24.0 * s),
+            Key::Up => Some(-ROW * s), Key::Down => Some(ROW * s),
             Key::PageUp => Some(-self.window[1] * 0.7), Key::PageDown => Some(self.window[1] * 0.7),
             Key::Home => Some(-f32::MAX), Key::End => Some(f32::MAX), _ => None,
         };
@@ -534,104 +495,6 @@ fn file_row(app: &App, index: usize) -> El {
             .child(text(format!("−{}", f.deletions)).font(app.ty.sized(10.0)).color(rgb(p.red))))
 }
 
-fn review_key(app: &App) -> String {
-    format!("git-review:{}:{}", app.cwd, app.git_panel.selected.as_deref().unwrap_or(""))
-}
-
-/// A normal pane surface, so switching tabs gives their keyboard and content back.
-pub fn review(app: &App) -> El {
-    let Some(path) = &app.git_panel.selected else {
-        return col().w_full().h_full().center().fill(rgb(app.pal.bg))
-            .child(button(app, "Choose a file from Git Changes").on_press(|a: &mut App| {
-                if !a.git_panel.open { a.toggle_git_panel(); }
-                a.focus = Focus::Details;
-            }));
-    };
-    let p = app.pal;
-    let s = app.ty.scale();
-    let state = &app.git_panel;
-    let header = row().w_full().h(36.0 * s).px(8.0 * s).gap(8.0 * s).center_y()
-        .child(button(app, "‹ Back").on_press(|a: &mut App| a.close_git_review()))
-        .child(text(path.clone()).font(app.ty.sized(12.0)).color(rgb(p.fg)).truncate().grow(1.0).shrink())
-        .child(button(app, "Refresh").on_press(|a: &mut App| a.load_git_review()));
-    let rows = col().w_full().growth(rune::GrowthSpec::default()).virtual_rows(state.lines.len(), 22.0 * s,
-        |_: &App, i| format!("diff:{i}").into(), |a: &App, i| diff_row(a, &a.git_panel.lines[i]))
-        .virtual_rows_version(state.epoch);
-    let key = review_key(app);
-    let mirror = state.diff_scroll.clone();
-    let mut body = col().key(key).w_full().grow(1.0).shrink().px(8.0 * s)
-        .scroll(ScrollSpec { stick_bottom: false }).scroll_anchor()
-        .on_scroll_offset(move |pos| mirror.set((pos.offset[1], pos.max[1])))
-        .on_wheel(|a: &mut App, e: WheelEvent, tx: &mut Tx| a.git_review_wheel(&e, tx)).child(rows);
-    if let Some(error) = &state.diff_error {
-        body = body.child(text(error.clone()).font(app.ty.sized(12.0)).color(rgb(p.red)).padding(16.0 * s));
-    } else if state.lines.is_empty() {
-        body = body.child(text(if state.diff_pending.is_some() { "Loading diff…" } else { "No textual changes (empty file or unchanged content)." })
-            .font(app.ty.sized(12.0)).color(rgb(p.muted)).padding(16.0 * s));
-    }
-    col().key("git-review-surface").w_full().h_full()
-        .fill(rgb(p.bg)).clip_rounded(0.0).child(header).child(body)
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kind { Context, Add, Remove, Hunk, Meta }
-
-#[derive(Debug)]
-struct Line { kind: Kind, old: Option<usize>, new: Option<usize>, text: String }
-
-/// Unified patch parser. File headers aren't deletion/addition lines; zero-count ranges,
-/// disjoint hunks, EOF notices and binary/rename-only patches retain their real semantics.
-fn parse_patch(patch: &str) -> Vec<Line> {
-    let mut rows = Vec::new();
-    let (mut old, mut new) = (0, 0);
-    let mut in_hunk = false;
-    for raw in patch.lines() {
-        let mut kind = Kind::Meta;
-        let (mut old_no, mut new_no) = (None, None);
-        let mut content = raw;
-        if let Some(header) = raw.strip_prefix("@@ -") {
-            if let Some((before, after)) = header.split_once(" +") {
-                if let (Some(a), Some(b)) = (before.split(',').next().and_then(|n| n.parse::<usize>().ok()),
-                    after.split([',', ' ']).next().and_then(|n| n.parse::<usize>().ok())) {
-                    old = a; new = b; in_hunk = true; kind = Kind::Hunk;
-                }
-            }
-        } else if raw.starts_with("diff --git ") { in_hunk = false; }
-        else if in_hunk {
-            match raw.as_bytes().first() {
-                Some(b'+') => { kind = Kind::Add; new_no = Some(new); new += 1; content = &raw[1..]; }
-                Some(b'-') => { kind = Kind::Remove; old_no = Some(old); old += 1; content = &raw[1..]; }
-                Some(b' ') => { kind = Kind::Context; old_no = Some(old); new_no = Some(new); old += 1; new += 1; content = &raw[1..]; }
-                Some(b'\\') => {},
-                _ => { in_hunk = false; }
-            }
-        }
-        // The path already heads the review; retain meaningful metadata (binary, rename,
-        // modes) but omit redundant transport headers.
-        if kind == Kind::Meta && (raw.starts_with("diff --git ") || raw.starts_with("index ") || raw.starts_with("--- ") || raw.starts_with("+++ ")) { continue; }
-        rows.push(Line { kind, old: old_no, new: new_no, text: content.into() });
-    }
-    rows
-}
-
-fn diff_row(app: &App, line: &Line) -> El {
-    let p = app.pal;
-    let s = app.ty.scale();
-    let (sign, color, wash) = match line.kind {
-        Kind::Add => ("+", p.green, rgb(p.green).alpha(0.08)),
-        Kind::Remove => ("−", p.red, rgb(p.red).alpha(0.08)),
-        Kind::Hunk => ("", p.blue, rgb(p.surface)),
-        Kind::Meta => ("", p.muted, rune::Color::TRANSPARENT),
-        Kind::Context => ("", p.dim, rune::Color::TRANSPARENT),
-    };
-    let number = |n: Option<usize>| text(n.map(|n| n.to_string()).unwrap_or_default())
-        .font(app.ty.sized(11.0)).color(rgb(p.muted)).w(46.0 * s);
-    row().w_full().h(22.0 * s).fill(wash).center_y().clip_rounded(0.0)
-        .child(number(line.old)).child(number(line.new))
-        .child(text(sign).font(app.ty.sized(12.0)).color(rgb(color)).w(18.0 * s))
-        .child(text(line.text.clone()).font(app.ty.sized(12.0)).color(rgb(color)))
-}
-
 /// Deterministic, daemon-free scenes for `git-panel` / `git-review` headless captures.
 pub fn fixture(app: &mut App, review: bool) {
     app.git_panel = State { open: true, ..State::default() };
@@ -649,14 +512,20 @@ pub fn fixture(app: &mut App, review: bool) {
         app.open_tab(TabKind::GitDiff);
         app.focus = Focus::Content;
         app.git_panel.selected = Some("src/main.rs".into());
-        app.git_panel.lines = parse_patch("diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,4 +1,6 @@\n mod app;\n-mod legacy;\n+mod git;\n+mod workspace;\n \n+// Native views, daemon-owned data.\n fn main() {\n");
+        let files = app.git_panel.files.clone();
+        app.git_panel.review.set(files, vec![
+            GitFileDiff { path: "src/main.rs".into(), patch: "diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,4 +1,6 @@\n mod app;\n-mod legacy;\n+mod git;\n+mod workspace;\n \n+// Native views, daemon-owned data.\n fn main() {\n".into() },
+            GitFileDiff { path: "README.md".into(), patch: "@@ -10,5 +10,6 @@\n ## Git\n-The panel lists changed files.\n-Click one to review it.\n+The panel names the next step for the branch.\n+Every changed file is in one diff, stacked or side by side.\n+Click a line to leave a comment for the agent.\n \n ## Build\n".into() },
+            GitFileDiff { path: "src/git.rs".into(), patch: "@@ -0,0 +1,4 @@\n+//! Native Git changes panel.\n+\n+pub const WIDTH: f32 = 340.0;\n+pub fn view() {}\n".into() },
+        ], false);
     }
 }
 
 pub fn long_fixture(app: &mut App) {
     fixture(app, true);
     let patch = format!("@@ -1,10000 +1,10000 @@\n{}", "-let old = false;\n+let current = true;\n".repeat(10_000));
-    app.git_panel.lines = parse_patch(&patch);
+    let files = vec![GitFileChange { path: "src/long.rs".into(), status: GitChangeStatus::Modified, additions: 10_000, deletions: 10_000, staged: false }];
+    app.git_panel.review.set(files, vec![GitFileDiff { path: "src/long.rs".into(), patch }], false);
 }
 
 #[cfg(test)]
@@ -678,27 +547,6 @@ mod tests {
     }
 
     #[test]
-    fn unified_coordinates_headers_eof_and_disjoint_hunks() {
-        let rows = parse_patch("--- a/file\n+++ b/file\n@@ -3,2 +7,2 @@ name\n-old\n+new\n same\n\\ No newline at end of file\n@@ -20,0 +25,1 @@\n+++ literal pluses\n");
-        assert_eq!(rows.len(), 7);
-        assert_eq!((rows[1].kind, rows[1].old, rows[1].new), (Kind::Remove, Some(3), None));
-        assert_eq!((rows[2].old, rows[2].new), (None, Some(7)));
-        assert_eq!((rows[3].old, rows[3].new), (Some(4), Some(8)));
-        assert_eq!(rows[4].kind, Kind::Meta);
-        assert_eq!((rows[6].new, rows[6].text.as_str()), (Some(25), "++ literal pluses"));
-    }
-
-    #[test]
-    fn empty_binary_and_rename_only_are_not_fake_hunks() {
-        assert!(parse_patch("").is_empty());
-        let binary = parse_patch("diff --git a/a b/a\nindex 123..456 100644\nBinary files a/a and b/a differ\n");
-        assert_eq!(binary.len(), 1);
-        assert_eq!(binary[0].kind, Kind::Meta);
-        let rename = parse_patch("similarity index 100%\nrename from old\nrename to new\n");
-        assert!(rename.iter().all(|l| l.old.is_none() && l.new.is_none()));
-    }
-
-    #[test]
     fn pending_identity_requires_both_request_and_workspace() {
         let pending = Pending { id: 42, cwd: "/first".into(), kind: Operation::Diff("file".into()) };
         assert!(pending.matches(42, "/first"));
@@ -707,17 +555,19 @@ mod tests {
     }
 
     #[test]
-    fn switching_files_rejects_old_diff_and_empty_reply_clears_content() {
+    fn a_diff_for_another_scope_is_dropped_and_an_empty_one_clears_the_view() {
         let mut app = App::new();
         fixture(&mut app, true);
-        app.git_panel.selected = Some("README.md".into());
-        app.git_panel.diff_pending = Some(Pending { id: 9, cwd: app.cwd.clone(), kind: Operation::Diff("README.md".into()) });
-        app.apply_git_panel(GitServerMessage::FileDiffs { diffs: vec![neoism_protocol::git::GitFileDiff { path: "src/main.rs".into(), patch: "stale".into() }] }, 8);
-        assert!(app.git_panel.diff_pending.is_some());
-        assert!(!app.git_panel.lines.is_empty());
-        app.apply_git_panel(GitServerMessage::FileDiffs { diffs: vec![neoism_protocol::git::GitFileDiff { path: "README.md".into(), patch: String::new() }] }, 9);
+        let diff = |path: &str, patch: &str| GitFileDiff { path: path.into(), patch: patch.into() };
+        // Asked for the branch; an uncommitted answer that arrives late changes nothing.
+        app.git_panel.review.scope = Scope::Branch;
+        app.git_panel.diff_pending = Some(Pending { id: 8, cwd: app.cwd.clone(), kind: Operation::Diff("uncommitted".into()) });
+        app.apply_git_panel(GitServerMessage::FileDiffs { diffs: vec![diff("src/main.rs", "@@ -1 +1 @@\n-a\n+b\n")] }, 8);
         assert!(app.git_panel.diff_pending.is_none());
-        assert!(app.git_panel.lines.is_empty());
+        assert_eq!(app.git_panel.review.files.len(), 3, "the stale answer was not applied");
+        app.git_panel.diff_pending = Some(Pending { id: 9, cwd: app.cwd.clone(), kind: Operation::Diff("branch:main".into()) });
+        app.apply_git_panel(GitServerMessage::RangeDiff { base: "main".into(), files: vec![], diffs: vec![], truncated: false }, 9);
+        assert!(app.git_panel.review.files.is_empty() && app.git_panel.review.rows.is_empty());
     }
 
     #[test]

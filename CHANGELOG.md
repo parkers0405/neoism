@@ -2,6 +2,15 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.164] - 2026-11-22
+
+### A simpler focused Agent view
+
+- Gives each turn two states in the focused Agent view: folded to its work row and the Agent's writing, or open as the full trace. The arrow on the work row shows which, and pressing the row switches.
+- Shows a live "Working · N steps" count on a running turn in place of the per-call lines.
+
+Stable platform bundles and the daemon image use one immutable tagged source. Local and platform checks, publication, and independent download verification are reported separately.
+
 ## [0.7.163] - 2026-11-21
 
 ### Focused Agent view, send to top, and a refreshed chat font and rail

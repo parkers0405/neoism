@@ -77,7 +77,7 @@ pub(super) fn view(app: &App, composer: [f32; 4]) -> El {
     let goal = app.active_session().and_then(|id| app.sessions.get(&id)).and_then(|session| session.goal.as_ref());
     let mut content = col().w((composer[2] - 2.0 * s).max(0.0)).px(14.0 * s).py(12.0 * s).gap(14.0 * s);
     if let Some(error) = &picker.goal_error {
-        content = content.child(text(error).font(app.ty.body()).color(rgb(p.red)).w_full().wrap());
+        content = content.child(text(error).font(app.ty.chat_body()).color(rgb(p.red)).w_full().wrap());
     }
     if picker.loading && goal.is_none() && picker.goal_error.is_none() {
         let width = (composer[2] - 30.0 * s).max(0.0);
@@ -102,7 +102,7 @@ pub(super) fn view(app: &App, composer: [f32; 4]) -> El {
     } else if picker.goal_error.is_none() {
         let message = if app.active_session().is_none() { "Open a conversation to view its goal." }
             else { "No goal set. Use /goal <description> to set one." };
-        content = content.child(text(message).font(app.ty.body()).color(rgb(p.muted)).w_full().wrap());
+        content = content.child(text(message).font(app.ty.chat_body()).color(rgb(p.muted)).w_full().wrap());
     }
     super::panel::view(app, composer, "goals", "Current goal".into(), "Enter refresh · Esc close", content)
 }

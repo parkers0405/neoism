@@ -269,7 +269,7 @@ impl App {
 }
 
 fn button(app: &App, label: &str) -> El {
-    el().h(26.0 * app.ty.scale()).px(8.0 * app.ty.scale()).center().radius(4.0)
+    el().h(26.0 * app.ty.scale()).px(8.0 * app.ty.scale()).center().radius(7.0 * app.ty.scale())
         .hover(rgb(app.pal.hover)).child(text(label.to_owned()).font(app.ty.sized(12.0)).color(rgb(app.pal.dim)))
 }
 
@@ -304,7 +304,7 @@ pub fn view(app: &App) -> El {
             .font(app.ty.sized(12.0)).color(rgb(p.muted)).padding(14.0 * s));
     }
     let input = rune::text_input(&state.message, app.ty.sized(12.0)).key("git-commit-message")
-        .w_full().h(76.0 * s).padding(8.0 * s).radius(6.0 * s).fill(rgb(p.surface))
+        .w_full().h(76.0 * s).padding(10.0 * s).radius(10.0 * s).fill(rgb(p.surface)).border(s, rgb(p.border))
         .color(rgb(p.fg)).placeholder("Type a commit message…", rgb(p.muted))
         .on_edit(|a: &mut App| { a.focus = Focus::Details; &mut a.git_panel.message })
         .on_input_key(|a: &mut App, e: &KeyEvent, tx: &mut Tx| {
@@ -313,8 +313,11 @@ pub fn view(app: &App) -> El {
             false
         });
     let enabled = state.pending.is_none() && state.totals.2 > 0 && !state.message.text.trim().is_empty();
-    let mut commit = button(app, if state.pending.as_ref().is_some_and(|p| matches!(p.kind, Operation::Commit(_))) { "Committing…" } else { "Commit" })
-        .fill(rgb(if enabled { p.hover } else { p.surface }));
+    let label = if state.pending.as_ref().is_some_and(|p| matches!(p.kind, Operation::Commit(_))) { "Committing…" } else { "Commit" };
+    // The one filled button on the panel, as the main action is in Settings and the modals.
+    let mut commit = el().h(30.0 * s).px(14.0 * s).center().radius(8.0 * s)
+        .fill(rgb(if enabled { p.fg } else { p.surface })).border(s, rgb(if enabled { p.fg } else { p.border }))
+        .child(text(label).font(app.ty.sans(12.5, 550.0)).color(rgb(if enabled { p.bg } else { p.muted })));
     if enabled { commit = commit.on_press(|a: &mut App| a.git_commit()); }
     let mut footer = col().w_full().padding(14.0 * s).gap(8.0 * s);
     if let Some(error) = &state.error {
@@ -324,7 +327,7 @@ pub fn view(app: &App) -> El {
         .child(text(state.branch.clone().unwrap_or_else(|| "Detached / no repository".into())).font(app.ty.sized(11.0)).color(rgb(p.dim)).truncate().grow(1.0).shrink())
         .child(commit));
     col().key("git-panel").w(WIDTH * s).h_full().padding(6.0 * s)
-        .child(col().w_full().h_full().fill(rgb(panel_bg(p))).border(2.25 * s, rgb(p.border)).radius(14.0 * s).clip_rounded(14.0 * s)
+        .child(col().w_full().h_full().fill(rgb(panel_bg(p))).border(s, rgb(p.border)).radius(14.0 * s).clip_rounded(14.0 * s)
             .child(header).child(stats).child(list).child(footer))
 }
 
@@ -445,11 +448,11 @@ fn diff_row(app: &App, line: &Line) -> El {
         Kind::Context => ("", p.dim, rune::Color::TRANSPARENT),
     };
     let number = |n: Option<usize>| text(n.map(|n| n.to_string()).unwrap_or_default())
-        .font(app.ty.sized(11.0)).color(rgb(p.muted)).w(46.0 * s);
+        .font(app.ty.mono_sized(11.0)).color(rgb(p.muted)).w(46.0 * s);
     row().w_full().h(22.0 * s).fill(wash).center_y().clip_rounded(0.0)
         .child(number(line.old)).child(number(line.new))
-        .child(text(sign).font(app.ty.sized(12.0)).color(rgb(color)).w(18.0 * s))
-        .child(text(line.text.clone()).font(app.ty.sized(12.0)).color(rgb(color)))
+        .child(text(sign).font(app.ty.mono_sized(12.0)).color(rgb(color)).w(18.0 * s))
+        .child(text(line.text.clone()).font(app.ty.mono_sized(12.0)).color(rgb(color)))
 }
 
 /// Deterministic, daemon-free scenes for `git-panel` / `git-review` headless captures.

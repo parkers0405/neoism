@@ -259,7 +259,7 @@ mod compact_keyboard_tests {
         let mut rt = Runtime::new(app, |a: &App, cx: &mut Cx<App>| {
             a.cursor.caret_line.set(cx.caret("server-test"));
             col().key("server-test").w_full().h_full()
-                .child(rune::text_input(&a.tabs[a.active].draft, a.ty.sized(14.0)).key("behind")
+                .child(rune::text_input(&a.tabs[a.active].draft, a.ty.mono_sized(14.0)).key("behind")
                     .on_edit(|a: &mut App| &mut a.tabs[a.active].draft))
                 .child(el().key("open-servers").size(120.0, 32.0).on_press(|a: &mut App| {
                     a.open_picker(Mode::Servers);
@@ -315,7 +315,8 @@ mod compact_keyboard_tests {
         rt.update(|a, _| a.modal = Some(crate::ui::modal::Modal::notice("Confirm", "Test overlay")));
         settle(&mut rt);
         let r = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("modal") && !e.exiting).unwrap().rect;
-        let (x, y) = (r[0] + r[2] / 2.0, r[1] + r[3] - 34.0);
+        // The Close button sits at the card's bottom right.
+        let (x, y) = (r[0] + r[2] - 58.0, r[1] + r[3] - 34.0);
         rt.pointer_move(x, y); rt.pointer_down(x, y); rt.pointer_up(x, y); settle(&mut rt);
         assert!(rt.state.modal.is_none() && rt.state.picker.is_some(), "the picker must not trap clicks meant for a dialog above it");
         press(&mut rt, Key::Escape);
@@ -445,7 +446,7 @@ pub(crate) fn preview(app: &App, theme: &'static Palette, hint: &'static str) ->
     let line = |spans: &[(&str, u32)]| {
         let mut r = row().h(21.5 * s).center_y();
         for (part, color) in spans {
-            r = r.child(text(part.to_string()).font(app.ty.sized(13.0)).color(rgb(*color)));
+            r = r.child(text(part.to_string()).font(app.ty.mono_sized(13.0)).color(rgb(*color)));
         }
         r
     };

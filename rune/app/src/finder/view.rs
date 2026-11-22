@@ -193,8 +193,8 @@ fn preview(app: &App, finder: &Finder) -> El {
         let current = number == target;
         column = column.child(row().w_full().h(PREVIEW_LINE_H * s).px(PREVIEW_PAD * s).gap(12.0 * s).center_y()
             .fill(if current { rgb(p.hover) } else { Color::TRANSPARENT })
-            .child(text(format!("{number:>4}")).font(app.ty.sized(ROW_FONT)).color(rgb(if current { p.fg } else { p.muted })))
-            .child(text(line.replace('\t', "    ")).font(app.ty.sized(ROW_FONT)).color(rgb(p.fg)).truncate().shrink()));
+            .child(text(format!("{number:>4}")).font(app.ty.mono_sized(ROW_FONT)).color(rgb(if current { p.fg } else { p.muted })))
+            .child(text(line.replace('\t', "    ")).font(app.ty.mono_sized(ROW_FONT)).color(rgb(p.fg)).truncate().shrink()));
     }
     col().key("finder-preview").clip_rounded(0.0).child(column)
 }

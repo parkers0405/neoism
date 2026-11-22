@@ -220,13 +220,13 @@ pub fn view(app: &App) -> El {
         // Host | Join, and the Fast tunnel switch.
         let tab = |label: &'static str, on: bool, host: bool| {
             row().key(format!("form-tab:{label}")).h(28.0 * s).px(14.0 * s).center().radius(6.0 * s)
-                .fill(if on { rgb(p.accent).alpha(0.18) } else { rgb(p.surface) })
+                .fill(if on { rgb(p.hover) } else { Color::TRANSPARENT })
                 .child(text(label).font(if on { app.ty.sized_bold(ACTION) } else { app.ty.sized(ACTION) }).color(rgb(if on { p.fg } else { p.dim })))
                 .on_press(move |a: &mut App| {
                     if let Some(form) = &mut a.form { let fast = matches!(&form.kind, Kind::Server(d) if d.fast); form.remode(host, fast); form.set_focus(Focus::Tabs); }
                 })
         };
-        let tabs = row().gap(6.0 * s).padding(2.0 * s).radius(8.0 * s).border(if focus == Focus::Tabs { s } else { 0.0 }, rgb(p.accent))
+        let tabs = row().gap(2.0 * s).padding(3.0 * s).radius(9.0 * s).fill(rgb(p.surface)).border(s, rgb(if focus == Focus::Tabs { p.accent } else { p.border }))
             .child(tab("Host", draft.host, true)).child(tab("Join", !draft.host, false));
         let on = draft.fast;
         let knob = 16.0 * s;
@@ -255,7 +255,7 @@ pub fn view(app: &App) -> El {
             .on_submit(|a: &mut App, tx: &mut Tx| a.submit_form(tx));
         body = body.child(col().w_full().gap(5.0 * s)
             .child(text(f.label).font(app.ty.sized(BODY)).color(rgb(p.dim)))
-            .child(row().w_full().h(FIELD_H * s).px(10.0 * s).center_y().radius(6.0 * s).fill(rgb(p.surface))
+            .child(row().w_full().h(FIELD_H * s).px(12.0 * s).center_y().radius(8.0 * s).fill(rgb(p.surface))
                 .border(s, rgb(if focused { p.accent } else { p.border }))
                 .on_press(move |a: &mut App| { if let Some(form) = &mut a.form { form.set_focus(Focus::Field(index)); } })
                 .child(input)));
@@ -263,15 +263,9 @@ pub fn view(app: &App) -> El {
     if let Some(error) = &form.error {
         body = body.child(text(error.clone()).font(app.ty.sized(BODY).lh(LINE_H * s)).color(rgb(p.red)).wrap().w_full());
     }
-    let action = |label: &str, key: &'static str, on: bool, press: fn(&mut App, &mut Tx)| {
-        row().w_full().h(ACTION_H * s).px(10.0 * s).center_y().justify_between().radius(6.0 * s).fill(wash(app, on))
-            .child(text(label.to_owned()).font(app.ty.sized(ACTION)).color(rgb(p.fg)))
-            .child(text(key).font(app.ty.sized(BODY)).color(rgb(p.muted)))
-            .on_press_tx(press)
-    };
-    let actions = col().w_full().mt(14.0 * s).border_sides([1.0, 0.0, 0.0, 0.0], rgb(p.border)).pt(8.0 * s)
-        .child(action(form.submit, "Enter", focus == Focus::Submit, |a, tx| a.submit_form(tx)))
-        .child(action("Cancel", "Esc", focus == Focus::Cancel, |a, _| a.form = None));
+    let actions = row().w_full().mt(18.0 * s).gap(8.0 * s).justify_end()
+        .child(crate::ui::modal::button(app, "Cancel", "Esc", false, focus == Focus::Cancel).on_press(|a: &mut App| a.form = None))
+        .child(crate::ui::modal::button(app, form.submit, "Enter", true, focus == Focus::Submit).on_press_tx(|a: &mut App, tx: &mut Tx| a.submit_form(tx)));
     let card = col().key("form-modal").w((WIDTH * s).min(app.window[0] - 16.0)).padding(PAD * s).radius(RADIUS * s)
         .fill(rgb(p.bg)).border(1.0, rgb(p.border))
         .on_press(|_: &mut App| {})

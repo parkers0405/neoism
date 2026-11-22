@@ -288,7 +288,7 @@ fn mock_window(app: &App, t: &'static crate::ui::theme::Palette, wallpaper: Opti
     let bar = |w: f32, h: f32, color: Color| el().w(w * s).h(h * s).radius(h * s / 2.0).fill(color);
     let code = |spans: &[(&str, u32)]| {
         let mut line = row().h(18.0 * s).center_y();
-        for (part, color) in spans { line = line.child(text(part.to_string()).font(app.ty.sized(11.5)).color(rgb(*color))); }
+        for (part, color) in spans { line = line.child(text(part.to_string()).font(app.ty.mono_sized(11.5)).color(rgb(*color))); }
         line
     };
     let chat = |project: f32, title: f32, active: bool| col().w_full().px(9.0 * s).py(8.0 * s).gap(6.0 * s).radius(7.0 * s)
@@ -557,7 +557,7 @@ fn keybind_rows(app: &App, settings: &Settings, s: f32) -> El {
         let mut words = col().grow(1.0).shrink().min_w(0.0).gap(3.0 * s)
             .child(text(def.label).font(app.ty.sans(13.5, 500.0).lh(19.0 * s)).color(rgb(p.fg)));
         if !def.action.is_empty() {
-            words = words.child(text(def.action).font(app.ty.sized(11.5).lh(16.0 * s)).color(rgb(p.muted)));
+            words = words.child(text(def.action).font(app.ty.mono_sized(11.5).lh(16.0 * s)).color(rgb(p.muted)));
         }
         if settings.rebinding == Some(index) && let Some(error) = &settings.binding_error {
             words = words.child(text(error.clone()).font(app.ty.chat_sized(12.0)).color(rgb(p.red)));

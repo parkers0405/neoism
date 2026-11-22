@@ -194,6 +194,43 @@ fn option_value(text: &str, kind: ConfigValueKind) -> Value {
     parse_value(text, kind).unwrap_or_else(|| Value::String(text.to_owned()))
 }
 
+/// The focused agent view is the app's own setting: no daemon schema lists it.
+fn with_focused_view(mut descriptors: Vec<ConfigDescriptor>) -> Vec<ConfigDescriptor> {
+    if !descriptors.iter().any(|d| d.path == "appearance.agent-turn-at-top") {
+        descriptors.push(ConfigDescriptor {
+            path: "appearance.agent-turn-at-top".into(),
+            label: "Send to top".into(),
+            description: "Slide a sent message to the top of the view and let the reply fill in under it, instead of following the reply from the bottom.".into(),
+            value_kind: ConfigValueKind::Boolean, default: json!(false),
+            static_suggestions: Vec::new(), runtime_suggestions: Vec::new(), options: Vec::new(),
+            provider: None, constraints: ConfigConstraints::default(), accepted_kinds: Vec::new(),
+            extensible: false, category: ConfigCategory::Agent, control: ConfigControl::Toggle,
+            settings_visible: true,
+        });
+    }
+    if !descriptors.iter().any(|d| d.path == "appearance.agent-focused-view") {
+        descriptors.push(ConfigDescriptor {
+            path: "appearance.agent-focused-view".into(),
+            label: "Focused agent view".into(),
+            description: "Show each turn as your message, one work row and the reply. Tool calls, thinking and the agent's notes fold under the work row; press it to open them. Off shows every call as it happens.".into(),
+            value_kind: ConfigValueKind::Boolean, default: json!(true),
+            static_suggestions: Vec::new(), runtime_suggestions: Vec::new(), options: Vec::new(),
+            provider: None, constraints: ConfigConstraints::default(), accepted_kinds: Vec::new(),
+            extensible: false, category: ConfigCategory::Agent, control: ConfigControl::Toggle,
+            settings_visible: true,
+        });
+    }
+    descriptors
+}
+
+impl App {
+    /// Fold or unfold every conversation's turns: their row lists are computed again.
+    pub(crate) fn set_focused_view(&mut self, focused: bool) {
+        self.focused_view = focused;
+        for session in self.sessions.values_mut() { session.structure += 1; session.forget_rows(); }
+    }
+}
+
 /// Installed daemons may predate the liquid-glass cursor.
 fn with_liquid_glass_cursor_fallback(mut descriptors: Vec<ConfigDescriptor>) -> Vec<ConfigDescriptor> {
     if !descriptors.iter().any(|d| d.path == "appearance.effects.liquid-glass-cursor") {
@@ -500,6 +537,9 @@ impl App {
             if self.server.remote() {
                 value["appearance"]["effects"]["liquid-glass-cursor"] = json!(self.cursor.liquid_glass);
             }
+            self.turn_at_top = crate::config::turn_at_top(&value);
+            let focused = crate::config::focused_view(&value);
+            if self.focused_view != focused { self.set_focused_view(focused); }
             let changed = self.wordmark.fire_enabled != crate::config::wordmark_fire(&value)
                 || self.cursor.liquid_glass != crate::config::liquid_glass_cursor(&value)
                 || self.liquid_glass_selection != crate::config::liquid_glass_selection(&value)
@@ -517,7 +557,7 @@ impl App {
         }
         let Some(settings) = &mut self.settings else { return true };
         if let Some(schema) = message.get("ConfigSchema") {
-            if let Ok(descriptors) = serde_json::from_value(schema["descriptors"].clone()) { settings.set_descriptors(with_markdown_spellcheck(with_liquid_glass_selection_fallback(with_liquid_glass_cursor_fallback(with_wordmark_fire_fallback(descriptors))))); }
+            if let Ok(descriptors) = serde_json::from_value(schema["descriptors"].clone()) { settings.set_descriptors(with_focused_view(with_markdown_spellcheck(with_liquid_glass_selection_fallback(with_liquid_glass_cursor_fallback(with_wordmark_fire_fallback(descriptors)))))); }
         }
         true
     }

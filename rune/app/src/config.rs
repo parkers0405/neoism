@@ -13,6 +13,8 @@ pub struct Config {
     pub font_weight: f32,
     pub font_families: (String, String),
     pub wordmark_fire: bool,
+    pub focused_view: bool,
+    pub turn_at_top: bool,
     pub liquid_glass_cursor: bool,
     pub liquid_glass_selection: bool,
     pub markdown_spellcheck: bool,
@@ -50,7 +52,17 @@ pub fn load() -> Config {
     let model = value["agent"]["model"].as_str().map(str::to_owned);
     let variant = value["agent"]["variant"].as_str().map(str::to_owned);
     let display_name = value["presence"]["display-name"].as_str().map(str::to_owned);
-    Config { display_name, theme, font_size, font_weight, font_families: crate::ui::fonts::configured(&value), wordmark_fire: wordmark_fire(&value), liquid_glass_cursor: liquid_glass_cursor(&value), liquid_glass_selection: liquid_glass_selection(&value), markdown_spellcheck: markdown_spellcheck(&value), model, variant }
+    Config { display_name, theme, font_size, font_weight, font_families: crate::ui::fonts::configured(&value), wordmark_fire: wordmark_fire(&value), focused_view: focused_view(&value), turn_at_top: turn_at_top(&value), liquid_glass_cursor: liquid_glass_cursor(&value), liquid_glass_selection: liquid_glass_selection(&value), markdown_spellcheck: markdown_spellcheck(&value), model, variant }
+}
+
+/// A sent message slides to the top of the view only when asked to (`agent/turn.rs`).
+pub fn turn_at_top(value: &Value) -> bool {
+    value["appearance"]["agent-turn-at-top"].as_bool().unwrap_or(false)
+}
+
+/// Turns fold to a work row and the reply unless this is turned off (`agent/focus.rs`).
+pub fn focused_view(value: &Value) -> bool {
+    value["appearance"]["agent-focused-view"].as_bool().unwrap_or(true)
 }
 
 /// Flames default on; an explicit grouped false disables them.

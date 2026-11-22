@@ -5,8 +5,18 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-pub const CHAT: &str = "Geist";
+/// The platform's own interface font, as t3code's chat defaults to (`-apple-system`,
+/// `Segoe UI`; `appearanceFonts.ts`). Where no one name means it, the bundled Geist.
+pub const CHAT: &str = if cfg!(target_os = "macos") { "System Font" } else if cfg!(windows) { "Segoe UI" } else { BUNDLED };
+/// The bundled sans every chat family falls back to (t3code bundles Inter for the same).
+const BUNDLED: &str = "Geist";
 pub const MONO: &str = "Geist Mono";
+
+/// The sans slot the app launches with: `chat_stack(CHAT)`.
+pub const CHAT_SLOT: &str = if cfg!(target_os = "macos") { "System Font, Geist" } else if cfg!(windows) { "Segoe UI, Geist" } else { BUNDLED };
+
+/// The sans slot for the chat family `name`.
+pub fn chat_stack(name: &str) -> String { fallback(name, BUNDLED) }
 
 // Rune's named families require static strings. Intern only new choices, never each frame.
 pub fn code_family(name: &str) -> Family {
@@ -31,7 +41,7 @@ impl crate::app::App {
     pub(crate) fn sync_font_families(&mut self, tx: &mut rune::Tx) -> bool {
         if !self.fonts_dirty { return false; }
         self.fonts_dirty = false;
-        tx.set_font_families(fallback(&self.font_families.0, CHAT), fallback(&self.font_families.1, MONO));
+        tx.set_font_families(chat_stack(&self.font_families.0), fallback(&self.font_families.1, MONO));
         true
     }
 

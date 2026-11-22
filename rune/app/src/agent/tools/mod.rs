@@ -13,7 +13,9 @@ mod shell;
 mod text;
 mod todos;
 
-pub use group::{group_at, group_end, visible};
+pub use card::tool_symbol;
+pub use diff::is_edit_tool;
+pub use group::{group_at, group_end, is_todos, visible};
 pub use icons::Icons;
 
 /// Shared with the activity line so its context label uses exactly the grouping vocabulary.
@@ -209,6 +211,11 @@ pub fn row(app: &App, message: &HistoryMessage) -> El {
                 if (a.tools.text_width - w).abs() > 0.5 { a.tools.text_width = w; a.tools.epoch += 1; } else { tx.live_only(); }
             })
             .child(body.absolute(-cx.pt(TEXT_PAD_LEFT), 0.0)))
+}
+
+/// A call named in a line: its title as its row reads, or its tool's name.
+pub fn step_label(message: &HistoryMessage) -> String {
+    if message.title.trim().is_empty() { message.tool.clone() } else { compact_title(&message.title).replace("  ", " ") }
 }
 
 /// `Name(args)` reads `Name  args`; control characters become spaces.

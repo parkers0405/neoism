@@ -28,6 +28,8 @@ mod typography;
 pub mod slash;
 mod user;
 pub mod timeline;
+mod turn;
+mod focus;
 pub mod tools;
 
 pub use activity::Activity;
@@ -134,6 +136,10 @@ pub struct Session {
     pub row_tops: std::collections::HashMap<String, (f32, f32)>,
     pub anchor: Option<anchor::Anchor>,
     pub placed: Option<anchor::Placed>,
+    /// Turns opened to their full trace in the focused view, by their first message (`focus.rs`).
+    pub open_turns: std::collections::HashSet<String>,
+    /// The turn the last sent message opened at the top of the view (`turn.rs`).
+    pub turn: Option<turn::Turn>,
     /// Questions whose rows are in view: only their `question_tops` are current.
     pub visible_questions: std::collections::HashSet<String>,
     /// Each question's row offset in the transcript, from its last layout (the question rail).
@@ -733,6 +739,8 @@ impl App {
         if !streaming { session.activity_reveal = None; }
         if session.streaming == streaming { return; }
         session.streaming = streaming;
+        // A turn's rows differ while it runs (`focus.rs`): the list is computed again.
+        session.structure += 1;
         if streaming {
             session.turn_started.get_or_insert_with(std::time::Instant::now);
             if session.live_from.is_none() {
@@ -764,6 +772,7 @@ impl App {
 
     pub(crate) fn submit_prompt(&mut self, session_id: &str, text: String) {
         let (attachments, echo) = self.take_attachments(session_id);
+        let turn_at_top = self.turn_at_top;
         let message_id = format!("msg_rune_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
         let session = self.sessions.entry(session_id.into()).or_default();
         session.clear_history_redo();
@@ -793,6 +802,7 @@ impl App {
         if !session.streaming && session.queued_prompts == 0 {
             session.messages.push(echo.clone());
             session.activity_reveal = Some((message_id.clone(), None));
+            if turn_at_top { session.open_turn(&message_id); }
         }
         session.pending_prompts.insert(message_id.clone(), echo);
         self.send_agent(AgentClientMessage::SubmitPrompt {
@@ -1697,7 +1707,7 @@ mod cache_tests {
             session_id: "s".into(), message_id: "a".into(), parent_message_id: None, kind: neoism_protocol::agent::ContentKind::Text, text: text.into(),
         });
         delta(&mut app, "The scheduler presents on the display clock. ");
-        let key = |app: &App| { let s = &app.sessions["s"]; (s.structure, s.messages.len(), usize::MAX, false) };
+        let key = |app: &App| { let s = &app.sessions["s"]; (s.structure, s.messages.len(), usize::MAX, false, false) };
         let rows = app.sessions["s"].row_items(key(&app));
         assert_eq!(*rows, vec![timeline::RowItem::Message(0)]);
         // More text for the same reply: same key, the very same list.
@@ -1705,7 +1715,7 @@ mod cache_tests {
         assert!(std::rc::Rc::ptr_eq(&rows, &app.sessions["s"].row_items(key(&app))));
         // A tool call arrives: a new key and a new list.
         app.apply_agent(AgentServerMessage::MessageUpdated { session_id: "s".into(), message: tool("t", "running", ""), parent_message_id: None });
-        let next = app.sessions["s"].row_items((key(&app).0, 2, 0, false));
+        let next = app.sessions["s"].row_items((key(&app).0, 2, 0, false, false));
         assert_eq!(*next, vec![timeline::RowItem::Message(0), timeline::RowItem::Message(1)]);
         // Its status changing may fold or unfold rows: the key moves again.
         let structure = app.sessions["s"].structure;

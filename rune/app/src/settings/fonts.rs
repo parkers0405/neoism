@@ -12,9 +12,11 @@ pub(super) fn descriptors(mut descriptors: Vec<ConfigDescriptor>) -> Vec<ConfigD
     chat.label = "Chat font family".into();
     chat.description = "Font for agent messages, reasoning and the composer. Code keeps the separate monospace font.".into();
     chat.default = json!(crate::ui::fonts::CHAT);
-    chat.static_suggestions.extend(["Geist", "Arial", "Helvetica Neue"].map(str::to_owned));
+    chat.static_suggestions.extend([crate::ui::fonts::CHAT, "Geist", "Arial", "Helvetica Neue"].map(str::to_owned));
     if let Some(existing) = descriptors.iter_mut().find(|d| d.path == chat.path) {
         existing.static_suggestions.extend(chat.static_suggestions);
+        // An older daemon still names the bundled face as the default.
+        existing.default = chat.default;
         existing.label = chat.label;
         existing.description = chat.description;
     } else {
@@ -63,6 +65,6 @@ mod tests {
             app.apply_config_reply(0, &json!({"Config": {"value": {}}}));
             app.sync_font_families(tx);
         });
-        assert_eq!(rt.font_families(), (crate::ui::fonts::CHAT, crate::ui::fonts::MONO));
+        assert_eq!(rt.font_families(), (crate::ui::fonts::chat_stack(crate::ui::fonts::CHAT).as_str(), crate::ui::fonts::MONO));
     }
 }

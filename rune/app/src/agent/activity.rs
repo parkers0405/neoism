@@ -2,7 +2,8 @@
 //! "Crafting . . . · 4.2s model". The word is Press Start 2P; each letter scrambles through
 //! punctuation until it locks in turn, then rides a travelling wave, pulsing between the state's
 //! accent and the text colour over two depth copies; three dots bob like a swell; an italic
-//! timer follows. Every glyph is a live binding, so the animation never re-runs a view.
+//! timer follows, and in the focused view the step the turn is on (`focus.rs`).
+//! Every glyph is a live binding, so the animation never re-runs a view.
 
 use crate::app::App;
 use crate::ui::fire;
@@ -86,6 +87,8 @@ pub struct Activity {
     glyphs: Vec<Glyph>,
     dots: Vec<Dot>,
     time: LiveText,
+    /// The step the turn is on, named after the timer (the focused view; `focus::current_step`).
+    pub step: std::cell::RefCell<Option<String>>,
     opacity: Live<f32>,
     changed: Instant,
     turn: Instant,
@@ -119,7 +122,7 @@ impl Activity {
             flames: Pixels::new(), fire_frame: Cell::new(None),
         }).collect();
         let dots = (0..3).map(|_| Dot { offset: Live::new([0.0, 0.0]), color: Live::new(Color::WHITE) }).collect();
-        Activity { session: session.to_owned(), state, background: 0, queued: 0, glyphs, dots, time: LiveText::new(""), opacity: Live::new(1.0), changed: Instant::now(), turn }
+        Activity { session: session.to_owned(), state, background: 0, queued: 0, glyphs, dots, time: LiveText::new(""), step: Default::default(), opacity: Live::new(1.0), changed: Instant::now(), turn }
     }
 
     /// Advance every glyph, dot and the timer to `now` (seconds on the frame clock).
@@ -172,9 +175,10 @@ impl Activity {
             dot.color.set(trailing.alpha(0.40 + (swell * 0.5 + 0.5) * 0.45));
         }
         let elapsed = format_elapsed(self.turn.elapsed().as_secs_f32());
-        self.time.set(match self.state.detail() {
-            Some(detail) => format!("\u{b7} {elapsed} model \u{b7} {detail}"),
-            None => format!("\u{b7} {elapsed} model"),
+        self.time.set(match (self.step.borrow().as_deref(), self.state.detail()) {
+            (Some(_), _) => format!("\u{b7} {elapsed}"),
+            (None, Some(detail)) => format!("\u{b7} {elapsed} model \u{b7} {detail}"),
+            (None, None) => format!("\u{b7} {elapsed} model"),
         });
     }
 
@@ -212,11 +216,16 @@ impl Activity {
                 .child(ink(1.5 * s, rgb(p.dim)))
                 .child(text(".").font(dot_font).live_text_color(&dot.color)));
         }
-        let time = text("\u{b7} 00.0s model \u{b7} subagents").font(app.ty.sized(13.0).italic()).color(rgb(p.muted))
+        // A live text keeps the room its authored text measures: the step, of any length, is
+        // an element of its own after a timer that needs less.
+        let step = self.step.borrow().clone();
+        let time = text(if step.is_some() { "\u{b7} 00m 00s" } else { "\u{b7} 00.0s model \u{b7} subagents" }).font(app.ty.sized(13.0).italic()).color(rgb(p.muted))
             .live_text(&self.time).ml(8.0 * s);
+        let step = step.map(|step| text(format!("\u{b7} {step}")).key("activity-step").font(app.ty.sans(13.0, 400.0)).color(rgb(p.muted))
+            .ml(6.0 * s).grow(1.0).shrink().truncate());
         // Padding, not margin: a virtual row drops its top margin, which slid this line (and its
         // dark glyph shadows) up over the reply's last line.
-        let line = row().w_full().center_y().child(letters).child(dots).child(time);
+        let line = row().w_full().center_y().child(letters).child(dots).child(time).children(step);
         let queued = (self.queued > 0).then(|| {
             let label = if self.queued == 1 { "Queued".into() } else { format!("Queued x{}", self.queued) };
             let branch = if self.background > 0 { "\u{251c}\u{2500}" } else { "\u{2570}\u{2500}" };
@@ -352,7 +361,12 @@ impl App {
             opacity = visible.map_or(0.0, |at| (at.elapsed().as_secs_f32() / 0.06).clamp(0.0, 1.0));
             if opacity >= 1.0 && self.activity.is_some() { session.activity_reveal = None; }
         }
+        let mut step_changed = false;
         if let Some(activity) = &self.activity {
+            // The focused view has no row per call: the line says which one the turn is on.
+            let step = self.sessions.get(id).filter(|_| self.focused_view && matches!(activity.state, State::Working | State::Generating))
+                .and_then(|s| super::focus::current_step(&s.messages[s.live_from.unwrap_or(0).min(s.messages.len())..]));
+            if *activity.step.borrow() != step { *activity.step.borrow_mut() = step; step_changed = true; }
             activity.opacity.set(opacity);
             activity.tick(self.pal, self.ty.scale(), self.wordmark.fire_enabled && std::env::var("NEOISM_REDUCED_MOTION").as_deref() != Ok("1"));
         }
@@ -360,7 +374,7 @@ impl App {
         let pinned = self.activity.is_some() && session.as_deref().is_some_and(|id| self.activity_follows_end(id));
         let flipped = pinned != self.activity_pinned;
         self.activity_pinned = pinned;
-        (self.activity.is_some(), structure || flipped)
+        (self.activity.is_some(), structure || flipped || step_changed)
     }
 }
 

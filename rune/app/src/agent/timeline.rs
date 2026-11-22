@@ -47,7 +47,7 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
         || session.is_some_and(|s| s.activity_reveal.is_some());
     // A sub-agent's conversation is read, not written to: no input bar under it.
     let child = app.families.is_child(session_id);
-    let rows_key: RowsKey = (session.map_or(0, |s| s.structure), messages.len(), live_from, activity);
+    let rows_key: RowsKey = (session.map_or(0, |s| s.structure), messages.len(), live_from, activity, app.focused_view);
     let items = session.map_or_else(Default::default, |s| s.row_items(rows_key));
     let question_rows = session.map_or_else(Default::default, |s| s.question_rows.borrow().clone());
     let (key_items, build_items, visible_items) = (items.clone(), items.clone(), items.clone());
@@ -59,7 +59,11 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     // (With a fixed 200 pt the row sat 41 pt above the pinned line: a band of nothing between
     // the reply and "Crafting".)
     let foot = transcript_foot(app, tab_id);
-    let rows = col().key(format!("timeline:{session_id}")).w_full().px(pad).pt(16.0).pb(if activity { foot } else { foot + REST_GAP }).gap(0.0)
+    let rows = col().key(format!("timeline:{session_id}")).w_full().px(pad).pt(16.0).pb(if activity { foot } else { foot + REST_GAP }).gap(0.0);
+    // A just-sent message rests at the top of the view: room for that, whatever the reply
+    // under it has come to so far (`turn.rs`). No floor at all otherwise.
+    let rows = match session.and_then(|s| s.turn_floor()) { Some(floor) => rows.min_h(floor), None => rows };
+    let rows = rows
         .growth(rune::GrowthSpec::default())
         .virtual_rows(items.len(), 120.0,
             move |a: &App, i| row_key(a, &key_id, key_items[i]).into(),
@@ -183,18 +187,24 @@ pub enum RowItem {
     /// Messages `start..end` folded into one row.
     Group(usize, usize),
     Activity,
+    /// The work row of the turn `start..end`, in the focused view (`focus.rs`).
+    Work(usize, usize),
+    /// A run of a running turn's calls `start..end`, a line each (`focus::steps_row`).
+    Steps(usize, usize),
+    /// A turn's current thought: the reasoning message's newest part only.
+    Thought(usize),
 }
 
 /// What a session's row list was computed from: its structure revision, message count, live
-/// turn start and whether the activity line shows.
-pub type RowsKey = (u64, usize, usize, bool);
+/// turn start, whether the activity line shows and whether turns are folded (`focus.rs`).
+pub type RowsKey = (u64, usize, usize, bool, bool);
 
 impl super::Session {
     /// The transcript's rows, computed again only when `key` changed. Folding runs reads every
     /// tool call's diff, so on a long live turn this is not something to do per commit.
     pub fn row_items(&self, key: RowsKey) -> std::rc::Rc<Vec<RowItem>> {
         if let Some((cached, items)) = &*self.rows.borrow() && *cached == key { return items.clone(); }
-        let items = std::rc::Rc::new(row_items(&self.messages, key.2, key.3));
+        let items = std::rc::Rc::new(if key.4 { super::focus::row_items(&self.messages, key.2, key.3, self.streaming, &self.open_turns) } else { row_items(&self.messages, key.2, key.3) });
         *self.question_rows.borrow_mut() = std::rc::Rc::new(items.iter().enumerate().filter_map(|(row, item)| match item {
             RowItem::Message(i) if self.messages[*i].kind == HistoryMessageKind::User => Some(row),
             _ => None,
@@ -208,8 +218,15 @@ impl super::Session {
 /// into one row (`tools::group_at`), then the activity line while a turn streams.
 pub fn row_items(messages: &[HistoryMessage], live_from: usize, activity: bool) -> Vec<RowItem> {
     let mut items = Vec::with_capacity(messages.len() + 1);
-    let mut index = 0;
-    while index < messages.len() {
+    rows_in(messages, 0..messages.len(), live_from, &mut items);
+    if activity { items.push(RowItem::Activity); }
+    items
+}
+
+/// The rows of `messages[range]`, each call shown, runs of reads folded.
+pub fn rows_in(messages: &[HistoryMessage], range: std::ops::Range<usize>, live_from: usize, items: &mut Vec<RowItem>) {
+    let mut index = range.start;
+    while index < range.end {
         if !tools::visible(&messages[index], index, live_from) { index += 1; continue; }
         if let Some(end) = tools::group_end(messages, index) {
             items.push(RowItem::Group(index, end));
@@ -219,8 +236,6 @@ pub fn row_items(messages: &[HistoryMessage], live_from: usize, activity: bool) 
         items.push(RowItem::Message(index));
         index += 1;
     }
-    if activity { items.push(RowItem::Activity); }
-    items
 }
 
 fn row_key(app: &App, session_id: &str, item: RowItem) -> String {
@@ -229,6 +244,9 @@ fn row_key(app: &App, session_id: &str, item: RowItem) -> String {
         RowItem::Message(i) => messages.get(i).map_or_else(|| format!("row:{i}"), |m| format!("msg:{}", m.id)),
         RowItem::Group(i, _) => messages.get(i).map_or_else(|| format!("group:{i}"), |m| format!("group:{}", m.id)),
         RowItem::Activity => "activity".into(),
+        RowItem::Work(i, _) => messages.get(i).map_or_else(|| format!("work:{i}"), |m| format!("work:{}", m.id)),
+        RowItem::Thought(i) => messages.get(i).map_or_else(|| format!("row:{i}"), |m| format!("msg:{}", m.id)),
+        RowItem::Steps(i, _) => messages.get(i).map_or_else(|| format!("steps:{i}"), |m| format!("steps:{}", m.id)),
     }
 }
 
@@ -240,6 +258,18 @@ fn build_row(app: &App, session_id: &str, item: RowItem, tab_id: u64) -> El {
         RowItem::Activity if app.activity_pinned || app.activity.is_none() =>
             el().key("activity").w_full().h(app.activity_row_height()).instant_changes(),
         RowItem::Activity => app.activity.as_ref().map_or_else(el, |activity| activity.view(app).instant_changes()),
+        RowItem::Work(start, end) => {
+            let key = messages.get(start).map_or_else(String::new, |m| format!("work:{}", m.id));
+            tracked(super::focus::work_row(app, session_id, session, start, end), session_id, &key, tab_id)
+        }
+        RowItem::Steps(start, end) => {
+            let key = messages.get(start).map_or_else(String::new, |m| format!("steps:{}", m.id));
+            tracked(super::focus::steps_row(app, session, start, end), session_id, &key, tab_id)
+        }
+        RowItem::Thought(index) => match messages.get(index) {
+            Some(message) => tracked(reasoning_row(app, message, true, true), session_id, &format!("msg:{}", message.id), tab_id),
+            None => el(),
+        },
         RowItem::Group(start, end) => match messages.get(start..end) {
             Some(members) => tool_row(app, session_id, session, tab_id, members, || match tools::group_at(messages, start) {
                 Some((_, group)) => tools::row(app, &group),
@@ -311,12 +341,11 @@ fn user_row(app: &App, session_id: &str, session: &super::Session, message: &His
             // rail reveals a row never mounted by its key instead. Bookkeeping only: it
             // follows every frame of a scroll without committing.
             .on_layout_tx(move |a: &mut App, r: [f32; 4], tx: &mut Tx| {
-                tx.live_only();
-                let Some(view) = a.rects.get(&format!("timeline-view:{tab_id}")).copied() else { return };
+                let Some(view) = a.rects.get(&format!("timeline-view:{tab_id}")).copied() else { tx.live_only(); return };
                 // The entire bubble must clear the pinned status band, not just peek out of
                 // the composer. Otherwise the line appears through the bubble's send spring.
                 let bottom = composer_top(a, tab_id).unwrap_or(view[1] + view[3]) - 6.0 - a.activity_row_height();
-                let Some(session) = a.sessions.get_mut(&sid) else { return };
+                let Some(session) = a.sessions.get_mut(&sid) else { tx.live_only(); return };
                 if let Some((id, visible)) = &mut session.activity_reveal && *id == mid {
                     if r[3] > 26.0 && r[1] + r[3] <= bottom + 1.0 {
                         visible.get_or_insert_with(std::time::Instant::now);
@@ -327,6 +356,8 @@ fn user_row(app: &App, session_id: &str, session: &super::Session, message: &His
                 let top = r[1] - view[1] + session.scroll.get().0;
                 session.question_tops.insert(mid.clone(), top.max(0.0));
                 session.row_at(&format!("msg:{mid}"), r[1] - view[1], r[3]);
+                // Only the room under a just-sent message re-runs the view (`turn.rs`).
+                if !session.turn_row_at(&mid, top) { tx.live_only(); }
             })
     };
     // A picture's thumbnail arrives after its row: those rows build every time.
@@ -369,6 +400,7 @@ impl App {
         let Some(session) = self.sessions.get_mut(session_id) else { return false };
         let up = e.dy > 0.0;
         if up { session.scrolled_up_at = Some(std::time::Instant::now()); }
+        if e.dy != 0.0 { session.turn_released(); }
         let mirror = session.scroll.clone();
         let key = format!("conversation:{session_id}");
         // The transcript places the scroller's steps itself, by a row (`anchor.rs`).
@@ -650,6 +682,49 @@ fn compaction_divider(app: &App, message: &HistoryMessage, label: &str) -> El {
         .child(el().grow(1.0).h(1.0).fill(rgb(app.pal.border)))
 }
 
+/// A thought: its title over its text. `newest_only` draws just the part being written
+/// (a folded turn's current thought, `focus.rs`).
+fn reasoning_row(app: &App, message: &HistoryMessage, streaming: bool, newest_only: bool) -> El {
+    let p = app.pal;
+    let key = format!("msg:{}", message.id);
+    let diagrams = if crate::ui::mermaid::contains_fence(&message.text) { (app.mermaid_cache.epoch(), app.mermaid_view_version) } else { (0, 0) };
+    let font = app.ty.chat_sized(13.0);
+    let style = markdown_style(app).text(rgb(p.dim)).muted(rgb(p.dim)).body_font(font)
+        .heading_font(1, font).heading_font(2, font).heading_font(3, font).heading_font(4, font)
+        .code_block_font(app.ty.sized(13.0));
+    let mut body = col().key(key).w_full().pt(24.0).gap(10.0);
+    if streaming { body = body.instant_changes(); }
+    let (title, reasoning) = reasoning_parts(message);
+    body = body.child(text(title.to_owned())
+        .w_full().wrap().font(app.ty.chat_body().italic()).color(rgb(p.yellow).alpha(0.85))
+        .selectable(true).selection_color(selection_color(app)));
+    let pieces = prose::chunks(reasoning);
+    let last = pieces.len().saturating_sub(1);
+    // A folded turn shows the thought being had, not the ones before it.
+    let newest = pieces.iter().rposition(|piece| !piece.text.trim().is_empty()).unwrap_or(0);
+    let look = (p as *const _ as usize, app.ty.size.to_bits(), app.ty.weight.to_bits(), timeline_width(app).to_bits(), diagrams);
+    // The pieces stack as one text: 10 above a heading's (this column's gap, as before),
+    // the kit's own block margin above one cut at a paragraph.
+    let mut thought = col().w_full();
+    let mut first = true;
+    for (index, piece) in pieces.into_iter().enumerate() {
+        let (piece, space) = (piece.text, if piece.cut == prose::Cut::Heading { 10.0 } else { piece.space });
+        if piece.trim().is_empty() || (newest_only && index != newest) { continue; }
+        let arriving = streaming && index == last;
+        let block = rune::memo(format!("reasoning:{}:{index}", message.id), (piece, look, arriving), || {
+            let (rendered, diagrams) = crate::ui::mermaid::prepare(app, piece, &format!("reasoning:{}:{index}", message.id), timeline_width(app));
+            Markdown::new(rendered.into_owned()).streaming(arriving).reveal(0.0)
+                .code_frame(diagram_frame(app, diagrams)).selectable(true)
+                .on_link_tx(|a: &mut App, url: &str, _: &mut Tx| a.open_link(url))
+                .render(&style).selection_group(false)
+        });
+        thought = thought.child(if first { block } else { col().w_full().pt(space).child(block) });
+        first = false;
+    }
+    body = body.child(thought);
+    body
+}
+
 fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
     let p = app.pal;
     let key = format!("msg:{}", message.id);
@@ -677,41 +752,7 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
     match message.kind {
         HistoryMessageKind::User => super::user::view(app, &message.id, &message.text, &message.attachments, message.author.as_deref(), timeline_width(app))
             .key(key).pt(26.0).arrives_whole(),
-        HistoryMessageKind::Reasoning => {
-            let font = app.ty.chat_sized(13.0);
-            let style = markdown_style(app).text(rgb(p.dim)).muted(rgb(p.dim)).body_font(font)
-                .heading_font(1, font).heading_font(2, font).heading_font(3, font).heading_font(4, font)
-                .code_block_font(app.ty.sized(13.0));
-            let mut body = col().key(key).w_full().pt(24.0).gap(10.0);
-            if streaming { body = body.instant_changes(); }
-            let (title, reasoning) = reasoning_parts(message);
-            body = body.child(text(title.to_owned())
-                .w_full().wrap().font(app.ty.chat_body().italic()).color(rgb(p.yellow).alpha(0.85))
-                .selectable(true).selection_color(selection_color(app)));
-            let pieces = prose::chunks(reasoning);
-            let last = pieces.len().saturating_sub(1);
-            let look = (p as *const _ as usize, app.ty.size.to_bits(), app.ty.weight.to_bits(), timeline_width(app).to_bits(), diagrams);
-            // The pieces stack as one text: 10 above a heading's (this column's gap, as before),
-            // the kit's own block margin above one cut at a paragraph.
-            let mut thought = col().w_full();
-            let mut first = true;
-            for (index, piece) in pieces.into_iter().enumerate() {
-                let (piece, space) = (piece.text, if piece.cut == prose::Cut::Heading { 10.0 } else { piece.space });
-                if piece.trim().is_empty() { continue; }
-                let arriving = streaming && index == last;
-                let block = rune::memo(format!("reasoning:{}:{index}", message.id), (piece, look, arriving), || {
-                    let (rendered, diagrams) = crate::ui::mermaid::prepare(app, piece, &format!("reasoning:{}:{index}", message.id), timeline_width(app));
-                    Markdown::new(rendered.into_owned()).streaming(arriving).reveal(0.0)
-                        .code_frame(diagram_frame(app, diagrams)).selectable(true)
-                        .on_link_tx(|a: &mut App, url: &str, _: &mut Tx| a.open_link(url))
-                        .render(&style).selection_group(false)
-                });
-                thought = thought.child(if first { block } else { col().w_full().pt(space).child(block) });
-                first = false;
-            }
-            body = body.child(thought);
-            body
-        },
+        HistoryMessageKind::Reasoning => reasoning_row(app, message, streaming, false),
         HistoryMessageKind::Tool | HistoryMessageKind::Subtask => tools::row(app, message),
         HistoryMessageKind::Compaction => compaction_divider(app, message, "Compacted"),
         HistoryMessageKind::System if message.title == "Goal Started" => {

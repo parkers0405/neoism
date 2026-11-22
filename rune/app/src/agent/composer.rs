@@ -150,10 +150,19 @@ pub fn composer(app: &App, max_w: f32) -> El {
         .on_input_key(move |s: &mut App, e: &rune::KeyEvent, tx: &mut Tx| { s.select_tab(tab_id); s.image_preview_key(e) || s.agent_composer_key(e, tx) || s.timeline_jump_key(e, tx) || s.composer_interrupt_key(e) || crate::keys::shortcut(s, e, tx) })
         .on_input_paste(move |s: &mut App, content: &rune::ClipboardContent, _: &mut Tx| { s.select_tab(tab_id); s.paste_composer(content) })
         .on_submit(move |s: &mut App, tx: &mut Tx| { s.select_tab(tab_id); if !s.submit_pending_prompt() && !s.submit_command(tx) { s.submit(); } });
-    // The model at the card's lower right, beside send, bare: its provider's mark, its name, a chevron. It
-    // opens the model picker: recents, thinking, providers and connect, in sections.
+    // Keep the provider name on the chip unless the composer is in a narrow pane.
     let cs = app.ty.scale();
-    let model_label = app.model.rsplit_once('/').map_or(app.model.clone(), |(_, name)| name.to_owned());
+    let card_key = format!("composer-card:{tab_id}");
+    let card_width = app.rects.get(&card_key).map_or(max_w, |r| r[2]);
+    let model_label = match app.model.split_once('/') {
+        Some(_) if card_width < 320.0 * cs => app.model.rsplit('/').next().unwrap_or(&app.model).to_owned(),
+        Some((provider, model)) => {
+            let name = app.composer.providers.iter().find(|p| p.id.eq_ignore_ascii_case(provider) && !p.name.is_empty())
+                .map_or(provider, |p| p.name.as_str());
+            format!("{name}/{model}")
+        }
+        None => app.model.clone(),
+    };
     let model = row().key("composer-model").h(30.0 * cs).gap(7.0 * cs).center_y().shrink()
         .child(super::slash::provider_mark(app, 14.0 * cs))
         .child(text(model_label).font(app.ty.sans(13.5, 500.0)).color(rgb(p.fg)).truncate().shrink())
@@ -183,7 +192,7 @@ pub fn composer(app: &App, max_w: f32) -> El {
         })
         .on_press(move |s: &mut App| { s.select_tab(tab_id); s.request_attach(); });
     let card = col().key("agent-input-card")
-        .on_layout(move |s: &mut App, r: [f32; 4]| { s.rects.insert(format!("composer-card:{tab_id}"), r); }).w_full().radius(18.0).fill(rgb(p.bg)).border(1.0, rgb(p.border))
+        .on_layout(move |s: &mut App, r: [f32; 4]| { s.rects.insert(card_key.clone(), r); }).w_full().radius(18.0).fill(rgb(p.bg)).border(1.0, rgb(p.border))
         .px(20.0).pt(16.0).pb(12.0).gap(22.0)
         .on_drop_files(move |s: &mut App, files: &[std::path::PathBuf], _: &mut Tx| {
             s.select_tab(tab_id);

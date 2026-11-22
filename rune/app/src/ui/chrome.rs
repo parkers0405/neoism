@@ -2,6 +2,7 @@
 //! `rune/reference/` at the reference window (1252x674 logical): 55.5 pt activity rail, two
 //! 30 pt tab rows (workspaces here, pane tabs in `panes`), 23.5 pt status line.
 
+use super::feather::Icon;
 use super::theme::{glyph, rgb};
 use super::{ChildIf, icon};
 use crate::agent;
@@ -11,7 +12,7 @@ use rune::{Cx, El, col, el, row, text};
 
 pub const RAIL_W: f32 = 55.5;
 pub const TAB_ROW_H: f32 = 30.0;
-pub const SIDEBAR_W: f32 = 300.0;
+pub const SIDEBAR_W: f32 = 350.0;
 /// The band the app draws for the window's own controls where it replaces the system title
 /// bar: the macOS traffic lights at its leading end, the Windows caption buttons at its trailing.
 pub const TITLEBAR_H: f32 = 30.0;
@@ -210,35 +211,37 @@ fn rail(app: &App) -> El {
         el().key(format!("rail-wash-{key}")).absolute(0.0, 6.5 + i as f32 * 51.5)
             .w(RAIL_W).h(51.5).hover(rgb(p.hover)).hover_group_shared(key)
     });
-    let button = |key: &'static str, g: &'static str, active: bool, press: fn(&mut App)| {
+    // Drawn line icons, the weight of the panels' own, rather than solid font glyphs.
+    let line = |icon: Icon, active: bool| super::feather::view(app, icon, 19.0 * app.ty.scale().min(1.4), if active { p.fg } else { p.muted });
+    let button = |key: &'static str, g: Icon, active: bool, press: fn(&mut App)| {
         el().key(key).w(RAIL_W).h(51.5).center()
-            .child(grow(key, icon(app, g, 2.0, if active { rgb(p.fg) } else { rgb(p.dim) })))
+            .child(grow(key, line(g, active)))
             .hover_group_shared(key)
             .press_scale(RAIL_PRESS_SCALE)
             .on_hover_change(track(key))
             .on_press(press)
     };
     let servers = el().key("open-servers").w(RAIL_W).h(51.5).center()
-        .child(grow("open-servers", icon(app, glyph::SERVERS, 1.9, rgb(p.dim))))
-        .child(el().w(6.0).h(6.0).radius(3.0).fill(rgb(p.green)).absolute(38.0, 13.0))
+        .child(grow("open-servers", line(Icon::Server, false)))
+        .child(el().w(6.0).h(6.0).radius(3.0).fill(rgb(p.green)).absolute(37.0, 14.0))
         .hover_group_shared("open-servers")
         .press_scale(RAIL_PRESS_SCALE)
         .on_hover_change(track("open-servers"))
         // The server button opens Systems (`TopBarAction::OpenSystems`).
         .on_press(|s: &mut App| s.open_picker(crate::palette::Mode::Systems));
     col().key("activity-rail").w(RAIL_W).h_full().pt(6.5).fill(rgb(p.bg))
-        .border_sides([0.0, 1.0, 0.0, 0.0], rgb(p.border))
+        .border_sides([0.0, 1.0, 0.0, 0.0], rgb(p.border).alpha(0.6))
         .children(washes)
         .child(crate::glass_selection::view(app))
         // A click opens the panel beside what has the keyboard; only Alt+E / Alt+N move it in.
-        .child(button("toggle-files", glyph::FOLDER, app.sidebar == Some(Sidebar::Files), |s| s.click_tree(Sidebar::Files)))
-        .child(button("toggle-notes", glyph::FILE, app.sidebar == Some(Sidebar::Notes), |s| s.click_tree(Sidebar::Notes)))
-        .child(button("toggle-conversations", glyph::SPARKLES, app.sidebar == Some(Sidebar::Conversations), |s| {
+        .child(button("toggle-files", Icon::Folder, app.sidebar == Some(Sidebar::Files), |s| s.click_tree(Sidebar::Files)))
+        .child(button("toggle-notes", Icon::Notes, app.sidebar == Some(Sidebar::Notes), |s| s.click_tree(Sidebar::Notes)))
+        .child(button("toggle-conversations", Icon::Sparkles, app.sidebar == Some(Sidebar::Conversations), |s| {
             s.toggle_conversations();
         }))
         .child(servers)
         // Settings closes the rail's own buttons.
-        .child(button("topbar-menu", "\u{f013}", app.settings.is_some(), |s| if s.settings.is_some() { s.settings = None } else { s.open_settings() })
+        .child(button("topbar-menu", Icon::Settings, app.settings.is_some(), |s| if s.settings.is_some() { s.settings = None } else { s.open_settings() })
             .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("topbar-menu".into(), r); }))
         // Everyone in a shared workspace, this user first (`collab::view`).
         .children(crate::collab::view::rail(app))
@@ -265,7 +268,8 @@ mod rail_selection_tests {
         };
         let (index, before) = lens(&rt);
         assert!(rt.instances[..index].iter().any(|i| i.rect[2] > 50.0 && (i.rect[3] - 51.5).abs() < 2.0 && i.fill[3] > 0.0), "hover wash must be in the optical backdrop");
-        assert!(rt.instances[index + 1..].iter().any(|i| i.params[1] == rune::render::KIND_GLYPH), "original foreground glyphs follow the glass");
+        // The icons are drawn images (none without an image cache, as here); the servers' dot is foreground too.
+        assert!(rt.instances[index + 1..].iter().any(|i| i.params[1] == rune::render::KIND_IMAGE || (i.rect[2] - 6.0).abs() < 0.5), "the original foreground follows the glass");
         rt.pointer_down(27.75, 83.75);
         rt.pointer_up(27.75, 83.75);
         rt.frame(0.08);

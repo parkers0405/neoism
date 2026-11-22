@@ -129,6 +129,10 @@ pub struct App {
     pub table_active: Option<(String, std::time::Instant)>,
     pub table_gesture: crate::agent::table::ScrollGesture,
     pub font_families: (String, String),
+    /// Agent turns fold to a work row and the reply (`agent/focus.rs`); off shows every call.
+    pub focused_view: bool,
+    /// A sent message slides to the top of the view, the reply filling in under it (`agent/turn.rs`).
+    pub turn_at_top: bool,
     pub fonts_dirty: bool,
     /// The table the views were last built for.
     pub table_seen: Option<String>,
@@ -383,6 +387,9 @@ impl App {
             pal: palette(&config.theme),
             ty: Type { size: config.font_size, weight: config.font_weight, code_family: crate::ui::fonts::code_family(&config.font_families.1) },
             font_families: config.font_families,
+            turn_at_top: config.turn_at_top,
+            // Tests and headless scenes draw the full trace unless they ask for this.
+            focused_view: config.focused_view && !cfg!(test) && std::env::var_os("NEOISM_RUNE_OFFLINE").is_none(),
             fonts_dirty: true,
             workspace_name: if cwd == home { "~".into() } else { workspace_name },
             cwd,

@@ -197,7 +197,9 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if let Some(wait) = app.catalog_tick() { wake!("model-catalog", wait); }
     let mode_changing = app.tick_mode_pill() | app.tick_chip_scramble();
     // Wheel and trackpad motion on every scroll view, stepped on the frame clock.
-    let gliding = app.scrollers.step(clock, tx) | app.editor_jump_springs(tx);
+    // A just-sent message glides to the top of its transcript (`agent/turn.rs`).
+    let turning = app.turn_tick(tx);
+    let gliding = app.scrollers.step(clock, tx) | app.editor_jump_springs(tx) | turning;
     // A transcript's steps hold a row rather than an offset (`agent/anchor.rs`).
     app.place_conversations(tx);
     let rail_bottom = app.rail_follow_bottom() | app.timeline_away_tick();
@@ -313,7 +315,7 @@ fn main() {
     startup::apply(&launch);
     let spec = AppSpec::<App> {
         fonts: FONTS,
-        families: ("Geist", "Geist Mono"),
+        families: (ui::fonts::CHAT_SLOT, ui::fonts::MONO),
         setup: Some(setup),
         poll: Some(poll),
         on_key: Some(on_key),
@@ -447,6 +449,7 @@ fn main() {
                     models: vec![ModelInfo { id: (*model).into(), name: (*title).into(), context_limit: None }] }).collect(), catalog_status: None, request_id: None });
                 s.composer.selection.model = "anthropic/claude-sonnet-5".into();
                 s.composer.selection.thinking = "high".into();
+                s.sync_chips();
                 s.open_selection(agent::slash::Kind::Model);
                 if std::env::var_os("NEOISM_RUNE_MODEL_MODAL").is_some() { s.composer.card_modal = true; }
             }),
@@ -974,6 +977,39 @@ fn main() {
                 s.load_fixture("fixture-work", "Conversation work transcript", include_str!("../fixtures/work-transcript.json"));
                 s.sessions.get_mut("fixture-work").unwrap().streaming = true;
                 s.sessions.get_mut("fixture-work").unwrap().live_from = Some(0);
+            }),
+            ("work-focused", |s| {
+                s.focused_view = true;
+                s.load_fixture("fixture-work", "Conversation work transcript", include_str!("../fixtures/work-transcript.json"));
+                s.sessions.get_mut("fixture-work").unwrap().streaming = true;
+                s.sessions.get_mut("fixture-work").unwrap().live_from = Some(0);
+            }),
+            ("work-focused-long", |s| {
+                s.focused_view = true;
+                s.load_fixture("fixture-work", "Conversation work transcript", include_str!("../fixtures/work-transcript.json"));
+                let session = s.sessions.get_mut("fixture-work").unwrap();
+                session.streaming = true;
+                session.live_from = Some(0);
+                // A long run of calls: the newest few are listed, the rest counted.
+                let call = session.messages.iter().find(|m| m.tool == "grep").cloned().unwrap();
+                let at = session.messages.len() - 1;
+                for n in 0..9 {
+                    let mut extra = call.clone();
+                    extra.id = format!("extra-{n}");
+                    extra.title = format!("Grep(pattern_{n})");
+                    session.messages.insert(at, extra);
+                }
+            }),
+            ("work-focused-settled", |s| {
+                s.focused_view = true;
+                s.load_fixture("fixture-work", "Conversation work transcript", include_str!("../fixtures/work-transcript.json"));
+            }),
+            ("work-focused-open", |s| {
+                s.focused_view = true;
+                s.load_fixture("fixture-work", "Conversation work transcript", include_str!("../fixtures/work-transcript.json"));
+                let session = s.sessions.get_mut("fixture-work").unwrap();
+                let first = session.messages[0].id.clone();
+                session.open_turns.insert(first);
             }),
             ("work-transcript-expanded", |s| {
                 s.load_fixture("fixture-work", "Conversation work transcript", include_str!("../fixtures/work-transcript.json"));

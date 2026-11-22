@@ -330,7 +330,7 @@ mod tests {
             {"id":"q3","role":"User","kind":"User","text":"Third"}
         ]"#);
         let session = app.sessions.get_mut("rail").unwrap();
-        session.row_items((session.structure, session.messages.len(), usize::MAX, false));
+        session.row_items((session.structure, session.messages.len(), usize::MAX, false, false));
         assert_eq!(session.question_rows.borrow().as_slice(), [0, 2, 3]);
         session.rail_active = Some(0);
         let mut rt = rune::Runtime::new(app, |a: &App, _: &mut rune::Cx<App>| {
@@ -359,7 +359,7 @@ mod tests {
         let session = rt.state.sessions.get_mut("rail").unwrap();
         session.messages.remove(0);
         session.structure += 1;
-        session.row_items((session.structure, session.messages.len(), usize::MAX, false));
+        session.row_items((session.structure, session.messages.len(), usize::MAX, false, false));
         assert_eq!(session.question_rows.borrow().as_slice(), [1, 2]);
     }
 

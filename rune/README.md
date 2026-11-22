@@ -106,11 +106,13 @@ video so agents can read the motion without playing it. Extract any frame with
 - **Fonts**: UI and code in the configured family (`~/.config/neoism/config.json`, default Geist Mono 15);
   icons from Cascadia Code NF (`neoism-paint/src/font/resources/CascadiaCode`); "Pinned", "Recent", "Crafting"
   and the wordmark style use Press Start 2P (`neoism-paint/src/font/resources/PressStart2P`).
-  Chat prose, user bubbles and composer input deliberately use proportional Geist Sans at regular weight, with bold Markdown headings/emphasis. The existing licensed variable font in `neoism-paint/src/font/resources/Geist` is embedded in the app, without a runtime download. Chat-only styles live in `app/src/agent/typography.rs`; inline/fenced code, editor, terminals, tool grids, tables and composer chips retain their monospaced styles and metrics.
-  Settings > Appearance separates **Chat font family** (`appearance.chat-font-family`, default `Geist`) from **Monospace font family** (`appearance.fonts.family`, default `Geist Mono` in Rune). Both offer bundled and installed families, apply without restarting, and persist through the daemon. Chat changes leave code and fixed-width UI alone; monospace changes update those surfaces and their editor/terminal cell widths. Icon and pixel-art fonts stay fixed.
-- **Chrome**: 55 px activity rail (menu, files, notes, agent, search, servers with green dot); workspace tab row
-  (folder icon + name, close, `+`); pane tab row (icon, title, close, `+`, active tab brighter); status line with
-  mode pill (`NORMAL`/`AGENT`/`TERMINAL`), cwd pill, git branch chip, LSP chip, position, FPS pill.
+  Chat prose, user bubbles and composer input deliberately use a proportional sans at regular weight, with bold Markdown headings/emphasis. Its default is the platform's own interface font, as t3code's is (`ui/fonts.rs` `CHAT`: San Francisco, named `System Font`, on macOS; Segoe UI on Windows), and every choice falls back to Geist Sans, which is also the default on Linux. The existing licensed variable font in `neoism-paint/src/font/resources/Geist` is embedded in the app, without a runtime download. Chat-only styles live in `app/src/agent/typography.rs`; inline/fenced code, editor, terminals, tool grids, tables and composer chips retain their monospaced styles and metrics.
+  Settings > Appearance separates **Chat font family** (`appearance.chat-font-family`, default the platform interface font; the daemon's schema still says `Geist` and Rune overrides it) from **Monospace font family** (`appearance.fonts.family`, default `Geist Mono` in Rune). Both offer bundled and installed families, apply without restarting, and persist through the daemon. Chat changes leave code and fixed-width UI alone; monospace changes update those surfaces and their editor/terminal cell widths. Icon and pixel-art fonts stay fixed.
+- **Chrome**: 55 px activity rail of drawn line icons (`ui/feather.rs`: files, notes, agent, servers with green
+  dot, settings); workspace tab row (folder icon + name, close, `+`); pane tab row (icon, title, close, `+`,
+  active tab brighter; an accent dot while that tab's agent works, a yellow one for unsaved files). Tab titles
+  use the proportional interface font (`Type::tab`), not the monospace. Status line with mode pill
+  (`NORMAL`/`AGENT`/`TERMINAL`), cwd pill, git branch chip, LSP chip, position, FPS pill.
 - **Agent sidebar** (deliberately departs from `04-sidebar-conversations.png`): a search field with the project
   filter and New chat as icon buttons beside it; conversations are rounded cards with the project and age on top
   and the title and its model's provider mark below. The filter is a rounded popover ("Search projects…" over an
@@ -119,6 +121,18 @@ video so agents can read the motion without playing it. Extract any frame with
   The sidebars, Settings (breadcrumb header, search above the categories), the palette, finder and menus use
   the proportional chat font (`Type::sans`, titles at 600) and line icons (`glyph::*_LINE`); new panels should
   follow them. Key hints, paths in previews and code stay monospaced.
+- **Focused agent view** (departs from `05..08`; `app/src/agent/focus.rs`), after t3code's work rows: a turn
+  shows its work while it runs and folds when it is done. Running, it is the agent's notes as they are written
+  and, between them, its calls as one quiet line each (a drawn icon from `ui/feather.rs` and the call's name;
+  the newest five of a run, the rest counted as `6 earlier steps`), then the thought being had, one at a time.
+  Done, all of that folds under one work row (`Worked · 14 steps · 3 files changed`, failures counted in red)
+  and the reply stays; pressing the row opens that turn as the full trace of cards and diffs, held in place
+  under the pointer. A sub-agent still at work keeps its card, folded or not, until it finishes; checklists, the
+  reader's own shell commands and notices always show. The running turn's activity line names the step it is on
+  after its timer. Every loaded turn folds, so an older turn's calls can be opened too. Settings > Agent >
+  **Focused agent view** (`appearance.agent-focused-view`, default on, the app's own key) turns it off: every
+  call is a card again. Headless scenes and tests draw the full trace unless they ask (`--scene work-focused`,
+  `work-focused-long`, `work-focused-settled`, `work-focused-open`).
 - **Settings** (departs from `27-settings.png`): the rail's top button is a gear that opens it; there is no app
   menu button. The sidebar holds the search, then General, Appearance, Themes, Keybindings and the grouped pages
   (Code: Editor, Markdown, Terminal; Agents: Agent, Presence; System: Interface, Platform, Developer), then
@@ -241,6 +255,12 @@ Exact constants from the shared Rust code; reproduce them with Rune springs or t
   Rune on macOS deliberately uses native precision scrolling instead: finger and OS momentum deltas apply 1:1, without the reading gain or an additional synthesized coast. Mouse-notch springs and other platforms retain their existing behavior. Edges remain clamped; elastic overscroll is not implemented.
 - **Follow bottom**: streaming keeps the transcript pinned to the newest content through the same spring; scrolling
   up releases the latch; returning within 1 px of the bottom re-latches.
+- **A sent message opens its turn at the top**, when Settings > Agent > **Send to top**
+  (`appearance.agent-turn-at-top`, default off) asks for it (t3code's new-turn anchor; `app/src/agent/turn.rs`): the transcript
+  slides until the message rests 16 pt under the viewport's top, and the reply streams into the room below it. That
+  room is a floor under the rows' height, so nothing moves while the turn is shorter than the view. Past that a
+  turn that runs tools or reasons is followed as before; a reply of text alone keeps its start in view and runs
+  on under the composer (jump-to-latest follows it). Wheel or trackpad input takes over at once.
 - **Ctrl+U/Ctrl+D**: half a viewport, through the same spring.
 - **Editor scroll (Neovide feel)** (`shared/src/editor/code/viewport.rs`): critically damped spring `omega = 16`,
   velocity carried across retargets so held keys are one motion; jumps further than 1.25 viewports teleport the far

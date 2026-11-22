@@ -7,6 +7,9 @@ use neoism_protocol::agent::ThreadSummary;
 use rune::tok::TextStyle;
 use rune::{Color, El, ScrollSpec, col, el, row, text};
 
+/// The room between the conversations list's rows; a sub-agent's connector runs across it.
+const ROW_GAP: f32 = 2.0;
+
 pub(crate) fn ago(updated_ms: u64) -> String {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
     if updated_ms == 0 || updated_ms > now { return String::new(); }
@@ -406,12 +409,15 @@ pub fn conversations(app: &App) -> El {
         // line has further to go passes straight through.
         let (stroke, elbow, radius) = ((2.0 * s).round().max(2.0), 27.0 * s, 6.0 * s);
         let line_x = |depth: usize| base + 24.0 * s * depth as f32 - 17.0 * s;
-        let ink = rgb(p.fg).alpha(0.55);
-        let mut lines = vec![el().key("family-line").w(11.0 * s).h(elbow).absolute(line_x(m.depth), 0.0)
+        // One solid line: an opaque ink (translucent pieces darken where they overlap), and
+        // each piece runs on through the list's gap between rows to meet the next.
+        let (fg, bg) = (rgb(p.fg), rgb(p.bg));
+        let ink = Color { r: bg.r + (fg.r - bg.r) * 0.5, g: bg.g + (fg.g - bg.g) * 0.5, b: bg.b + (fg.b - bg.b) * 0.5, a: 1.0 };
+        let mut lines = vec![el().key("family-line").w(11.0 * s).h(elbow + ROW_GAP * s).absolute(line_x(m.depth), -ROW_GAP * s)
             .border_sides([0.0, 0.0, stroke, stroke], ink).corners([0.0, 0.0, 0.0, radius])];
-        if !last { lines.push(el().key("family-line-on").w(stroke).pin(Some(line_x(m.depth)), Some(elbow - radius), None, Some(0.0)).fill(ink)); }
+        if !last { lines.push(el().key("family-line-on").w(stroke).pin(Some(line_x(m.depth)), Some(elbow - radius), None, Some(-ROW_GAP * s)).fill(ink)); }
         for level in through {
-            lines.push(el().key(format!("family-line-through:{level}")).w(stroke).pin(Some(line_x(*level)), Some(0.0), None, Some(0.0)).fill(ink));
+            lines.push(el().key(format!("family-line-through:{level}")).w(stroke).pin(Some(line_x(*level)), Some(-ROW_GAP * s), None, Some(-ROW_GAP * s)).fill(ink));
         }
         let (label, dot) = match m.status.as_str() {
             "running" => ("working", None),
@@ -454,7 +460,7 @@ pub fn conversations(app: &App) -> El {
     };
     let mirror = app.conv_follow.scroll.clone();
     let notch = 3.0 * crate::editor::view::line_height(app);
-    let mut list = col().w_full().px(8.0 * s).pt(4.0 * s).pb(12.0 * s).gap(2.0 * s);
+    let mut list = col().w_full().px(8.0 * s).pt(4.0 * s).pb(12.0 * s).gap(ROW_GAP * s);
     let rows = app.conversation_rows();
         // Pinned conversations lead the list, marked by a pin on their card rather than a heading.
     for (index, entry) in rows.iter().enumerate() {

@@ -1,5 +1,6 @@
 //! One tool row: header, then whichever body it has (`tool_message/render.rs`).
 
+use crate::ui::feather::Icon;
 use super::text::{self, Text, width};
 use super::{BODY_MAX_ROWS, BODY_ROW_H, Cx, GROUP_BODY_Y, HEADER_H, accent, compact_title, diff, files, group, shell, todos};
 use crate::app::App;
@@ -211,30 +212,31 @@ fn symbol(cx: &Cx, m: &HistoryMessage) -> El {
         if let Some(image) = icons.agent(m.agent_kind.as_deref()) { return image_slot(image); }
     }
     let mcp = m.mcp.is_some() || m.tool == "execute" || m.tool.starts_with("mcp__");
-    let glyph = if mcp {
+    let icon = if mcp {
         if let Some(value) = &m.mcp {
             return crate::agent::mcp::view(cx.app, value["server"].as_str().unwrap_or_default(), &value["presentation"], cx.pt(18.0))
                 .key(format!("mcp-tool-icon:{}", m.id)).absolute(cx.pt(20.0), 0.0);
         }
-        "\u{f1e6}"
+        Icon::Plug
     } else {
         let tool = if m.tool == "tool_group" { m.title.split_once('(').map_or(m.tool.as_str(), |(t, _)| t) } else { m.tool.as_str() };
         tool_symbol(tool)
     };
+    // Drawn lines, not font glyphs: one weight and one size whatever the call.
     el().w(cx.pt(18.0)).h(cx.pt(22.0)).center().absolute(cx.pt(20.0), -cx.pt(2.0))
-        .child(cx.text(glyph, 15.5).color(cx.color(cx.p.muted)).el())
+        .child(crate::ui::feather::view(cx.app, icon, cx.pt(15.0), cx.p.muted))
 }
 
-pub fn tool_symbol(tool: &str) -> &'static str {
+pub fn tool_symbol(tool: &str) -> Icon {
     match tool.to_ascii_lowercase().as_str() {
-        "bash" | "shell" | "terminal" | "exec" => "\u{f120}",
-        "read" | "read_file" | "readfile" | "view" | "cat" => "\u{2192}",
-        "grep" | "glob" | "search" | "find" | "rg" | "tool_group" => "\u{f002}",
-        "edit" | "write" | "apply_patch" | "applypatch" | "patch" | "multiedit" => "\u{f044}",
-        "webfetch" | "websearch" => "\u{f0ac}",
-        "task" => "\u{f0e8}",
-        "todowrite" | "todoread" => "\u{f0ae}",
-        _ => "\u{f013}",
+        "bash" | "shell" | "terminal" | "exec" | "user_shell" | "background_task" => Icon::Terminal,
+        "read" | "read_file" | "readfile" | "view" | "cat" | "list" | "ls" => Icon::File,
+        "grep" | "glob" | "search" | "find" | "rg" | "tool_group" => Icon::Search,
+        "edit" | "write" | "apply_patch" | "applypatch" | "patch" | "multiedit" => Icon::Edit,
+        "webfetch" | "websearch" => Icon::Globe,
+        "task" => Icon::Branch,
+        "todowrite" | "todoread" => Icon::Checklist,
+        _ => Icon::Wrench,
     }
 }
 

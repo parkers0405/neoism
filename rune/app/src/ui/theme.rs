@@ -98,8 +98,9 @@ impl Type {
     pub fn small_bold(self) -> TextStyle {
         TextStyle::new(self.size * 0.86, 700.0).mono()
     }
+    /// Tab titles: the proportional interface font at a medium weight, as the panels use.
     pub fn tab(self) -> TextStyle {
-        TextStyle::new(self.size * 0.93, 700.0).mono()
+        TextStyle::new(self.size * 0.9, 550.0)
     }
     pub fn status(self) -> TextStyle {
         TextStyle::new(self.size * 0.86, 800.0).mono()

@@ -113,6 +113,39 @@ fn exercise(kind: Kind) {
 // The model picker is its own card now (`model_card`), without the generic list's springs.
 #[test]
 fn connect_query_mounts_are_instant_and_navigation_springs() { exercise(Kind::Connect); }
+
+#[test]
+fn model_card_scrolls_small_trackpad_and_touch_moves_inline_and_in_modal() {
+    use rune::{GesturePhase, TouchPhase};
+    for modal in [false, true] {
+        let mut app = App::new();
+        app.window = [900.0, 674.0];
+        app.ty.size = 14.0;
+        let tab = app.active_tab().id.clone();
+        app.rects.insert(format!("composer-card:{tab}"), [100.0, 600.0, 700.0, 60.0]);
+        app.composer.card_modal = modal;
+        app.composer.picker = Some(picker(Kind::Model));
+        let mut rt = Runtime::new(app, |a: &App, _: &mut Cx<App>| {
+            el().w_full().h_full().child(picker_card(a))
+        }, (900.0, 674.0), Env::new(true, 1.0));
+        settle(&mut rt);
+        let (x, py) = rt.find("picker-row:3").unwrap();
+        let initial = y(&rt, "picker-row:3");
+        rt.wheel_event(WheelEvent::new(0.0, -12.0).at(x, py).precise(true).phase(GesturePhase::Began));
+        rt.frame(DT);
+        let after_wheel = y(&rt, "picker-row:3");
+        assert!(initial - after_wheel > 1.0 && initial - after_wheel < MODEL_H);
+        rt.wheel_event(WheelEvent::new(0.0, 0.0).at(x, py).precise(true).phase(GesturePhase::Ended));
+        rt.touch(1, TouchPhase::Started, x, py, 1.0);
+        rt.frame(DT);
+        rt.touch(1, TouchPhase::Moved, x, py - 18.0, 1.05);
+        rt.frame(DT);
+        assert!(after_wheel - y(&rt, "picker-row:3") > 10.0);
+        rt.touch(1, TouchPhase::Ended, x, py - 18.0, 1.06);
+        settle(&mut rt);
+        assert!(rt.state.composer.picker.is_some(), "a swipe must not accept a model");
+    }
+}
 #[test]
 fn a_finger_drag_scrolls_the_menu_and_a_tap_still_reaches_a_row() {
     use rune::TouchPhase;

@@ -40,8 +40,13 @@ fn kept(message: &HistoryMessage) -> bool {
 }
 
 /// A call the agent made: what the work row counts.
-fn step(message: &HistoryMessage, index: usize) -> bool {
+pub(super) fn step(message: &HistoryMessage, index: usize) -> bool {
     matches!(message.kind, Kind::Tool | Kind::Subtask) && !kept(message) && tools::visible(message, index, 0)
+}
+
+pub(super) fn last_turn_folded(session: &super::Session, index: usize) -> bool {
+    let start = session.messages.iter().rposition(|m| m.kind == Kind::User).unwrap_or(0);
+    index >= start && session.messages.get(start).is_some_and(|m| !session.open_turns.contains(&m.id))
 }
 
 /// Something that folds under the work row: a call, or a thought.
@@ -162,9 +167,14 @@ pub fn work_row(app: &App, session_id: &str, session: &super::Session, start: us
         let s = app.ty.scale();
         let summary = Summary::of(turn);
         let lead = if live { "Working" } else if summary.steps > 0 { "Worked" } else { "" };
+        let arrow = crate::ui::feather::view(app, if open { crate::ui::feather::Icon::Down } else { crate::ui::feather::Icon::Right }, 12.0 * s, p.muted).key("work-chevron");
+        let arrow = if live && !open {
+            let offset = session.work_completion.get_or_init(|| rune::Live::new([0.0, 0.0]));
+            arrow.live_offset(offset.smooth(tools::HOP_SPRING))
+        } else { arrow };
         let mut line = row().key("work-line").h(26.0 * s).px(8.0 * s).ml(-8.0 * s).gap(7.0 * s).radius(7.0 * s).center_y()
             .hover(rgb(p.fg).alpha(0.06)).cursor(rune::Cursor::Pointer)
-            .child(crate::ui::feather::view(app, if open { crate::ui::feather::Icon::Down } else { crate::ui::feather::Icon::Right }, 12.0 * s, p.muted));
+            .child(arrow);
         if live {
             // Live values, stepped with the activity line: the cached row never rebuilds for them.
             line = line.child(row().items_end()
@@ -239,6 +249,46 @@ mod tests {
         // Pressed open while it runs: every call.
         let open = row_items(&messages[..5], 0, true, true, &HashSet::from(["ask".to_owned()]));
         assert_eq!(open, [Message(0), Work(0, 5), Message(1), Message(2), Message(3), Message(4), Activity]);
+    }
+
+    #[test]
+    fn a_folded_tool_completion_hops_only_the_chevron() {
+        use neoism_protocol::agent::AgentServerMessage::MessageUpdated;
+
+        let mut app = App::new();
+        app.focused_view = true;
+        app.load_fixture("work", "Work", r#"[{"id":"ask","kind":"User","role":"User","text":"Check it"}]"#);
+        app.set_streaming("work", true);
+        let update = |message| MessageUpdated { session_id: "work".into(), message, parent_message_id: None };
+        let mut call = message("run", "Tool", "");
+        call.status = "running".into();
+        app.apply_agent(update(call.clone()));
+        app.tick_activity();
+        assert_eq!(app.activity.as_ref().unwrap().state.label(), "Crafting");
+        let mut rt = rune::Runtime::new(app, |a: &App, _: &mut rune::Cx<App>| {
+            let session = &a.sessions["work"];
+            rune::col().w_full()
+                .child(work_row(a, "work", session, 0, session.messages.len()))
+                .child(a.activity.as_ref().unwrap().view(a))
+        }, (1000.0, 180.0), rune::Env::new(true, 1.0));
+        for _ in 0..30 { rt.frame(1.0 / 60.0); }
+        let activity = rt.presented("activity").unwrap().0;
+        let work = rt.presented("work:ask").unwrap().0;
+        let y = rt.presented("work-chevron").unwrap().0[1];
+        call.status = "completed".into();
+        rt.update(|a, _| {
+            a.apply_agent(update(call));
+            assert!(!a.tick_activity().1, "completion must not restart the activity word");
+        });
+        let mut min_y = y;
+        for _ in 0..90 {
+            rt.frame(1.0 / 60.0);
+            min_y = min_y.min(rt.presented("work-chevron").unwrap().0[1]);
+            assert_eq!(rt.presented("activity").unwrap().0, activity);
+            assert_eq!(rt.presented("work:ask").unwrap().0, work);
+        }
+        assert!(min_y < y - 0.5, "the chevron should hop: {min_y}");
+        assert!((rt.presented("work-chevron").unwrap().0[1] - y).abs() < 0.1);
     }
 
     #[test]

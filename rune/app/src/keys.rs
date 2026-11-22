@@ -440,8 +440,10 @@ impl App {
         if self.focus != Focus::Details || !self.git_panel.open {
             self.git_panel.message.focused = false;
         }
-        // An inline composer picker (`/model`, `/cd` …) types into its own query row.
-        let inline_picker = !self.has_prompt() && self.composer.picker.as_ref().is_some_and(|p| p.kind != crate::agent::slash::Kind::Slash);
+        // `/model`, `/skills`, etc. own a query row; `/` and `$` use the composer instead.
+        let picker_owns_focus = !self.has_prompt() && self.composer.picker.as_ref().is_some_and(|p| {
+            p.kind != crate::agent::slash::Kind::Slash && p.mention.is_none()
+        });
         // A block's output filter types into its own field; a click back into the composer
         // (focused since the last sync) takes the keyboard back from it.
         let active_id = self.tabs.get(self.active).map(|t| t.id);
@@ -452,12 +454,11 @@ impl App {
         let covered = self.project_add.is_some() || self.project_menu.is_some() || self.picker.is_some() || self.finder.is_some()
             || self.browser.is_some() || self.form.is_some() || self.modal.is_some() || self.menu.is_some() || self.settings.is_some();
         let mut refocused = false;
-        if inline_picker && !covered && self.focus == Focus::Content && let Some(picker) = self.composer.picker.as_mut().filter(|p| p.mention.is_none() && !p.query.focused) {
+        if picker_owns_focus && !covered && self.focus == Focus::Content && let Some(picker) = self.composer.picker.as_mut().filter(|p| !p.query.focused) {
             picker.query.focused = true;
             refocused = true;
         }
-        let overlay = self.project_add.is_some() || self.project_menu.is_some() || self.picker.is_some() || self.finder.is_some() || self.browser.is_some() || self.form.is_some() || inline_picker || self.modal.is_some() || self.menu.is_some() || self.settings.is_some()
-            || self.block_filter_focused();
+        let overlay = covered || picker_owns_focus || self.block_filter_focused();
         let prompt_changed = self.sync_prompt_focus(self.focus == Focus::Content && !overlay);
         let want = self.focus == Focus::Content && !overlay && !self.question_prompt() && !matches!(self.active_tab().kind, TabKind::Editor { .. } | TabKind::Database { .. } | TabKind::GitDiff);
         let active = self.active;

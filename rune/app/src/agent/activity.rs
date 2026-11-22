@@ -262,6 +262,10 @@ impl App {
             // Waiting on sub-agents says nothing here: their rows in the sidebar and their
             // task cards already do.
             Some(m) if matches!(m.kind, HistoryMessageKind::Tool | HistoryMessageKind::Subtask) && running(&m.status) && m.tool == "task" => background,
+            // The folded header already says Working. Keep the activity word and its motion
+            // phase steady instead of replaying the Crafting entrance after every hidden call.
+            Some(m) if self.focused_view && super::focus::step(m, session.messages.len() - 1)
+                && super::focus::last_turn_folded(session, session.messages.len() - 1) => Some(State::Generating),
             Some(m) if matches!(m.kind, HistoryMessageKind::Tool | HistoryMessageKind::Subtask) && running(&m.status) => Some(State::Working),
             _ => Some(State::Generating),
         }
@@ -742,6 +746,7 @@ mod tests {
     #[test]
     fn live_status_tracks_the_operation_and_returns_to_crafting() {
         let mut app = App::new();
+        app.focused_view = false;
         app.load_fixture("work", "Work", "[]");
         app.set_streaming("work", true);
         assert_eq!(app.activity_state("work"), Some(State::Generating));

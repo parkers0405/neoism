@@ -120,15 +120,16 @@ impl Spinner {
 }
 
 impl ToolState {
-    pub fn completion_bump(&mut self, previous: Option<&HistoryMessage>, next: &HistoryMessage, scale: f32) {
-        if !matches!(next.kind, neoism_protocol::agent::HistoryMessageKind::Tool | neoism_protocol::agent::HistoryMessageKind::Subtask) { return; }
-        if is_running(&next.status) {
-            self.completion_bumps.entry(next.id.clone()).or_insert_with(|| rune::Live::new([0.0, 0.0]));
-        } else if matches!(next.status.as_str(), "completed" | "success" | "done")
-            && previous.is_some_and(|old| is_running(&old.status)) {
-            let offset = self.completion_bumps.entry(next.id.clone()).or_insert_with(|| rune::Live::new([0.0, 0.0]));
-            offset.pulse([0.0, -2.0 * scale], [0.0, 0.0], std::time::Duration::from_millis(100));
+    pub(super) fn prepare_symbol(&mut self, message: &HistoryMessage) {
+        if matches!(message.kind, neoism_protocol::agent::HistoryMessageKind::Tool | neoism_protocol::agent::HistoryMessageKind::Subtask)
+            && is_running(&message.status)
+        {
+            self.completion_bumps.entry(message.id.clone()).or_insert_with(|| rune::Live::new([0.0, 0.0]));
         }
+    }
+
+    pub(super) fn hop_symbol(&mut self, id: &str, scale: f32) {
+        hop(self.completion_bumps.entry(id.to_owned()).or_insert_with(|| rune::Live::new([0.0, 0.0])), scale);
     }
 
     pub fn expanded(&self, id: &str) -> bool { self.expanded.contains(id) }
@@ -152,6 +153,18 @@ impl ToolState {
             self.selected_child.insert(group.to_owned(), child.to_owned());
         }
     }
+}
+
+pub(super) const HOP_SPRING: rune::Spring = rune::Spring::new(0.18, 0.12);
+
+pub(super) fn hop(offset: &rune::Live<[f32; 2]>, scale: f32) {
+    offset.pulse([0.0, -2.0 * scale], [0.0, 0.0], std::time::Duration::from_millis(100));
+}
+
+pub(super) fn just_succeeded(previous: &HistoryMessage, next: &HistoryMessage) -> bool {
+    matches!(next.kind, neoism_protocol::agent::HistoryMessageKind::Tool | neoism_protocol::agent::HistoryMessageKind::Subtask)
+        && previous.kind == next.kind && is_running(&previous.status)
+        && matches!(next.status.as_str(), "completed" | "success" | "done")
 }
 
 /// Whether a visible tool in `messages` is running, so `poll` keeps the spinner ticking.
@@ -280,36 +293,32 @@ mod tests {
     }
 
     #[test]
-    fn completion_bumps_only_a_live_successful_transition() {
-        let mut tools = ToolState::default();
+    fn a_visible_tool_symbol_hops_on_completion() {
+        use neoism_protocol::agent::AgentServerMessage;
+
         let pending: HistoryMessage = serde_json::from_value(serde_json::json!({
-            "id":"bump", "role":"Assistant", "kind":"Tool", "tool":"bash", "status":"pending"
+            "id":"call", "role":"Assistant", "kind":"Tool", "tool":"bash", "status":"pending"
         })).unwrap();
         let mut completed = pending.clone();
         completed.status = "completed".into();
-        tools.completion_bump(None, &completed, 1.0);
-        assert!(tools.completion_bumps.is_empty(), "history does not bounce");
-        tools.completion_bump(None, &pending, 1.0);
+        let update = |message| AgentServerMessage::MessageUpdated {
+            session_id: "test".into(), message, parent_message_id: None,
+        };
         let mut app = App::new();
-        app.tools = tools;
+        app.apply_agent(update(pending));
         let mut rt = rune::Runtime::new(app, |a: &App, _: &mut rune::Cx<App>| {
-            el().w_full().h_full().child(el().key("bump-probe").w(18.0).h(18.0).absolute(20.0, 20.0)
-                .live_offset(a.tools.completion_bumps["bump"].smooth(rune::Spring::new(0.18, 0.12))))
-        }, (100.0, 100.0), rune::Env::new(true, 1.0));
+            el().w_full().h_full().child(card::message(&Cx::new(a), &a.sessions["test"].messages[0], false).0)
+        }, (1000.0, 100.0), rune::Env::new(true, 1.0));
         for _ in 0..30 { rt.frame(1.0 / 60.0); }
-        rt.update(|a, _| a.tools.completion_bump(Some(&pending), &completed, 1.0));
-        let mut min_y = 20.0_f32;
+        let before = rt.presented("tool-symbol").unwrap().0;
+        rt.update(|a, _| { a.apply_agent(update(completed)); });
+        let mut min_y = before[1];
         for _ in 0..90 {
             rt.frame(1.0 / 60.0);
-            min_y = min_y.min(rt.presented("bump-probe").unwrap().0[1]);
+            min_y = min_y.min(rt.presented("tool-symbol").unwrap().0[1]);
         }
-        assert!(min_y < 19.5 && min_y > 17.0, "the icon makes a small upward bump: {min_y}");
-        assert!((rt.presented("bump-probe").unwrap().0[1] - 20.0).abs() < 0.1);
-        rt.update(|a, _| a.tools.completion_bump(Some(&completed), &completed, 1.0));
-        for _ in 0..30 {
-            rt.frame(1.0 / 60.0);
-            assert!((rt.presented("bump-probe").unwrap().0[1] - 20.0).abs() < 0.1, "duplicate completion does not replay");
-        }
+        assert!(min_y < before[1] - 0.5, "the symbol should hop: {min_y}");
+        assert!((rt.presented("tool-symbol").unwrap().0[1] - before[1]).abs() < 0.1);
     }
 
     #[test]

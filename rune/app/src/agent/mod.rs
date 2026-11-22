@@ -138,6 +138,7 @@ pub struct Session {
     pub placed: Option<anchor::Placed>,
     /// Turns opened to their full trace in the focused view, by their first message (`focus.rs`).
     pub open_turns: std::collections::HashSet<String>,
+    work_completion: std::cell::OnceCell<rune::Live<[f32; 2]>>,
     /// The turn the last sent message opened at the top of the view (`turn.rs`).
     pub turn: Option<turn::Turn>,
     /// Questions whose rows are in view: only their `question_tops` are current.
@@ -1071,6 +1072,7 @@ impl App {
                 self.agent_history_edited(&session_id, error, messages, next_cursor);
             }
             AgentServerMessage::MessageUpdated { session_id, mut message, parent_message_id } => {
+                let live = self.session_live(&session_id);
                 let session = self.sessions.entry(session_id).or_default();
                 let part = message.id.clone();
                 // Pruning old outputs emits tool updates too. History may not contain those
@@ -1085,14 +1087,26 @@ impl App {
                 }
                 session.pending_prompts.remove(&message.id);
                 settle_task_card(&self.families, &mut message, session.streaming);
-                let previous = session.message_position(&message.id).map(|at| &session.messages[at]);
+                let at = session.message_position(&message.id);
+                let previous = at.map(|at| &session.messages[at]);
                 if previous.is_none() && message.kind == HistoryMessageKind::System && message.title == "Goal Started" {
                     session.goal_notice = Some(slash::GoalNotice::new(message.id.clone()));
                 }
-                let previous = session.message_position(&message.id).map(|at| &session.messages[at]);
-                self.tools.completion_bump(previous, &message, self.ty.scale());
-                let rebase = session.message_position(&message.id)
-                    .is_none_or(|at| session.messages[at].kind != message.kind);
+                self.tools.prepare_symbol(&message);
+                if let (Some(at), Some(previous)) = (at, previous)
+                    && tools::just_succeeded(previous, &message)
+                    && std::env::var("NEOISM_REDUCED_MOTION").as_deref() != Ok("1")
+                {
+                    let scale = self.ty.scale();
+                    if self.focused_view && live && focus::last_turn_folded(session, at)
+                        && focus::step(previous, at) && focus::step(&message, at)
+                    {
+                        if let Some(offset) = session.work_completion.get() { tools::hop(offset, scale); }
+                    } else {
+                        self.tools.hop_symbol(&message.id, scale);
+                    }
+                }
+                let rebase = previous.is_none_or(|m| m.kind != message.kind);
                 session.note_message(&message);
                 session.upsert_message(message);
                 session.order_stream_parts(&part, parent_message_id);

@@ -746,8 +746,13 @@ impl App {
         let Some(picker) = self.composer.picker.as_mut() else { return false };
         match event.key {
             // Keys arrive through a text field (an instant commit): the slide must animate.
-            Key::Up => { tx.animated(); picker.step(-1) }
-            Key::Down => { tx.animated(); picker.step(1) }
+            Key::Up | Key::Down => {
+                tx.animated();
+                picker.step(if event.key == Key::Up { -1 } else { 1 });
+                if picker.kind == Kind::Model && picker.activity.is_none() {
+                    tx.scroll_into_view_in(picker.model_scroll_key(), format!("picker-row:{}", picker.selected));
+                }
+            }
             Key::Escape => { if !self.picker_back() { self.close_prompt_picker(); } }
             Key::Backspace if picker.query.text.is_empty() => { if !self.picker_back() { return false; } }
             Key::Enter => self.accept_picker_row(None, tx),

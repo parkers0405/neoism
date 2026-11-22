@@ -128,6 +128,7 @@ pub struct Picker {
     pub wheel: f32,
     /// A drag just scrolled the list: the release that ends it is not a click on a row.
     pub dragged: bool,
+    pub mounted_model_scroll: Option<String>,
     pub usage: super::usage::Usage,
     pub usage_error: Option<String>,
     pub usage_scroll: f32,
@@ -148,7 +149,7 @@ impl Picker {
         let mut picker = Picker {
             kind, title: title.into(), placeholder: "Search".into(), query, rows: Vec::new(), search: None, filtered: Vec::new(),
             selected: 0, top: 0, loading: false, activity: None, provider: None, last_provider: None,
-            limit: std::cell::Cell::new(MAX_ROWS), wheel: 0.0, dragged: false,
+            limit: std::cell::Cell::new(MAX_ROWS), wheel: 0.0, dragged: false, mounted_model_scroll: None,
             usage: super::usage::Usage::default(), usage_error: None, usage_scroll: 0.0,
             usage_max_scroll: std::cell::Cell::new(0.0),
             mention: None,
@@ -188,6 +189,10 @@ impl Picker {
     }
 
     pub fn rows(&self) -> &[Row] { &self.filtered }
+
+    pub(super) fn model_scroll_key(&self) -> String {
+        format!("model-list:{:?}:{:?}", self.provider, self.query.text)
+    }
 
     pub fn selected_row(&self) -> Option<&Row> { self.filtered.get(self.selected).filter(|r| !r.header) }
 

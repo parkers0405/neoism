@@ -73,6 +73,8 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use neoism_protocol::agent::{AgentServerMessage, SkillInfo};
+    use rune::{Env, Key, KeyEvent, Runtime};
 
     #[test]
     fn compact_pastes_expand_by_identity_and_preserve_surrounding_unicode() {
@@ -152,5 +154,79 @@ mod tests {
         assert_eq!(app.tabs[i].draft.pills().count(), 1);
         app.tabs[i].draft.key(&rune::KeyEvent { key: rune::Key::Backspace, mods: Default::default() }, None);
         assert_eq!(app.tabs[i].draft.text, "Before  after");
+    }
+
+    fn skills_runtime() -> Runtime<App> {
+        let mut app = App::new();
+        app.load_fixture("skills", "Skills", "[]");
+        let mut rt = Runtime::new(app, crate::ui::chrome::root, (900.0, 600.0), Env::new(true, 1.0));
+        rt.on_key = Some(crate::on_key);
+        rt.poll = Some(crate::poll);
+        for _ in 0..4 { rt.frame(1.0 / 60.0); }
+        rt
+    }
+
+    fn key(rt: &mut Runtime<App>, key: Key) {
+        rt.key(KeyEvent { key, mods: Default::default() });
+        rt.frame(1.0 / 60.0);
+    }
+
+    fn reply_with_skills(rt: &mut Runtime<App>) {
+        rt.update(|app, _| {
+            app.apply_agent(AgentServerMessage::SkillCatalog { skills: ["review", "rewrite", "deploy"].into_iter().map(|name| SkillInfo {
+                name: name.into(), description: String::new(), path: None,
+            }).collect() });
+        });
+    }
+
+    #[test]
+    fn native_dollar_picker_keeps_composer_focus_and_routes_skill_keys() {
+        let mut rt = skills_runtime();
+        key(&mut rt, Key::Text("Before $".into()));
+        assert!(rt.state.composer.picker.as_ref().unwrap().mention.is_some());
+        assert!(rt.state.active_tab().draft.focused, "focus sync must not blur the mention's query field");
+        reply_with_skills(&mut rt);
+        key(&mut rt, Key::Text("re".into()));
+        assert_eq!(rt.state.composer.picker.as_ref().unwrap().rows().len(), 2);
+        key(&mut rt, Key::Down);
+        assert_eq!(rt.state.composer.picker.as_ref().unwrap().selected, 1);
+        key(&mut rt, Key::Up);
+        assert_eq!(rt.state.composer.picker.as_ref().unwrap().selected, 0);
+        key(&mut rt, Key::Tab);
+        assert!(rt.state.composer.picker.is_none());
+        assert_eq!(rt.state.active_tab().draft.text, "Before $review ");
+        assert_eq!(rt.state.active_tab().draft.pills().next().unwrap().1, "skill:review");
+
+        key(&mut rt, Key::Text("$".into()));
+        key(&mut rt, Key::Escape);
+        assert!(rt.state.composer.picker.is_none());
+        assert_eq!(rt.state.active_tab().draft.text, "Before $review $");
+        key(&mut rt, Key::Backspace);
+        key(&mut rt, Key::Text("$".into()));
+        reply_with_skills(&mut rt);
+        key(&mut rt, Key::Text("dep".into()));
+        key(&mut rt, Key::Enter);
+        assert!(rt.state.composer.picker.is_none());
+        assert_eq!(rt.state.active_tab().draft.text, "Before $review $deploy ");
+        assert_eq!(rt.state.active_tab().draft.pills().count(), 2);
+    }
+
+    #[test]
+    fn native_slash_skills_picker_keeps_its_own_query_field() {
+        let mut rt = skills_runtime();
+        key(&mut rt, Key::Text("/skills".into()));
+        key(&mut rt, Key::Enter);
+        let picker = rt.state.composer.picker.as_ref().unwrap();
+        assert_eq!(picker.kind, crate::agent::slash::Kind::Skill);
+        assert!(picker.mention.is_none() && picker.query.focused);
+        assert!(!rt.state.active_tab().draft.focused);
+
+        reply_with_skills(&mut rt);
+        key(&mut rt, Key::Text("re".into()));
+        assert_eq!(rt.state.composer.picker.as_ref().unwrap().rows().len(), 2);
+        key(&mut rt, Key::Down);
+        key(&mut rt, Key::Enter);
+        assert!(rt.state.composer.picker.is_none());
+        assert_eq!(rt.state.active_tab().draft.text, "$rewrite ");
     }
 }

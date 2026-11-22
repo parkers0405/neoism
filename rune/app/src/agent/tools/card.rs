@@ -88,7 +88,7 @@ fn header(cx: &Cx, m: &HistoryMessage, spec: Header) -> El {
     row = row.child(indicator(cx, m).key("tool-status").instant_changes());
     let mut icon = symbol(cx, m).key("tool-symbol").instant_changes();
     if let Some(offset) = cx.app.tools.completion_bumps.get(&m.id) {
-        icon = icon.live_offset(offset.smooth(rune::Spring::new(0.18, 0.12)));
+        icon = icon.live_offset(offset.smooth(super::HOP_SPRING));
     }
     row = row.child(icon);
 

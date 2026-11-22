@@ -2,6 +2,17 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.163] - 2026-11-21
+
+### Focused Agent view, send to top, and a refreshed chat font and rail
+
+- Adds a focused Agent view, on by default: a running turn lists its tool calls as single quiet lines, and a finished turn folds them under one work row that opens the full trace when pressed. Settings > Agent > **Focused agent view** turns it off.
+- Adds Settings > Agent > **Send to top**, which opens a sent message near the top of the view with the reply streaming below it.
+- Defaults chat text to the platform interface font (San Francisco on macOS, Segoe UI on Windows, Geist on Linux).
+- Draws the activity rail with line icons, sets tab titles in the proportional font, and marks a tab whose agent is working with an accent dot.
+
+Stable platform bundles and the daemon image use one immutable tagged source. Local and platform checks, publication, and independent download verification are reported separately.
+
 ## [0.7.162] - 2026-11-21
 
 ### Redesigned Agent sidebar, Settings and model picker; add a project; Copy, Fork and Reply

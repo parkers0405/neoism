@@ -52,12 +52,12 @@
   </categories>
 
   <releases>
-    <release version="0.7.162" date="2026-11-21">
+    <release version="0.7.163" date="2026-11-21">
       <description>
-        <p>A redesigned Agent sidebar, Settings, model picker and composer; adding a project by creating or cloning a repository; Copy, Fork and Reply under answers. The macOS app and disk image are signed with a Developer ID and notarized by Apple.</p>
+        <p>A focused Agent view that folds each turn's tool calls under one work row, an option to open a sent message at the top of the view, the platform interface font for chat, and a line-icon activity rail. The macOS app and disk image are signed with a Developer ID and notarized by Apple.</p>
         <p>Keeps the Agent working after long conversations are compacted, stops it from waiting on delegated work it never started, and asks macOS for Accessibility when computer use needs it.</p>
       </description>
-      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.162</url>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.163</url>
     </release>
     <release version="0.7.159" date="2026-11-19">
       <description>

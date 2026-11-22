@@ -16,6 +16,7 @@ pub mod editor;
 pub mod files;
 pub mod git;
 pub mod host_path;
+pub mod issue;
 pub mod ide_tools;
 pub mod pairing;
 pub mod plugin_resource;

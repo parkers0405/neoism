@@ -19,6 +19,7 @@ pub mod fs_watch;
 pub mod git;
 pub mod database;
 pub mod pull_request;
+pub mod issue;
 mod git_blame;
 mod git_snapshot;
 pub mod handshake;

@@ -50,7 +50,7 @@ fn list(v: &Value) -> &[Value] {
 fn sha(s: &str) -> bool {
     s.len() == 40 && s.bytes().all(|c| c.is_ascii_hexdigit())
 }
-fn branch(s: &str) -> bool {
+pub(crate) fn branch(s: &str) -> bool {
     !s.is_empty()
         && !s.starts_with('-')
         && !s.contains("..")
@@ -223,6 +223,10 @@ fn run(
     }
     String::from_utf8(stdout)
         .map_err(|_| error(PullRequestErrorKind::Failed, "Host returned invalid UTF-8"))
+}
+/// The bounded, timed host runner, for the other hosted features (issues).
+pub(crate) fn host_run(root: &Path, program: &str, args: &[String], input: Option<&Value>) -> Result<String> {
+    run(root, program, args, input)
 }
 fn git(root: &Path, args: &[&str]) -> Result<String> {
     run(

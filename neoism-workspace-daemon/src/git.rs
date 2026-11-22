@@ -363,6 +363,16 @@ fn handle_blocking(root: &Path, msg: GitClientMessage) -> Vec<GitServerMessage> 
             vec![]
         }
         GitClientMessage::PullRequest { request } => vec![GitServerMessage::PullRequest { reply: crate::pull_request::handle_at(root, request) }],
+        GitClientMessage::Issue { request } => vec![GitServerMessage::Issue { reply: crate::issue::handle_at(root, request) }],
+        GitClientMessage::Sync => with_workdir(&repo, |wd| vec![sync_state(wd)]),
+        GitClientMessage::StageAll => with_workdir(&repo, |wd| vec![changed_files_reply(wd, run_git(wd, &["add", "-A"]).err())]),
+        GitClientMessage::CreateBranch { name } => with_workdir(&repo, |wd| {
+            let result = if crate::pull_request::branch(&name) {
+                run_git(wd, &["switch", "-c", &name]).or_else(|_| run_git(wd, &["checkout", "-b", &name]))
+            } else { Err("That is not a usable branch name.".to_string()) };
+            vec![changed_files_reply(wd, result.err())]
+        }),
+        GitClientMessage::DiffRange { base } => with_workdir(&repo, |wd| range_diff(wd, &base)),
         GitClientMessage::Blame { .. } => err("Blame requires async dispatch"),
         GitClientMessage::CreateRepository { .. } | GitClientMessage::CloneRepository { .. } => err("Repository requests require async dispatch"),
         GitClientMessage::Status => status(&repo),
@@ -681,6 +691,56 @@ fn publish(workdir: &Path) -> Result<(), String> {
             &format!("refs/heads/{branch}:refs/heads/{branch}"),
         ],
     )
+}
+
+/// The branch against its upstream and the repository's default branch.
+fn sync_state(workdir: &Path) -> GitServerMessage {
+    let (ahead, behind) = git_text(workdir, &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"]).ok()
+        .and_then(|s| { let mut n = s.split_whitespace().map(|n| n.parse::<u32>().ok()); Some((n.next()??, n.next()??)) })
+        .unwrap_or((0, 0));
+    let has_remote = git_text(workdir, &["remote"]).is_ok_and(|s| !s.is_empty());
+    GitServerMessage::Sync { ahead, behind, default_branch: default_branch(workdir), has_remote, head: git_text(workdir, &["rev-parse", "HEAD"]).ok() }
+}
+
+/// The remote's default branch where it is recorded, else a local `main` or `master`.
+fn default_branch(workdir: &Path) -> Option<String> {
+    if let Ok(name) = git_text(workdir, &["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]) {
+        if let Some(name) = name.strip_prefix("origin/").filter(|n| !n.is_empty()) { return Some(name.to_owned()); }
+    }
+    ["main", "master"].into_iter().find(|name| git_text(workdir, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{name}")]).is_ok()).map(str::to_owned)
+}
+
+const RANGE_FILES: usize = 300;
+
+/// What this branch changes against `base`, from their merge base to the working tree.
+fn range_diff(workdir: &Path, base: &str) -> Vec<GitServerMessage> {
+    if !crate::pull_request::branch(base) { return err("That is not a branch name."); }
+    let from = match git_text(workdir, &["merge-base", base, "HEAD"]) {
+        Ok(sha) if !sha.is_empty() => sha,
+        _ => return err(format!("This branch shares no history with {base}.")),
+    };
+    let status = git_text(workdir, &["diff", "--no-renames", "--name-status", &from]).unwrap_or_default();
+    let counts = git_text(workdir, &["diff", "--no-renames", "--numstat", &from]).unwrap_or_default();
+    let counts: std::collections::HashMap<&str, (u32, u32)> = counts.lines().filter_map(|line| {
+        let mut parts = line.splitn(3, '\t');
+        let (added, deleted, path) = (parts.next()?, parts.next()?, parts.next()?);
+        Some((path, (added.parse().unwrap_or(0), deleted.parse().unwrap_or(0))))
+    }).collect();
+    let (mut files, mut diffs) = (Vec::new(), Vec::new());
+    let mut truncated = false;
+    for line in status.lines() {
+        let Some((code, path)) = line.split_once('\t') else { continue };
+        if files.len() == RANGE_FILES { truncated = true; break; }
+        let (additions, deletions) = counts.get(path).copied().unwrap_or((0, 0));
+        files.push(GitFileChange {
+            path: path.to_owned(),
+            status: match code.chars().next() { Some('A') => GitChangeStatus::Added, Some('D') => GitChangeStatus::Deleted, _ => GitChangeStatus::Modified },
+            additions, deletions, staged: false,
+        });
+        let patch = git_text(workdir, &["diff", "--no-renames", "--no-color", "--no-ext-diff", "--no-textconv", &from, "--", path]).unwrap_or_default();
+        diffs.push(GitFileDiff { path: path.to_owned(), patch });
+    }
+    vec![GitServerMessage::RangeDiff { base: base.to_owned(), files, diffs, truncated }]
 }
 
 fn changed_files_reply(workdir: &Path, error: Option<String>) -> GitServerMessage {
@@ -1607,6 +1667,58 @@ mod tests {
         std::fs::remove_dir_all(&tmp).ok();
         assert_eq!(deleted, 1, "doomed.txt should count as one deletion");
         assert_eq!(added, 1, "brand_new.txt should count as one addition");
+    }
+
+    #[test]
+    fn branch_work_is_staged_whole_and_diffed_against_its_base() {
+        let tmp = std::env::temp_dir().join(format!("neoism-git-range-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _repo = Repository::init(&tmp).unwrap();
+        for (key, value) in [("user.name", "t"), ("user.email", "t@e"), ("commit.gpgsign", "false")] { run_git(&tmp, &["config", key, value]).unwrap(); }
+        run_git(&tmp, &["checkout", "-b", "main"]).unwrap();
+        std::fs::write(tmp.join("kept.txt"), b"one\n").unwrap();
+        std::fs::write(tmp.join("gone.txt"), b"bye\n").unwrap();
+        assert!(matches!(&handle_blocking(&tmp, GitClientMessage::StageAll)[0], GitServerMessage::ChangedFiles { files, error: None, .. } if files.len() == 2 && files.iter().all(|f| f.staged)));
+        run_git(&tmp, &["commit", "-m", "base"]).unwrap();
+
+        // A name git would read as an option or a range is refused; a plain one switches.
+        for bad in ["-x", "a..b", ""] {
+            assert!(matches!(&handle_blocking(&tmp, GitClientMessage::CreateBranch { name: bad.into() })[0], GitServerMessage::ChangedFiles { error: Some(_), .. }));
+        }
+        assert!(matches!(&handle_blocking(&tmp, GitClientMessage::CreateBranch { name: "topic".into() })[0], GitServerMessage::ChangedFiles { branch: Some(b), error: None, .. } if b == "topic"));
+
+        std::fs::write(tmp.join("kept.txt"), b"one\ntwo\n").unwrap();
+        std::fs::write(tmp.join("new.txt"), b"hi\n").unwrap();
+        run_git(&tmp, &["add", "-A"]).unwrap();
+        run_git(&tmp, &["commit", "-m", "work"]).unwrap();
+        std::fs::remove_file(tmp.join("gone.txt")).unwrap();
+
+        // Commits on the branch and the uncommitted deletion are one diff against main.
+        match &handle_blocking(&tmp, GitClientMessage::DiffRange { base: "main".into() })[0] {
+            GitServerMessage::RangeDiff { base, files, diffs, truncated } => {
+                assert_eq!((base.as_str(), *truncated), ("main", false));
+                let status = |path: &str| files.iter().find(|f| f.path == path).map(|f| (f.status, f.additions, f.deletions));
+                assert_eq!(status("kept.txt"), Some((GitChangeStatus::Modified, 1, 0)));
+                assert_eq!(status("new.txt"), Some((GitChangeStatus::Added, 1, 0)));
+                assert_eq!(status("gone.txt"), Some((GitChangeStatus::Deleted, 0, 1)));
+                assert!(diffs.iter().find(|d| d.path == "kept.txt").is_some_and(|d| d.patch.contains("+two")));
+            }
+            other => panic!("expected RangeDiff, got {other:?}"),
+        }
+        assert!(matches!(&handle_blocking(&tmp, GitClientMessage::DiffRange { base: "--output=x".into() })[0], GitServerMessage::Error { .. }));
+
+        // No remote and no upstream: nothing ahead or behind, and main is the default.
+        match &handle_blocking(&tmp, GitClientMessage::Sync)[0] {
+            GitServerMessage::Sync { ahead, behind, default_branch, has_remote, head } => {
+                assert_eq!((*ahead, *behind, *has_remote), (0, 0, false));
+                assert_eq!(default_branch.as_deref(), Some("main"));
+                assert!(head.as_ref().is_some_and(|h| h.len() == 40));
+            }
+            other => panic!("expected Sync, got {other:?}"),
+        }
+        assert!(GitClientMessage::StageAll.is_mutation() && GitClientMessage::CreateBranch { name: String::new() }.is_mutation());
+        assert!(!GitClientMessage::Sync.is_mutation() && !GitClientMessage::DiffRange { base: String::new() }.is_mutation());
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]

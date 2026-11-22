@@ -18,6 +18,16 @@ pub struct GitChangeBlock {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GitClientMessage {
     PullRequest { request: crate::pull_request::PullRequestRequest },
+    Issue { request: crate::issue::IssueRequest },
+    /// How the branch stands against its upstream and the repository's default branch.
+    Sync,
+    /// Stage every change in the working tree, as `git add -A` does.
+    StageAll,
+    /// Everything this branch changes against `base`: its commits and the working tree,
+    /// from the merge base.
+    DiffRange { base: String },
+    /// Create `name` at HEAD and switch to it, carrying the working tree.
+    CreateBranch { name: String },
     /// Read-only HEAD attribution. Path is workspace-relative or an absolute host path.
     Blame {
         path: String,
@@ -117,9 +127,12 @@ impl GitClientMessage {
     /// these on the write permission; reads stay on the read gate.
     pub fn is_mutation(&self) -> bool {
         if let Self::PullRequest { request } = self { return request.is_mutation(); }
+        if let Self::Issue { request } = self { return request.is_mutation(); }
         matches!(
             self,
             GitClientMessage::Stage { .. }
+                | GitClientMessage::StageAll
+                | GitClientMessage::CreateBranch { .. }
                 | GitClientMessage::Unstage { .. }
                 | GitClientMessage::Restore { .. }
                 | GitClientMessage::ApplyBlock { .. }
@@ -163,6 +176,23 @@ mod restore_tests {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GitServerMessage {
     PullRequest { reply: crate::pull_request::PullRequestReply },
+    Issue { reply: crate::issue::IssueReply },
+    /// Reply to [`GitClientMessage::Sync`]. `ahead`/`behind` count commits against the
+    /// upstream and are zero without one.
+    Sync {
+        ahead: u32,
+        behind: u32,
+        default_branch: Option<String>,
+        has_remote: bool,
+        head: Option<String>,
+    },
+    /// Reply to [`GitClientMessage::DiffRange`].
+    RangeDiff {
+        base: String,
+        files: Vec<GitFileChange>,
+        diffs: Vec<GitFileDiff>,
+        truncated: bool,
+    },
     CommitDetail { detail: GitCommitDetail },
     BaseFile { path: String, text: String },
     Blame {

@@ -9,17 +9,16 @@ pub fn view(app: &App) -> El {
     };
     let p = app.pal;
     let s = app.ty.scale();
-    let font = app.ty.mono_sized(12.0);
+    let font = app.ty.sized(12.0);
     let key = db.path.clone();
     let button = |label: String| {
         el().h(30.0 * s)
             .px(12.0 * s)
             .center()
-            .radius(8.0 * s)
+            .radius(5.0 * s)
             .fill(rgb(p.surface))
-            .border(s, rgb(p.border))
             .hover(rgb(p.hover))
-            .child(text(label).font(app.ty.sized(12.0)).color(rgb(p.fg)))
+            .child(text(label).font(font).color(rgb(p.fg)))
     };
     if db.path.is_empty() {
         return col()
@@ -77,11 +76,10 @@ pub fn view(app: &App) -> El {
             stick_bottom: false,
         })
         .child(
-            text("Tables & views")
-                .font(app.ty.sans(11.5, 500.0))
-                .color(rgb(p.muted))
-                .ml(8.0 * s)
-                .mb(8.0 * s),
+            text("TABLES & VIEWS")
+                .font(app.ty.sized_bold(11.0))
+                .color(rgb(p.dim))
+                .mb(12.0 * s),
         );
     for object in &db.objects {
         let (path, name) = (key.clone(), object.name.clone());
@@ -91,7 +89,7 @@ pub fn view(app: &App) -> El {
                 .h(30.0 * s)
                 .px(8.0 * s)
                 .center_y()
-                .radius(8.0 * s)
+                .radius(4.0 * s)
                 .fill(if selected {
                     rgb(p.hover)
                 } else {
@@ -100,7 +98,7 @@ pub fn view(app: &App) -> El {
                 .hover(rgb(p.hover))
                 .child(
                     text(name.clone())
-                        .font(app.ty.sans(13.0, if selected { 500.0 } else { 400.0 }))
+                        .font(font)
                         .color(rgb(if selected { p.fg } else { p.dim }))
                         .truncate(),
                 )
@@ -178,7 +176,7 @@ pub fn view(app: &App) -> El {
                         .center_y()
                         .child(
                             text(format!("{column}{suffix}"))
-                                .font(app.ty.sans(12.0, 600.0))
+                                .font(font)
                                 .color(rgb(p.fg))
                                 .truncate(),
                         )
@@ -299,7 +297,7 @@ pub fn view(app: &App) -> El {
                     }
                 )
             })
-            .font(app.ty.sized(12.0))
+            .font(font)
             .color(rgb(p.dim))
             .grow(1.0)
             .truncate(),
@@ -328,7 +326,7 @@ pub fn view(app: &App) -> El {
     if let Some(error) = &db.error {
         body = body.child(
             text(error.clone())
-                .font(app.ty.sized(12.0))
+                .font(font)
                 .color(rgb(p.red))
                 .px(12.0 * s)
                 .py(8.0 * s),

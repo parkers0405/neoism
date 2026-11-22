@@ -36,7 +36,7 @@ pub fn icon(app: &App, glyph: &str, scale: f32, color: Color) -> El {
 pub fn neoism_mark(app: &App, size: f32, key: &str) -> El {
     match app.tools.icons.agent(Some("neoism")) {
         Some(image) => el().key(key.to_owned()).w(size).h(size).pixels(image.pixels()),
-        None => text("n").font(app.ty.mono_sized(size)).color(theme::rgb(app.pal.fg)),
+        None => text("n").font(app.ty.sized(size)).color(theme::rgb(app.pal.fg)),
     }
 }
 

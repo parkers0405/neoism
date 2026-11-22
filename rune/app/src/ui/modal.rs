@@ -128,23 +128,6 @@ impl App {
     }
 }
 
-/// A modal's button: filled for the main action, outlined otherwise, ringed when the keyboard is on it.
-pub fn button(app: &App, label: &str, hint: &str, primary: bool, selected: bool) -> El {
-    let p = app.pal;
-    let s = app.ty.scale();
-    let danger = ["Discard", "Remove", "Stop", "Delete"].iter().any(|w| label.starts_with(w));
-    let ink = if primary { p.bg } else if danger { p.red } else { p.fg };
-    let mut b = row().h(ACTION_H * s).px(14.0 * s).gap(8.0 * s).center().radius(8.0 * s)
-        .fill(if primary { rgb(p.fg) } else if selected { rgb(p.hover) } else { rgb(p.surface) })
-        .border(s, if selected { rgb(p.accent) } else if primary { rgb(p.fg) } else { rgb(p.border) })
-        .child(text(label.to_owned()).font(app.ty.sans(ACTION, 550.0)).color(rgb(ink)));
-    if !hint.is_empty() {
-        b = b.child(text(hint.to_owned()).font(app.ty.sans(11.0, 450.0)).color(rgb(ink).alpha(0.55)));
-    }
-    if !primary { b = b.hover(rgb(p.hover)); }
-    b
-}
-
 pub fn view(app: &App) -> El {
     let Some(modal) = &app.modal else { return el() };
     let p = app.pal;
@@ -162,11 +145,14 @@ pub fn view(app: &App) -> El {
         body = body.child(el().w_full().min_h(LINE_H * s).center_y()
             .child(text(line.to_owned()).font(app.ty.sized(BODY).lh(LINE_H * s)).color(rgb(p.dim)).wrap().w_full()));
     }
-    // Buttons in a row at the foot, as in Settings: the first is the filled one.
-    let mut actions = row().w_full().mt(18.0 * s).gap(8.0 * s).justify_end().wrap();
-    for (index, item) in modal.buttons.iter().enumerate() {
-        let action = item.action;
-        actions = actions.child(button(app, &item.label, &item.key, index == 0, index == modal.selected)
+    let mut actions = col().w_full().mt(14.0 * s).border_sides([1.0, 0.0, 0.0, 0.0], rgb(p.border)).pt(8.0 * s);
+    for (index, button) in modal.buttons.iter().enumerate() {
+        let selected = index == modal.selected;
+        let action = button.action;
+        actions = actions.child(row().w_full().h(ACTION_H * s).px(10.0 * s).center_y().justify_between().radius(6.0 * s)
+            .fill(if selected { rgb(p.hover) } else { Color::TRANSPARENT })
+            .child(text(button.label.clone()).font(app.ty.sized(ACTION)).color(rgb(p.fg)))
+            .child(text(button.key.clone()).font(app.ty.sized(BODY)).color(rgb(p.muted)))
             .on_press_tx(move |a: &mut App, tx: &mut Tx| a.activate_modal_action(action, tx)));
     }
     let card = col().key("modal").w((WIDTH * s).min(app.window[0] - 16.0)).padding(PAD * s).radius(RADIUS * s)

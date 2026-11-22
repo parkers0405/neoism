@@ -70,12 +70,8 @@ impl Type {
     /// The original UI scale: configured font size over 14.
     pub fn scale(self) -> f32 { (self.size / 14.0).clamp(0.5, 3.0) }
     /// A size given in the original's unscaled points, at the configured weight.
-    /// Interface labels: the proportional face Settings uses, at a size in unscaled points.
-    pub fn sized(self, points: f32) -> TextStyle { TextStyle::new(points * self.scale(), 500.0) }
-    pub fn sized_bold(self, points: f32) -> TextStyle { TextStyle::new(points * self.scale(), 650.0) }
-    /// Fixed-width text at the configured weight: code, diffs, paths that must line up.
-    pub fn mono_sized(self, points: f32) -> TextStyle { TextStyle::new(points * self.scale(), self.weight).mono() }
-    pub fn mono_bold(self, points: f32) -> TextStyle { TextStyle::new(points * self.scale(), 800.0).mono() }
+    pub fn sized(self, points: f32) -> TextStyle { TextStyle::new(points * self.scale(), self.weight).mono() }
+    pub fn sized_bold(self, points: f32) -> TextStyle { TextStyle::new(points * self.scale(), 800.0).mono() }
     pub fn icon_sized(self, points: f32) -> TextStyle { TextStyle::new(points * self.scale(), 400.0).family(NERD) }
     /// Use a named mono face so Rune keeps programming ligatures enabled in the editor.
     pub fn code(self) -> TextStyle {
@@ -97,13 +93,13 @@ impl Type {
         TextStyle::new(self.size * 1.13, self.weight).mono().lh(self.size * 1.6)
     }
     pub fn small(self) -> TextStyle {
-        TextStyle::new(self.size * 0.86, 500.0)
+        TextStyle::new(self.size * 0.86, self.weight).mono()
     }
     pub fn small_bold(self) -> TextStyle {
-        TextStyle::new(self.size * 0.86, 650.0)
+        TextStyle::new(self.size * 0.86, 700.0).mono()
     }
     pub fn tab(self) -> TextStyle {
-        TextStyle::new(self.size * 0.93, 600.0)
+        TextStyle::new(self.size * 0.93, 700.0).mono()
     }
     pub fn status(self) -> TextStyle {
         TextStyle::new(self.size * 0.86, 800.0).mono()

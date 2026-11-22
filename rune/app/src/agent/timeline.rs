@@ -681,7 +681,7 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
             let font = app.ty.chat_sized(13.0);
             let style = markdown_style(app).text(rgb(p.dim)).muted(rgb(p.dim)).body_font(font)
                 .heading_font(1, font).heading_font(2, font).heading_font(3, font).heading_font(4, font)
-                .code_block_font(app.ty.mono_sized(13.0));
+                .code_block_font(app.ty.sized(13.0));
             let mut body = col().key(key).w_full().pt(24.0).gap(10.0);
             if streaming { body = body.instant_changes(); }
             let (title, reasoning) = reasoning_parts(message);
@@ -888,8 +888,8 @@ impl Meta for El {
         let (copied, replied, fork_session, fork_message, reply_session) = (message.text.clone(), message.text.clone(), session.clone(), message.id.clone(), session);
         // The actions show only while the pointer is on the answer.
         self.hover_group().child(row().gap(0.0).mt(4.0)
-            .child(text(agent.to_owned()).font(app.ty.sans(13.0, 600.0)).color(rgb(p.blue)))
-            .child(text(format!(" · {rest}")).font(app.ty.sans(13.0, 450.0)).color(rgb(p.muted))))
+            .child(text(agent.to_owned()).font(app.ty.body()).color(rgb(p.blue)))
+            .child(text(format!(" · {rest}")).font(app.ty.body()).color(rgb(p.muted))))
             .child(row().key(format!("reply-actions:{}", message.id)).gap(2.0 * s).mt(6.0 * s).ml(-7.0 * s).group_opacity(0.0, 1.0)
                 .child(action("copy", "\u{f018f}", "Copy").on_press_tx(move |_: &mut App, tx: &mut rune::Tx| tx.copy(copied.clone())))
                 .child(action("fork", "\u{f062c}", "Fork").on_press(move |a: &mut App| a.fork_at(&fork_session, &fork_message)))

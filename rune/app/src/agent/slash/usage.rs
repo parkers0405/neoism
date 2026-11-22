@@ -94,7 +94,7 @@ pub(super) fn view(app: &App, composer: [f32; 4]) -> rune::El {
     picker.usage_max_scroll.set(max_scroll);
     let scroll = picker.usage_scroll.clamp(0.0, max_scroll);
     let label = |value: String, width: f32, bold: bool, muted: bool| {
-        text(value).font(TextStyle::new(13.0 * s, if bold { 600.0 } else { 400.0 }))
+        text(value).font(TextStyle::new(13.0 * s, if bold { 700.0 } else { 400.0 }).mono())
             .color(rgb(if muted { p.muted } else { p.fg })).w(width.max(0.0)).truncate()
     };
     let mut card = el().key("usage-picker").w(cw).h(height).fill(rgb(p.bg)).radius(14.0 * s)

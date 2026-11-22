@@ -186,7 +186,7 @@ pub fn row_marks(app: &App, m: &RowMarks<'_>, x_of: impl Fn(usize) -> f32) -> Ve
 
 fn hover_style(app: &App) -> MarkdownStyle {
     let p = app.pal;
-    let body = app.ty.mono_sized(HOVER_FONT);
+    let body = app.ty.sized(HOVER_FONT);
     let code_bg = mix(rgb(p.surface), rgb(p.fg), 0.06);
     MarkdownStyle::neutral(true)
         .text(rgb(p.fg))
@@ -198,9 +198,9 @@ fn hover_style(app: &App) -> MarkdownStyle {
         .code_block(Color::TRANSPARENT, Color::TRANSPARENT)
         .code_block_padding(8.0 * app.ty.scale(), 6.0 * app.ty.scale())
         .body_font(body)
-        .heading_font(1, app.ty.mono_bold(HOVER_FONT + 2.0))
-        .heading_font(2, app.ty.mono_bold(HOVER_FONT + 1.0))
-        .heading_font(3, app.ty.mono_bold(HOVER_FONT))
+        .heading_font(1, app.ty.sized_bold(HOVER_FONT + 2.0))
+        .heading_font(2, app.ty.sized_bold(HOVER_FONT + 1.0))
+        .heading_font(3, app.ty.sized_bold(HOVER_FONT))
         .code_block_font(app.ty.code())
         .inline_code_font(1.0, app.ty.weight)
         .syntax(Syntax::Keyword, rgb(p.syn_keyword))
@@ -383,7 +383,7 @@ fn completion_menu(
     if items.is_empty() {
         return el();
     }
-    let font = app.ty.mono_sized(MENU_FONT);
+    let font = app.ty.sized(MENU_FONT);
     let adv = font.size * 0.6;
     let (row_h, pad) = (MENU_ROW_H * s, MENU_PAD_X * s);
     let (kind_w, detail_w) = (MENU_KIND_W * s, MENU_DETAIL_W * s);

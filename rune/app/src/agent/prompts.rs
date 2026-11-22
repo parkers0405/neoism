@@ -217,7 +217,7 @@ pub fn card(app: &App) -> El {
     let first = selected.saturating_sub(fit - 1).min(rows.len().saturating_sub(fit));
     let visible = rows.len().min(fit);
     let height = (82.0 * s + visible as f32 * row_h).min((y - top - 6.0 * s).max(0.0));
-    let font = |size| rune::tok::TextStyle::new(size * s, 450.0);
+    let font = |size| rune::tok::TextStyle::new(size * s, 400.0).mono();
     let mut card = el().key(format!("agent-prompt:{}:{}", p.session, p.id)).w(width).h(height)
         .fill(rgb(palette.bg)).radius(14.0 * s).border(s, rgb(palette.border)).clip_rounded(14.0 * s)
         .on_press(|_: &mut App| {})

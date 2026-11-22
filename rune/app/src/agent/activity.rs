@@ -203,7 +203,7 @@ impl Activity {
                 }))
                 .child(layer(glyph, 0.0, None)));
         }
-        let dot_font = app.ty.mono_bold(14.0);
+        let dot_font = app.ty.sized_bold(14.0);
         let mut dots = row().ml(7.0 * s).gap(2.0 * s).items_end();
         for dot in &self.dots {
             let ink = |dx: f32, color: Color| text(".").font(dot_font).color(color).absolute(dx, dx);

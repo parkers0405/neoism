@@ -64,7 +64,7 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
 fn track_caret(app: &App, cx: &mut Cx<App>) {
     let line = cx.caret("app-shell");
     let font = if app.picker.is_some() {
-        app.ty.mono_sized(14.0).size
+        app.ty.sized(14.0).size
     } else {
         match app.active_tab().kind {
             TabKind::Agent { .. } => app.ty.composer().size,

@@ -254,7 +254,7 @@ fn actions(app: &App, term: &Terminal, block: &Block, home: &str, width: f32) ->
 fn filter_row(app: &App, tab_id: u64, block_id: u64, query: &rune::TextEdit, shown: usize, total: usize) -> El {
     let p = app.pal;
     let s = app.ty.scale();
-    let input = rune::text_input(query, app.ty.mono_sized(12.0))
+    let input = rune::text_input(query, app.ty.sized(12.0))
         .key(format!("block-filter-query:{tab_id}:{block_id}"))
         // Only the window's block cursor marks the caret, as in the composer.
         .caret(Color::TRANSPARENT, crate::ui::cursor::selection(app))
@@ -423,8 +423,8 @@ fn splash(app: &App) -> El {
             .radius(g.radius)
             .fill(if hovered { rgb(p.hover).alpha(0.95) } else { Color::TRANSPARENT })
             .child(el().w(g.icon_slot).center().child(text(item.icon).font(TextStyle::new(g.icon_font, 400.0).family(NERD)).color(ink)))
-            .child(text(item.label).font(TextStyle::new(g.label_font, 500.0)).color(ink).ml(g.label_gap).grow(1.0).truncate().shrink())
-            .child(text(format!("[{}]", app.binding_hint(item.keys))).font(TextStyle::new(g.key_font, 500.0)).color(rgb(p.muted)))
+            .child(text(item.label).font(TextStyle::new(g.label_font, 700.0).mono()).color(ink).ml(g.label_gap).grow(1.0).truncate().shrink())
+            .child(text(format!("[{}]", app.binding_hint(item.keys))).font(TextStyle::new(g.key_font, 700.0).mono()).color(rgb(p.accent)))
             .on_hover_change(move |a: &mut App, inside: bool, _: &mut Tx| {
                 if inside { a.splash.hover = Some((tab, index)); } else if a.splash.hover == Some((tab, index)) { a.splash.hover = None; }
             })

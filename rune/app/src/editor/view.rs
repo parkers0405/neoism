@@ -99,7 +99,7 @@ fn prompt_dialog(app: &App, buffer: &Buffer) -> Option<El> {
     let prompt = buffer.prompt.as_ref()?;
     let p = app.pal;
     let s = app.ty.scale();
-    let font = app.ty.mono_sized(14.0);
+    let font = app.ty.sized(14.0);
     let width = app.rects.get("editor-page").map_or(600.0 * s, |r| (600.0 * s).min(r[2]));
     let field = if prompt.text.is_empty() {
         let placeholder = if prompt.kind == ':' { ":command".to_owned() } else { format!("{} Search in buffer\u{2026}", prompt.kind) };
@@ -126,7 +126,7 @@ fn caret(buffer: &Buffer, font_size: f32) -> El {
 fn breadcrumb(app: &App, path: &str) -> El {
     let p = app.pal;
     let s = app.ty.scale();
-    let small = app.ty.mono_sized(12.5);
+    let small = app.ty.sized(12.5);
     let icon = |glyph: &str, color: u32| text(glyph.to_owned()).font(TextStyle::new(13.0 * s, 400.0).family(NERD)).color(rgb(color));
     let parts: Vec<&str> = path.split('/').collect();
     let mut bar = row().key("editor-breadcrumb").w_full().h(BREADCRUMB_H * s).px(16.0 * s).gap(8.0 * s).center_y();

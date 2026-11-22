@@ -32,7 +32,7 @@ pub(super) fn view(app: &App, composer: [f32; 4]) -> El {
     let title = if todos.is_empty() { "Tasks".to_owned() } else { format!("Tasks  ·  {completed}/{}", todos.len()) };
     let mut content = col().w((cw - 2.0 * s).max(0.0)).px(14.0 * s).py(12.0 * s).gap(14.0 * s);
     if todos.is_empty() {
-        content = content.child(text("No tasks yet").font(app.ty.chat_body()).color(rgb(p.muted)).w_full().wrap());
+        content = content.child(text("No tasks yet").font(app.ty.body()).color(rgb(p.muted)).w_full().wrap());
     } else {
         let look = (app.pal as *const _ as usize, app.ty.size.to_bits(), app.ty.weight.to_bits(), cw.to_bits());
         for (index, todo) in todos.iter().enumerate() {

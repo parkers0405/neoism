@@ -348,7 +348,7 @@ impl App {
             // caret. Wait for the query's measured caret rather than drawing that stale one.
             if line[0] < clip[0] - 1.0 || line[0] > clip[0] + clip[2] + 1.0
                 || line[1] < clip[1] - 1.0 || line[1] + line[3] > clip[1] + clip[3] + 1.0 { return None; }
-            return Some(crate::ui::cursor::block_for_caret(line, self.ty.mono_sized(14.0).size));
+            return Some(crate::ui::cursor::block_for_caret(line, self.ty.sized(14.0).size));
         }
         // The project filter and the add-project card draw their own caret and highlight.
         if self.project_menu.is_some() || self.project_add.is_some() { return None; }

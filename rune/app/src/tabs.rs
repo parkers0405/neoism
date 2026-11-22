@@ -144,7 +144,7 @@ impl App {
             TabKind::Home | TabKind::Terminal if let Some(program) = self.tab_program(tab.id) => crate::home::program_title(program).into(),
             TabKind::Home => "Home".into(),
             TabKind::Terminal => "Terminal".into(),
-            TabKind::GitDiff => match (self.git_panel.pulls.open, self.git_panel.issues.open) {
+            TabKind::GitDiff => match (self.git_panel.pulls.viewing, self.git_panel.issues.open) {
                 (Some(n), _) => format!("Pull request #{n}"),
                 (_, Some(n)) => format!("Issue #{n}"),
                 _ => "Git Diff".into(),

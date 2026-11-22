@@ -81,8 +81,10 @@ impl Pending {
 impl State {
     pub fn review_open(&self) -> bool { self.selected.is_some() }
 
-    fn set_files(&mut self, files: Vec<GitFileChange>, branch: Option<String>) {
-        if self.files != files {
+    /// Returns whether the files changed, so a diff is only fetched again when it would differ.
+    fn set_files(&mut self, files: Vec<GitFileChange>, branch: Option<String>) -> bool {
+        let changed = self.files != files;
+        if changed {
             self.totals = files.iter().fold((0, 0, 0), |(a, d, n), f|
                 (a + f.additions as u64, d + f.deletions as u64, n + usize::from(f.staged)));
             self.files = files;
@@ -91,6 +93,7 @@ impl State {
         }
         self.branch = branch;
         self.loaded = true;
+        changed
     }
 }
 
@@ -187,6 +190,7 @@ impl App {
         self.git_panel.diff_dirty = false;
         self.git_panel.review = Review { split: self.git_panel.review.split, hide_files: self.git_panel.review.hide_files, ..Review::default() };
         self.git_panel.pulls.open = None;
+        self.git_panel.pulls.viewing = None;
         self.git_panel.issues.open = None;
     }
 
@@ -200,9 +204,9 @@ impl App {
             if token != "neoism-rune-git-status" || snapshot.workspace_root != self.cwd { return; }
             if (self.git_panel.open || self.git_panel.review_open()) && self.git_panel.pending.is_none() {
                 self.git_panel.upstream = snapshot.upstream.clone();
-                self.git_panel.set_files(snapshot.files.clone(), snapshot.branch.clone());
+                let changed = self.git_panel.set_files(snapshot.files.clone(), snapshot.branch.clone());
                 if snapshot.error.is_some() { self.git_panel.error = snapshot.error.clone(); }
-                if self.git_panel.review_open() { self.load_git_review(); }
+                if changed && self.git_panel.review_open() { self.load_git_review(); }
             }
             return;
         }
@@ -231,8 +235,8 @@ impl App {
                 }
                 let failed = error.is_some();
                 self.git_panel.error = error;
-                self.git_panel.set_files(files, branch);
-                if self.git_panel.review_open() { self.load_git_review(); }
+                let changed = self.git_panel.set_files(files, branch);
+                if (changed || self.git_panel.review.files.is_empty()) && self.git_panel.review_open() { self.load_git_review(); }
                 if failed { self.git_panel.plan.clear(); self.git_panel.running = None; }
                 else if matches!(pending.kind, Operation::Refresh) { self.git_panel.running = None; }
                 else {
@@ -406,8 +410,9 @@ fn changes(app: &App, card: El) -> El {
             crate::ui::scroll::handle(&mut a.scrollers, &wheel_key, &e, 72.0 * s, Rc::new(move || source.get()), tx)
         }).child(rows);
     if state.files.is_empty() {
-        list = list.child(text(if !state.loaded && state.pending.is_some() { "Loading changes\u{2026}" } else if !state.loaded { "Refresh to load changes" } else { "No uncommitted changes." })
-            .font(app.ty.sans(12.0, 400.0)).color(rgb(p.muted)).padding(14.0 * s));
+        list = if !state.loaded && state.pending.is_some() { list.child(skeleton(app, 4)) } else {
+            list.child(text(if !state.loaded { "Refresh to load changes" } else { "No uncommitted changes." }).font(app.ty.sans(12.0, 400.0)).color(rgb(p.muted)).padding(14.0 * s))
+        };
     }
     let input = rune::text_input(&state.message, app.ty.sans(12.5, 400.0)).key("git-commit-message")
         .w_full().h(72.0 * s).padding(10.0 * s).radius(10.0 * s).fill(rgb(p.surface)).border(s, rgb(p.border))
@@ -476,6 +481,31 @@ fn changes(app: &App, card: El) -> El {
 }
 
 /// A small coloured state label.
+/// Placeholder bars where a list is still loading: a title and a line under it, per row.
+pub(super) fn skeleton(app: &App, rows: usize) -> El {
+    let p = app.pal;
+    let s = app.ty.scale();
+    let bar = |w: f32, h: f32, alpha: f32| el().w(w * s).h(h * s).radius(h * s / 2.0).fill(rgb(p.fg).alpha(alpha));
+    let mut list = col().key("git-skeleton").w_full().px(14.0 * s).py(10.0 * s).gap(16.0 * s);
+    for i in 0..rows {
+        let wide = [210.0, 170.0, 240.0, 150.0, 200.0][i % 5];
+        list = list.child(col().gap(7.0 * s).child(bar(wide, 11.0, 0.10)).child(bar(wide * 0.55, 9.0, 0.06)).child(bar(64.0, 14.0, 0.06)));
+    }
+    list
+}
+
+/// Placeholder for a page of text: a few paragraphs of bars.
+pub(super) fn skeleton_page(app: &App) -> El {
+    let p = app.pal;
+    let s = app.ty.scale();
+    let bar = |w: f32, h: f32, alpha: f32| el().w_full().max_w(w * s).h(h * s).radius(h * s / 2.0).fill(rgb(p.fg).alpha(alpha));
+    let mut page = col().key("git-skeleton-page").w_full().gap(22.0 * s);
+    for widths in [[620.0, 560.0, 380.0], [520.0, 600.0, 300.0], [580.0, 440.0, 240.0]] {
+        page = page.child(col().w_full().gap(9.0 * s).children(widths.map(|w| bar(w, 11.0, 0.08))));
+    }
+    page
+}
+
 pub(super) fn pill(app: &App, label: &str, color: u32) -> El {
     let s = app.ty.scale();
     row().h(18.0 * s).px(7.0 * s).gap(5.0 * s).center_y().radius(9.0 * s).fill(rgb(color).alpha(0.14))

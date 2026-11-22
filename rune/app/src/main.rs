@@ -368,6 +368,8 @@ fn main() {
             ("git-review-long", git::long_fixture),
             ("git-pulls", |s| git::pulls_fixture(s, false)),
             ("git-pull", |s| git::pulls_fixture(s, true)),
+            ("git-pull-files", |s| { git::pulls_fixture(s, true); s.git_pull_files_fixture(); }),
+            ("git-pull-loading", |s| { git::pulls_fixture(s, true); s.git_panel.pulls.detail = None; }),
             ("git-issues", |s| git::issues_fixture(s, false)),
             ("git-issue", |s| git::issues_fixture(s, true)),
             ("git-review-split", |s| { git::fixture(s, true); s.git_panel.review.split = true; s.git_review_fixture_relayout(); }),

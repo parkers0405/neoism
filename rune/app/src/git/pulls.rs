@@ -16,7 +16,7 @@ pub struct Pulls {
     listing: Option<Pending>,
     /// The pull request open in the diff tab, and what is known of it.
     pub open: Option<u64>,
-    pub(super) detail: Option<PullRequestDetail>,
+    pub detail: Option<PullRequestDetail>,
     reading: Option<Pending>,
     acting: Option<Pending>,
     pub(super) working: Option<&'static str>,
@@ -24,6 +24,12 @@ pub struct Pulls {
     pub(super) detail_error: Option<String>,
     pub(super) body: TextEdit,
     pub(super) merge_menu: bool,
+    /// The pull request on screen, on its Conversation tab (`open`) or its files.
+    pub viewing: Option<u64>,
+    /// Line comments written but not yet sent; they go out with the review.
+    pub(super) drafts: Vec<PullRequestInlineComment>,
+    /// Pull requests already read, so opening one again shows at once while it refreshes.
+    cache: std::collections::HashMap<u64, PullRequestDetail>,
 }
 
 impl Pulls {
@@ -70,10 +76,12 @@ impl App {
     pub fn open_git_pull(&mut self, number: u64) {
         if let Some(id) = self.tabs.iter().find(|t| t.kind == TabKind::GitDiff).map(|t| t.id) { self.select_tab(id); } else { self.open_tab(TabKind::GitDiff); }
         self.focus = Focus::Content;
-        let keep = self.git_panel.pulls.detail.take().filter(|d| d.summary.number == number);
+        let keep = self.git_panel.pulls.cache.get(&number).cloned();
         self.git_panel.issues.open = None;
         let pulls = &mut self.git_panel.pulls;
+        if pulls.viewing != Some(number) { pulls.drafts.clear(); }
         pulls.open = Some(number);
+        pulls.viewing = Some(number);
         pulls.detail = keep;
         pulls.detail_error = None;
         pulls.notice = None;
@@ -84,7 +92,7 @@ impl App {
     }
 
     pub fn git_pull_read(&mut self) {
-        let Some(number) = self.git_panel.pulls.open else { return; };
+        let Some(number) = self.git_panel.pulls.viewing else { return; };
         self.git_panel.pulls.reading = self.git_request(GitClientMessage::PullRequest { request: PullRequestRequest::Read { number } }, Operation::Remote);
     }
 
@@ -100,15 +108,16 @@ impl App {
     pub(super) fn git_pull_review(&mut self, event: PullRequestReviewEvent) {
         let Some(detail) = &self.git_panel.pulls.detail else { return; };
         let body = self.git_panel.pulls.body.text.trim().to_owned();
-        if body.is_empty() && event != PullRequestReviewEvent::Approve {
+        let comments = self.git_panel.pulls.drafts.clone();
+        if body.is_empty() && comments.is_empty() && event != PullRequestReviewEvent::Approve {
             self.git_panel.pulls.detail_error = Some("Write something to send with the review.".into());
             return;
         }
-        let request = PullRequestRequest::SubmitReview { number: detail.summary.number, expected_head: detail.summary.head_sha.clone(), body, event, comments: vec![] };
+        let request = PullRequestRequest::SubmitReview { number: detail.summary.number, expected_head: detail.summary.head_sha.clone(), body, event, comments };
         self.git_pull_act("Sending review\u{2026}", request);
     }
 
-    /// Show the open pull request's changes in the diff view.
+    /// Show the open pull request's changes in the diff view, line by line.
     pub(super) fn git_pull_diff(&mut self) {
         let Some(detail) = &self.git_panel.pulls.detail else { return; };
         let (number, files, diffs, truncated) = (detail.summary.number, detail.files.clone(), detail.diffs.clone(), detail.truncated);
@@ -117,7 +126,58 @@ impl App {
         self.git_panel.diff_error = None;
         self.git_panel.diff_pending = None;
         self.git_panel.pulls.open = None;
-        self.git_panel.epoch = self.git_panel.epoch.wrapping_add(1);
+        self.git_pull_notes();
+    }
+
+    /// For the headless scenes: the files tab with a comment waiting.
+    pub fn git_pull_files_fixture(&mut self) {
+        self.git_pull_diff();
+        self.git_panel.pulls.drafts.push(PullRequestInlineComment { path: "src/git.rs".into(), side: PullRequestSide::Right, line: 41, start_line: None, body: "Name this after the panel?".into() });
+        self.git_pull_notes();
+    }
+
+    /// Put the posted threads and the waiting drafts under the lines they are on.
+    pub(super) fn git_pull_notes(&mut self) {
+        let state = &mut self.git_panel;
+        let review = &state.review;
+        let place = |path: &str, side: PullRequestSide, line: u32| -> Option<(usize, usize)> {
+            let f = review.files.iter().position(|f| f.path == path)?;
+            let i = review.files[f].lines.iter().position(|l| match side {
+                PullRequestSide::Right => l.kind != review::Kind::Remove && l.new == Some(line as usize),
+                PullRequestSide::Left => l.kind != review::Kind::Add && l.old == Some(line as usize),
+            })?;
+            Some((f, i))
+        };
+        let mut notes = Vec::new();
+        for thread in state.pulls.detail.iter().flat_map(|d| &d.threads) {
+            let Some((file, line)) = thread.line.and_then(|line| place(&thread.path, thread.side, line)) else { continue; };
+            notes.extend(thread.comments.iter().map(|c| review::Note { file, line, author: c.author.clone(), body: c.body.clone(), pending: false }));
+        }
+        for draft in &state.pulls.drafts {
+            if let Some((file, line)) = place(&draft.path, draft.side, draft.line) {
+                notes.push(review::Note { file, line, author: "You".into(), body: draft.body.clone(), pending: true });
+            }
+        }
+        state.review.notes = notes;
+        state.review.rebuild();
+        state.epoch = state.epoch.wrapping_add(1);
+    }
+
+    /// Keep the comment being written on a line as a draft of the review.
+    pub(super) fn git_pull_draft(&mut self) {
+        let review = &self.git_panel.review;
+        let (Some((f, i)), body) = (review.target, review.comment.text.trim().to_owned()) else { return; };
+        let Some((file, line)) = review.files.get(f).and_then(|file| Some((file, file.lines.get(i)?))) else { return; };
+        if body.is_empty() { return; }
+        let (side, number) = match (line.kind, line.old, line.new) {
+            (review::Kind::Remove, Some(old), _) => (PullRequestSide::Left, old),
+            (_, _, Some(new)) => (PullRequestSide::Right, new),
+            _ => return,
+        };
+        self.git_panel.pulls.drafts.push(PullRequestInlineComment { path: file.path.clone(), side, line: number as u32, start_line: None, body });
+        self.git_panel.review.target = None;
+        self.git_panel.review.comment = TextEdit::default();
+        self.git_pull_notes();
     }
 
     /// A reply to one of this tab's requests. `false` when it is not one of them.
@@ -143,8 +203,12 @@ impl App {
         if hit(&pulls.reading) {
             pulls.reading = None;
             match message {
-                GitServerMessage::PullRequest { reply: PullRequestReply::Detail { detail } } if pulls.open == Some(detail.summary.number) => {
-                    (pulls.detail, pulls.detail_error) = (Some(detail.clone()), None);
+                GitServerMessage::PullRequest { reply: PullRequestReply::Detail { detail } } => {
+                    pulls.cache.insert(detail.summary.number, detail.clone());
+                    if pulls.viewing == Some(detail.summary.number) {
+                        (pulls.detail, pulls.detail_error) = (Some(detail.clone()), None);
+                        if self.git_panel.review.scope == Scope::Pull(detail.summary.number) { self.git_pull_notes(); }
+                    }
                 }
                 other => if let Some(e) = error(other) { pulls.detail_error = Some(e); },
             }
@@ -155,7 +219,7 @@ impl App {
             pulls.working = None;
             match message {
                 GitServerMessage::PullRequest { reply } => match reply {
-                    PullRequestReply::ReviewSubmitted { .. } => { pulls.notice = Some("Review sent.".into()); pulls.body = TextEdit::default(); }
+                    PullRequestReply::ReviewSubmitted { .. } => { pulls.notice = Some("Review sent.".into()); pulls.body = TextEdit::default(); pulls.drafts.clear(); }
                     PullRequestReply::ThreadUpdated { .. } => pulls.notice = Some("Thread updated.".into()),
                     PullRequestReply::Merged { number } => pulls.notice = Some(format!("Merged #{number}.")),
                     PullRequestReply::CheckedOut { number, worktree, path } => {
@@ -198,14 +262,16 @@ pub(super) fn list(app: &App, card: El) -> El {
     let mut list = col().key("git-pulls").w_full().grow(1.0).shrink().h(0.0).scroll(ScrollSpec { stick_bottom: false }).pt(4.0 * s);
     if let Some(error) = &pulls.error {
         list = list.child(text(error.clone()).font(app.ty.sans(12.0, 400.0)).color(rgb(p.red)).padding(14.0 * s).wrap());
+    } else if !pulls.loaded {
+        list = list.child(skeleton(app, 5));
     } else if pulls.items.is_empty() {
-        list = list.child(text(if !pulls.loaded { "Loading pull requests\u{2026}" } else { "No pull requests here." }).font(app.ty.sans(12.0, 400.0)).color(rgb(p.muted)).padding(14.0 * s));
+        list = list.child(text("No pull requests here.").font(app.ty.sans(12.0, 400.0)).color(rgb(p.muted)).padding(14.0 * s));
     }
     for item in &pulls.items {
         let summary = &item.summary;
         let number = summary.number;
         let (state, color) = state_of(summary, p);
-        let on = pulls.open == Some(number);
+        let on = pulls.viewing == Some(number);
         let mut meta = row().gap(6.0 * s).center_y().child(pill(app, state, color));
         if let Some((label, color)) = checks_of(&summary.checks_state, p) {
             meta = meta.child(row().gap(4.0 * s).center_y().child(el().w(6.0 * s).h(6.0 * s).radius(3.0 * s).fill(rgb(color)))
@@ -258,17 +324,73 @@ pub(super) fn comment(app: &App, author: &str, when: &str, body: &str) -> El {
         .child(text(body.trim().to_owned()).font(app.ty.sans(13.0, 400.0).lh(19.0 * s)).color(rgb(p.dim)).wrap().w_full())
 }
 
-/// The open pull request, in the diff tab.
+/// Under a pull request's files: the comments waiting, a line for the review, and how to send it.
+pub(super) fn finish(app: &App) -> El {
+    use PullRequestReviewEvent::*;
+    let p = app.pal;
+    let s = app.ty.scale();
+    let pulls = &app.git_panel.pulls;
+    let busy = pulls.busy();
+    let waiting = pulls.drafts.len();
+    let note = match (&pulls.detail_error, pulls.working, &pulls.notice) {
+        (Some(error), _, _) => Some((error.clone(), p.red)),
+        (None, Some(working), _) => Some((working.to_owned(), p.dim)),
+        (None, None, Some(notice)) => Some((notice.clone(), p.green)),
+        _ => None,
+    };
+    let mut bar = col().key("git-pull-finish").w_full().px(12.0 * s).py(10.0 * s).gap(6.0 * s).border_sides([1.0, 0.0, 0.0, 0.0], rgb(p.border)).fill(rgb(panel_bg(p)));
+    if let Some((note, color)) = note { bar = bar.child(text(note).font(app.ty.sans(12.0, 400.0)).color(rgb(color)).truncate().w_full()); }
+    bar.child(row().w_full().gap(8.0 * s).center_y()
+        .child(text(match waiting { 0 => "Click a line to comment".to_owned(), 1 => "1 comment waiting".to_owned(), n => format!("{n} comments waiting") })
+            .font(app.ty.sans(12.0, if waiting > 0 { 600.0 } else { 400.0 })).color(rgb(if waiting > 0 { p.yellow } else { p.muted })))
+        .child(rune::text_input(&pulls.body, app.ty.sans(12.5, 400.0)).key("git-pull-finish-body").grow(1.0).w(0.0).h(32.0 * s).px(10.0 * s).py(8.0 * s).single_line()
+            .radius(8.0 * s).fill(rgb(p.surface)).border(s, rgb(p.border)).color(rgb(p.fg)).placeholder("Overall comment (optional)", rgb(p.muted))
+            .on_edit(|a: &mut App| &mut a.git_panel.pulls.body)
+            .on_input_key(|a: &mut App, e: &KeyEvent, _: &mut Tx| { if e.key == Key::Escape { a.git_panel.pulls.body.focused = false; true } else { false } }))
+        .child(action(app, "git-pull-finish:comment", "Comment", false, !busy).on_press(|a: &mut App| a.git_pull_review(Comment)))
+        .child(action(app, "git-pull-finish:changes", "Request changes", false, !busy).on_press(|a: &mut App| a.git_pull_review(RequestChanges)))
+        .child(action(app, "git-pull-finish:approve", "Approve", true, !busy).on_press(|a: &mut App| a.git_pull_review(Approve))))
+}
+
+/// The band over a pull request's pages: what it is, and its two tabs.
+pub(super) fn strip(app: &App, files: bool) -> El {
+    let p = app.pal;
+    let s = app.ty.scale();
+    let pulls = &app.git_panel.pulls;
+    let number = pulls.viewing.unwrap_or_default();
+    let known = pulls.detail.as_ref().map(|d| &d.summary).filter(|d| d.number == number).or_else(|| pulls.items.iter().map(|i| &i.summary).find(|i| i.number == number));
+    let count = pulls.detail.as_ref().filter(|d| d.summary.number == number).map(|d| d.files.len());
+    let tab = |key: &str, name: String, on: bool| el().key(key.to_owned()).h(28.0 * s).px(12.0 * s).center().radius(8.0 * s)
+        .fill(if on { rgb(p.hover) } else { rune::Color::TRANSPARENT }).border(s, rgb(if on { p.border } else { p.bg })).hover(rgb(p.hover))
+        .child(text(name).font(app.ty.sans(12.5, if on { 600.0 } else { 450.0 })).color(rgb(if on { p.fg } else { p.dim })));
+    let mut band = row().key("git-pull-strip").w_full().h(46.0 * s).px(14.0 * s).gap(8.0 * s).center_y().border_sides([0.0, 0.0, 1.0, 0.0], rgb(p.border));
+    if let Some(summary) = known {
+        let (state, color) = state_of(summary, p);
+        band = band.child(pill(app, state, color))
+            .child(text(summary.title.clone()).font(app.ty.sans(13.5, 650.0)).color(rgb(p.fg)).truncate().shrink())
+            .child(text(format!("#{number}")).font(app.ty.sized(11.5)).color(rgb(p.muted)));
+    } else {
+        band = band.child(text(format!("Pull request #{number}")).font(app.ty.sans(13.5, 650.0)).color(rgb(p.fg)));
+    }
+    band.child(el().grow(1.0))
+        .child(tab("git-pull-tab:conversation", "Conversation".into(), !files).on_press(move |a: &mut App| a.open_git_pull(number)))
+        .child(tab("git-pull-tab:files", count.map_or("Files changed".into(), |n| format!("Files changed {n}")), files).on_press(|a: &mut App| a.git_pull_diff()))
+}
+
+/// The open pull request's Conversation tab, in the diff tab.
 pub(super) fn detail(app: &App) -> El {
     let p = app.pal;
     let s = app.ty.scale();
     let pulls = &app.git_panel.pulls;
     let number = pulls.open.unwrap_or_default();
     let mut page = col().w_full().max_w(880.0 * s).padding(24.0 * s).gap(20.0 * s);
+    let shell = |page: El| col().key("git-pull-detail").w_full().h_full().fill(rgb(p.bg)).child(strip(app, false))
+        .child(col().w_full().grow(1.0).h(0.0).scroll(ScrollSpec { stick_bottom: false }).items_center().child(page));
     let Some(detail) = pulls.detail.as_ref().filter(|d| d.summary.number == number) else {
-        let note = pulls.detail_error.clone().unwrap_or_else(|| format!("Loading pull request #{number}\u{2026}"));
-        return col().key("git-pull-detail").w_full().h_full().fill(rgb(p.bg)).center()
-            .child(text(note).font(app.ty.sans(13.0, 400.0)).color(rgb(if pulls.detail_error.is_some() { p.red } else { p.muted })).wrap().max_w(520.0 * s));
+        return shell(match &pulls.detail_error {
+            Some(error) => page.child(text(error.clone()).key("git-pull-error").font(app.ty.sans(13.0, 400.0)).color(rgb(p.red)).wrap().w_full()),
+            None => page.child(skeleton_page(app)),
+        });
     };
     let summary = &detail.summary;
     let (state, color) = state_of(summary, p);
@@ -277,7 +399,7 @@ pub(super) fn detail(app: &App) -> El {
     let (url, head) = (summary.url.clone(), summary.head_sha.clone());
     let (head_merge, head_out) = (head.clone(), head.clone());
     let mut actions = row().gap(8.0 * s).center_y().wrap()
-        .child(action(app, "git-pull-diff", &format!("View {} changed files", detail.files.len()), true, true).on_press(|a: &mut App| a.git_pull_diff()))
+        .child(action(app, "git-pull-diff", &format!("Review {} changed files", detail.files.len()), true, true).on_press(|a: &mut App| a.git_pull_diff()))
         .child(action(app, "git-pull-checkout", "Check out", false, !busy).on_press(move |a: &mut App| {
             a.git_pull_act("Checking out\u{2026}", PullRequestRequest::Checkout { number, expected_head: head_out.clone(), new_worktree: false });
         }))
@@ -287,11 +409,10 @@ pub(super) fn detail(app: &App) -> El {
         actions = actions.child(action(app, "git-pull-merge", if pulls.merge_menu { "Merge \u{25b4}" } else { "Merge \u{25be}" }, false, !busy)
             .on_press(|a: &mut App| a.git_panel.pulls.merge_menu = !a.git_panel.pulls.merge_menu));
     }
+    let _ = (state, color);
     let mut top = col().w_full().gap(10.0 * s)
         .child(text(summary.title.clone()).font(app.ty.sans(21.0, 650.0)).color(rgb(p.fg)).wrap().w_full())
         .child(row().w_full().gap(8.0 * s).center_y().wrap()
-            .child(pill(app, state, color))
-            .child(text(format!("#{number}")).font(app.ty.sized(12.0)).color(rgb(p.muted)))
             .child(text(format!("{} wants to merge", summary.author)).font(app.ty.sans(12.5, 400.0)).color(rgb(p.dim)))
             .child(text(summary.head_branch.clone()).font(app.ty.sized(11.5)).color(rgb(p.fg)))
             .child(text("into").font(app.ty.sans(12.5, 400.0)).color(rgb(p.dim)))
@@ -356,7 +477,7 @@ pub(super) fn detail(app: &App) -> El {
         page = page.child(block);
     }
     if open {
-        let review = section(app, "Review", None)
+        let review = section(app, "Review", (!pulls.drafts.is_empty()).then_some(pulls.drafts.len()))
             .child(rune::text_input(&pulls.body, app.ty.sans(13.0, 400.0)).key("git-pull-body").w_full().h(84.0 * s).padding(10.0 * s)
                 .radius(10.0 * s).fill(rgb(p.surface)).border(s, rgb(p.border)).color(rgb(p.fg)).placeholder("Leave a comment with your review", rgb(p.muted))
                 .on_edit(|a: &mut App| &mut a.git_panel.pulls.body)
@@ -367,7 +488,7 @@ pub(super) fn detail(app: &App) -> El {
                 .child(action(app, "git-pull-approve", "Approve", true, !busy).on_press(|a: &mut App| a.git_pull_review(PullRequestReviewEvent::Approve))));
         page = page.child(review);
     }
-    col().key("git-pull-detail").w_full().h_full().fill(rgb(p.bg)).scroll(ScrollSpec { stick_bottom: false }).items_center().child(page)
+    shell(page)
 }
 
 /// Fixture data for the headless scenes.
@@ -396,10 +517,11 @@ pub(super) fn fixture(app: &mut App, open: bool) {
     app.git_panel.selected = Some(String::new());
     let pulls = &mut app.git_panel.pulls;
     pulls.open = Some(128);
+    pulls.viewing = Some(128);
     pulls.detail = Some(PullRequestDetail {
         summary: summary(128, "Add native Git review", "parker", "OPEN", "SUCCESS"),
         body: "The Git panel names the next step for the branch, and every changed file is in one diff.\n\nTested against a real repository in the daemon's test suite.".into(),
-        files: app.git_panel.files.clone(), diffs: vec![],
+        files: app.git_panel.files.clone(), diffs: vec![GitFileDiff { path: "src/git.rs".into(), patch: "@@ -40,3 +40,4 @@ pub fn view() {\n     let s = app.ty.scale();\n-    let width = 300.0;\n+    let width = WIDTH;\n+    let pad = 6.0 * s;\n     col().w(width * s)\n".into() }],
         conversation: vec![comment("lin", "The side-by-side layout reads well. One thought on the header below."), comment("parker", "Good call, fixed in the last push.")],
         threads: vec![PullRequestThread { id: "t1".into(), path: "src/git.rs".into(), side: PullRequestSide::Right, line: Some(42), start_line: None, outdated: false, resolved: false,
             comments: vec![comment("lin", "Should this width follow the panel's own constant?")] }],
@@ -452,6 +574,19 @@ mod tests {
         app.git_pull_diff();
         assert_eq!(app.git_panel.review.scope, Scope::Pull(128));
         assert_eq!(app.git_panel.review.files.len(), 3);
-        assert!(app.git_panel.pulls.open.is_none(), "the diff takes the tab over");
+        assert!(app.git_panel.pulls.open.is_none() && app.git_panel.pulls.viewing == Some(128), "the files tab of the same pull request");
+        // The posted thread on src/git.rs line 42 sits under that line.
+        let notes = &app.git_panel.review.notes;
+        assert_eq!((notes.len(), notes[0].author.as_str(), notes[0].pending), (1, "lin", false));
+        // A comment written on the removed line is kept as a draft on the left side.
+        let file = app.git_panel.review.files.iter().position(|f| f.path == "src/git.rs").unwrap();
+        let removed = app.git_panel.review.files[file].lines.iter().position(|l| l.kind == review::Kind::Remove).unwrap();
+        app.git_panel.review.target = Some((file, removed));
+        app.git_panel.review.comment = TextEdit::new("Keep the old width behind a flag?");
+        app.git_pull_draft();
+        let draft = &app.git_panel.pulls.drafts[0];
+        assert_eq!((draft.path.as_str(), draft.side, draft.line), ("src/git.rs", PullRequestSide::Left, 41));
+        assert!(app.git_panel.review.notes.iter().any(|n| n.pending && n.author == "You"));
+        assert!(app.git_panel.review.target.is_none());
     }
 }

@@ -21,6 +21,8 @@ pub struct Issues {
     pub(super) notice: Option<String>,
     pub(super) detail_error: Option<String>,
     pub(super) body: TextEdit,
+    /// Issues already read, so opening one again shows at once while it refreshes.
+    cache: std::collections::HashMap<u64, IssueDetail>,
 }
 
 impl Issues {
@@ -57,7 +59,7 @@ impl App {
         if let Some(id) = self.tabs.iter().find(|t| t.kind == TabKind::GitDiff).map(|t| t.id) { self.select_tab(id); } else { self.open_tab(TabKind::GitDiff); }
         self.focus = Focus::Content;
         self.git_panel.pulls.open = None;
-        let keep = self.git_panel.issues.detail.take().filter(|d| d.summary.number == number);
+        let keep = self.git_panel.issues.cache.get(&number).cloned();
         let issues = &mut self.git_panel.issues;
         (issues.open, issues.detail, issues.detail_error, issues.notice, issues.body) = (Some(number), keep, None, None, TextEdit::default());
         self.git_panel.selected = Some(String::new());
@@ -110,6 +112,7 @@ impl App {
             issues.reading = None;
             match message {
                 GitServerMessage::Issue { reply: IssueReply::Detail { detail } } if issues.open == Some(detail.summary.number) => {
+                    issues.cache.insert(detail.summary.number, detail.clone());
                     (issues.detail, issues.detail_error) = (Some(detail.clone()), None);
                 }
                 other => if let Some(e) = error(other) { issues.detail_error = Some(e); },
@@ -155,8 +158,10 @@ pub(super) fn list(app: &App, card: El) -> El {
     let mut list = col().key("git-issues").w_full().grow(1.0).shrink().h(0.0).scroll(ScrollSpec { stick_bottom: false }).pt(4.0 * s);
     if let Some(error) = &issues.error {
         list = list.child(text(error.clone()).font(app.ty.sans(12.0, 400.0)).color(rgb(p.red)).padding(14.0 * s).wrap());
+    } else if !issues.loaded {
+        list = list.child(skeleton(app, 5));
     } else if issues.items.is_empty() {
-        list = list.child(text(if !issues.loaded { "Loading issues\u{2026}" } else { "No issues here." }).font(app.ty.sans(12.0, 400.0)).color(rgb(p.muted)).padding(14.0 * s));
+        list = list.child(text("No issues here.").font(app.ty.sans(12.0, 400.0)).color(rgb(p.muted)).padding(14.0 * s));
     }
     for item in &issues.items {
         let number = item.number;
@@ -187,9 +192,21 @@ pub(super) fn detail(app: &App) -> El {
     let issues = &app.git_panel.issues;
     let number = issues.open.unwrap_or_default();
     let Some(detail) = issues.detail.as_ref().filter(|d| d.summary.number == number) else {
-        let note = issues.detail_error.clone().unwrap_or_else(|| format!("Loading issue #{number}\u{2026}"));
-        return col().key("git-issue-detail").w_full().h_full().fill(rgb(p.bg)).center()
-            .child(text(note).font(app.ty.sans(13.0, 400.0)).color(rgb(if issues.detail_error.is_some() { p.red } else { p.muted })).wrap().max_w(520.0 * s));
+        // What the list already knows, over placeholders for the rest.
+        let mut page = col().w_full().max_w(880.0 * s).padding(24.0 * s).gap(20.0 * s);
+        if let Some(error) = &issues.detail_error {
+            page = page.child(text(error.clone()).key("git-issue-error").font(app.ty.sans(13.0, 400.0)).color(rgb(p.red)).wrap().w_full());
+        } else {
+            if let Some(item) = issues.items.iter().find(|i| i.number == number) {
+                let (state, color) = state_of(&item.state, p);
+                page = page.child(col().w_full().gap(10.0 * s)
+                    .child(text(item.title.clone()).font(app.ty.sans(21.0, 650.0)).color(rgb(p.fg)).wrap().w_full())
+                    .child(row().gap(8.0 * s).center_y().child(pill(app, state, color)).child(text(format!("#{number}")).font(app.ty.sized(12.0)).color(rgb(p.muted)))
+                        .child(text(format!("opened by {}", item.author)).font(app.ty.sans(12.5, 400.0)).color(rgb(p.dim)))));
+            }
+            page = page.child(skeleton_page(app));
+        }
+        return col().key("git-issue-detail").w_full().h_full().fill(rgb(p.bg)).scroll(ScrollSpec { stick_bottom: false }).items_center().child(page);
     };
     let summary = &detail.summary;
     let (state, color) = state_of(&summary.state, p);

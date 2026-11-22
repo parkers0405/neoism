@@ -1,16 +1,14 @@
 //! The focused view of a conversation: a turn reads as its prompt, one quiet work row and
 //! the reply (t3code's "Worked for ..." row, `TimelineWorkGroupRows.tsx`).
 //!
-//! As t3code does (`deriveTurnFolds`: the running turn is never folded), a turn shows its work
-//! while it runs and folds when it is done:
+//! A turn has two states, running or done, and the work row's arrow says which it is in:
 //!
-//! - running, it is its notes as they are written and, between them, its calls as one line
-//!   each (`steps_row`: the newest few of a run, the rest counted), then the thought it is
-//!   having now, one at a time;
-//! - done, everything it did on the way (calls, sub-agents, thinking, the notes between them)
-//!   folds under the work row, which says how much there was: `14 steps · 3 files changed`.
-//!   The reply stays. Pressing the row opens that turn as the full trace, cards and diffs,
-//!   and pressing it again folds it.
+//! - folded (the arrow points right): none of its calls show. It is the work row, which says
+//!   how much there was (`14 steps · 3 files changed`), everything the agent wrote (its notes
+//!   on the way and the reply, in order) and, while it runs, the thought it is having now, one
+//!   at a time. While it runs the row's `Working` shimmers and its dots count up;
+//! - open (the arrow points down, after a press on the row): the whole trace, every call as
+//!   its card with its output and diffs. Another press folds it.
 //!
 //! What a folded turn also keeps:
 //!
@@ -70,13 +68,12 @@ pub fn row_items(messages: &[HistoryMessage], live_from: usize, activity: bool, 
             super::timeline::rows_in(messages, body..end, live_from, &mut items);
         } else {
             items.push(RowItem::Work(start, end));
+            // Two states, and the arrow says which: folded shows none of the calls, whether
+            // the turn is running or done; pressed open, it is the whole trace.
             if open.contains(&messages[start].id) {
-                // The whole trace, whenever the turn ran.
                 super::timeline::rows_in(messages, body..end, body.min(live_from), &mut items);
-            } else if running && end == messages.len() {
-                unfolding(messages, body, end, live_from, &mut items);
             } else {
-                folded(messages, body, end, live_from, &mut items);
+                folded(messages, body, end, live_from, running && end == messages.len(), &mut items);
             }
         }
         start = end;
@@ -85,50 +82,16 @@ pub fn row_items(messages: &[HistoryMessage], live_from: usize, activity: bool, 
     items
 }
 
-/// The running turn: its notes, each run of calls between them as one row of lines, and the
-/// thought being had.
-fn unfolding(messages: &[HistoryMessage], body: usize, end: usize, live_from: usize, items: &mut Vec<RowItem>) {
-    // The thought being had: the turn's newest row.
+fn folded(messages: &[HistoryMessage], body: usize, end: usize, live_from: usize, live: bool, items: &mut Vec<RowItem>) {
+    // The thought being had: the turn's newest row, while it runs.
     let thought = (body..end).rev().find(|&i| messages[i].kind != Kind::Assistant || written(&messages[i]))
-        .filter(|&i| messages[i].kind == Kind::Reasoning && tools::visible(&messages[i], i, 0));
-    let mut run: Option<usize> = None;
-    let mut close = |run: &mut Option<usize>, at: usize, items: &mut Vec<RowItem>| if let Some(from) = run.take() { items.push(RowItem::Steps(from, at)); };
-    for i in body..end {
-        let message = &messages[i];
-        if step(message, i) { run.get_or_insert(i); continue; }
-        // Thoughts and unwritten replies sit inside a run of calls without ending it.
-        let shown = match message.kind {
-            Kind::Assistant => written(message),
-            Kind::Reasoning => thought == Some(i),
-            Kind::Tool | Kind::Subtask => kept(message) && tools::visible(message, i, 0),
-            _ => tools::visible(message, i, live_from),
-        };
-        if !shown { continue; }
-        close(&mut run, i, items);
-        items.push(if message.kind == Kind::Reasoning { RowItem::Thought(i) } else { RowItem::Message(i) });
-    }
-    close(&mut run, end, items);
-}
-
-fn folded(messages: &[HistoryMessage], body: usize, end: usize, live_from: usize, items: &mut Vec<RowItem>) {
-    // The newest text and what was written with it: back to the call before it.
-    let newest = (body..end).rev().find(|&i| written(&messages[i]));
-    let text_from = newest.map(|newest| {
-        let mut from = newest;
-        for i in (body..newest).rev() {
-            match messages[i].kind {
-                Kind::Tool | Kind::Subtask => break,
-                Kind::Assistant if written(&messages[i]) => from = i,
-                _ => {}
-            }
-        }
-        from
-    });
+        .filter(|&i| live && messages[i].kind == Kind::Reasoning && tools::visible(&messages[i], i, 0));
     for i in body..end {
         let message = &messages[i];
         match message.kind {
-            Kind::Assistant => if text_from.is_some_and(|from| i >= from) { items.push(RowItem::Message(i)); },
-            Kind::Reasoning => {}
+            // Everything the agent wrote stays, in order: only its calls and thoughts fold.
+            Kind::Assistant => if tools::visible(message, i, live_from) { items.push(RowItem::Message(i)); },
+            Kind::Reasoning => if thought == Some(i) { items.push(RowItem::Thought(i)); },
             Kind::Tool | Kind::Subtask => if kept(message) && tools::visible(message, i, 0) { items.push(RowItem::Message(i)); },
             _ => if tools::visible(message, i, live_from) { items.push(RowItem::Message(i)); },
         }
@@ -185,47 +148,14 @@ pub fn current_step(messages: &[HistoryMessage]) -> Option<String> {
     Some(if label.chars().count() > MAX { format!("{}\u{2026}", label.chars().take(MAX - 1).collect::<String>().trim_end()) } else { label.to_owned() })
 }
 
-/// How many of a run's calls are listed; the ones before them are counted.
-const LISTED: usize = 5;
-
-/// The calls among `messages[start..end]` of a running turn, a line each: what it did, the
-/// newest last. Cached until the turn's rows change.
-pub fn steps_row(app: &App, session: &super::Session, start: usize, end: usize) -> El {
-    let Some(first) = session.messages.get(start) else { return rune::el() };
-    let key = format!("steps:{}", first.id);
-    let version = (session.structure, end - start, app.pal as *const _ as usize, app.ty.size.to_bits());
-    rune::memo(key.clone(), version, || {
-        let p = app.pal;
-        let s = app.ty.scale();
-        let calls: Vec<&HistoryMessage> = (start..end.min(session.messages.len())).filter(|&i| step(&session.messages[i], i)).map(|i| &session.messages[i]).collect();
-        let earlier = calls.len().saturating_sub(LISTED);
-        let mut lines = rune::col().key(key.clone()).w_full().pt(10.0 * s).gap(2.0 * s);
-        if earlier > 0 {
-            lines = lines.child(text(format!("{earlier} earlier {}", if earlier == 1 { "step" } else { "steps" }))
-                .font(app.ty.sans(12.0, 400.0)).color(rgb(p.muted).alpha(0.7)).h(20.0 * s).pl(21.0 * s));
-        }
-        for call in &calls[earlier..] {
-            let status = call.status.trim().to_ascii_lowercase();
-            let failed = matches!(status.as_str(), "error" | "failed");
-            let running = matches!(status.as_str(), "pending" | "running" | "streaming");
-            let ink = if failed { p.red } else if running { p.dim } else { p.muted };
-            let label = tools::step_label(call);
-            lines = lines.child(row().key(format!("step:{}", call.id)).w_full().h(22.0 * s).gap(8.0 * s).center_y()
-                .child(crate::ui::feather::view(app, tools::tool_symbol(&call.tool), 13.0 * s, ink))
-                .child(text(if running { format!("{label}\u{2026}") } else { label }).font(app.ty.sans(13.0, 400.0)).color(rgb(ink)).truncate().shrink()));
-        }
-        lines
-    })
-}
-
 /// The work row of the turn `messages[start..end]`: what it came to, and a press away from
 /// the trace. Cached until the turn's rows change.
 pub fn work_row(app: &App, session_id: &str, session: &super::Session, start: usize, end: usize) -> El {
     let Some(turn) = session.messages.get(start..end).filter(|turn| !turn.is_empty()) else { return rune::el() };
     let id = turn[0].id.clone();
     let key = format!("work:{id}");
-    let open = session.open_turns.contains(&id);
     let live = end == session.messages.len() && app.session_live(session_id);
+    let open = session.open_turns.contains(&id);
     let version = (session.structure, end - start, open, live, app.pal as *const _ as usize, app.ty.size.to_bits());
     rune::memo(key.clone(), version, || {
         let p = app.pal;
@@ -235,7 +165,12 @@ pub fn work_row(app: &App, session_id: &str, session: &super::Session, start: us
         let mut line = row().key("work-line").h(26.0 * s).px(8.0 * s).ml(-8.0 * s).gap(7.0 * s).radius(7.0 * s).center_y()
             .hover(rgb(p.fg).alpha(0.06)).cursor(rune::Cursor::Pointer)
             .child(crate::ui::feather::view(app, if open { crate::ui::feather::Icon::Down } else { crate::ui::feather::Icon::Right }, 12.0 * s, p.muted));
-        if !lead.is_empty() { line = line.child(text(lead).font(app.ty.sans(13.0, 600.0)).color(rgb(p.dim))); }
+        if live {
+            // Live values, stepped with the activity line: the cached row never rebuilds for them.
+            line = line.child(row().items_end()
+                .child(text(lead).font(app.ty.sans(13.0, 600.0)).live_text_color(&app.work_ink))
+                .child(text("...").font(app.ty.sans(13.0, 600.0)).live_text(&app.work_dots).live_text_color(&app.work_ink)));
+        } else if !lead.is_empty() { line = line.child(text(lead).font(app.ty.sans(13.0, 600.0)).color(rgb(p.dim))); }
         line = line.child(text(summary.label()).font(app.ty.sans(13.0, 400.0)).color(rgb(p.muted)));
         if summary.failed > 0 {
             line = line.child(text(format!("\u{b7} {} failed", summary.failed)).font(app.ty.sans(13.0, 400.0)).color(rgb(p.red).alpha(0.9)));
@@ -257,7 +192,7 @@ pub fn work_row(app: &App, session_id: &str, session: &super::Session, start: us
 #[cfg(test)]
 mod tests {
     use super::*;
-    use RowItem::{Activity, Message, Steps, Thought, Work};
+    use RowItem::{Activity, Message, Thought, Work};
 
     fn message(id: &str, kind: &str, text: &str) -> HistoryMessage {
         let tool = match kind { "Tool" => "bash", _ => "" };
@@ -282,7 +217,7 @@ mod tests {
     #[test]
     fn a_settled_turn_is_its_prompt_a_work_row_and_the_reply() {
         let rows = row_items(&turn(), usize::MAX, false, false, &HashSet::new());
-        assert_eq!(rows, [Message(0), Work(0, 7), Message(5), Message(6)]);
+        assert_eq!(rows, [Message(0), Work(0, 7), Message(1), Message(5), Message(6)]);
     }
 
     #[test]
@@ -292,17 +227,18 @@ mod tests {
     }
 
     #[test]
-    fn a_running_turn_shows_its_notes_its_calls_a_line_each_and_its_thought() {
+    fn a_running_turn_shows_no_calls_until_it_is_opened() {
         let messages = turn();
         let rows = |n: usize| row_items(&messages[..n], 0, true, true, &HashSet::new());
-        // A call after the note, then the thought being had.
-        assert_eq!(rows(4), [Message(0), Work(0, 4), Message(1), Steps(2, 3), Thought(3), Activity]);
-        // The next call joins the run: the thought before it is no longer shown, so nothing parts them.
-        assert_eq!(rows(5), [Message(0), Work(0, 5), Message(1), Steps(2, 5), Activity]);
-        // The reply follows the calls.
-        assert_eq!(rows(6), [Message(0), Work(0, 6), Message(1), Steps(2, 5), Message(5), Activity]);
-        // Done, it folds to the work row and the reply.
-        assert_eq!(row_items(&messages, 0, false, false, &HashSet::new()), [Message(0), Work(0, 7), Message(5), Message(6)]);
+        // Thinking: the note written before the call stays, with the thought.
+        assert_eq!(rows(4), [Message(0), Work(0, 4), Message(1), Thought(3), Activity]);
+        // The next call folds the thought; the note is still the newest text.
+        assert_eq!(rows(5), [Message(0), Work(0, 5), Message(1), Activity]);
+        // The reply follows the note: both stay.
+        assert_eq!(rows(6), [Message(0), Work(0, 6), Message(1), Message(5), Activity]);
+        // Pressed open while it runs: every call.
+        let open = row_items(&messages[..5], 0, true, true, &HashSet::from(["ask".to_owned()]));
+        assert_eq!(open, [Message(0), Work(0, 5), Message(1), Message(2), Message(3), Message(4), Activity]);
     }
 
     #[test]
@@ -311,10 +247,8 @@ mod tests {
         messages.truncate(5);
         messages[4].tool = "task".into();
         messages[4].status = "running".into();
-        assert_eq!(row_items(&messages, 0, true, true, &HashSet::new()), [Message(0), Work(0, 5), Message(1), Steps(2, 4), Message(4), Activity]);
+        assert_eq!(row_items(&messages, 0, true, true, &HashSet::new()), [Message(0), Work(0, 5), Message(1), Message(4), Activity]);
         assert_eq!(Summary::of(&messages).steps, 1, "it is counted once it is done");
-        // The turn ended with the sub-agent still at work in the background: its card stays.
-        assert_eq!(row_items(&messages, 0, true, false, &HashSet::new()), [Message(0), Work(0, 5), Message(1), Message(4), Activity]);
         messages[4].status = "completed".into();
         assert_eq!(row_items(&messages, 0, false, false, &HashSet::new()), [Message(0), Work(0, 5), Message(1)]);
         assert_eq!(Summary::of(&messages).steps, 2);

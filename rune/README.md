@@ -121,18 +121,18 @@ video so agents can read the motion without playing it. Extract any frame with
   The sidebars, Settings (breadcrumb header, search above the categories), the palette, finder and menus use
   the proportional chat font (`Type::sans`, titles at 600) and line icons (`glyph::*_LINE`); new panels should
   follow them. Key hints, paths in previews and code stay monospaced.
-- **Focused agent view** (departs from `05..08`; `app/src/agent/focus.rs`), after t3code's work rows: a turn
-  shows its work while it runs and folds when it is done. Running, it is the agent's notes as they are written
-  and, between them, its calls as one quiet line each (a drawn icon from `ui/feather.rs` and the call's name;
-  the newest five of a run, the rest counted as `6 earlier steps`), then the thought being had, one at a time.
-  Done, all of that folds under one work row (`Worked · 14 steps · 3 files changed`, failures counted in red)
-  and the reply stays; pressing the row opens that turn as the full trace of cards and diffs, held in place
-  under the pointer. A sub-agent still at work keeps its card, folded or not, until it finishes; checklists, the
-  reader's own shell commands and notices always show. The running turn's activity line names the step it is on
-  after its timer. Every loaded turn folds, so an older turn's calls can be opened too. Settings > Agent >
-  **Focused agent view** (`appearance.agent-focused-view`, default on, the app's own key) turns it off: every
-  call is a card again. Headless scenes and tests draw the full trace unless they ask (`--scene work-focused`,
-  `work-focused-long`, `work-focused-settled`, `work-focused-open`).
+- **Focused agent view** (departs from `05..08`; `app/src/agent/focus.rs`): a turn has two states and its work
+  row's arrow says which. Folded (the arrow points right), running or done, none of its calls show: it is the
+  prompt, the work row (`Working · 9 steps · 1 file changed`, failures counted in red; `Worked` once done), the
+  everything the agent wrote (its notes on the way and the reply, in order) and, while it runs, the thought
+  being had, one at a time; the running row's `Working` shimmers and its dots count up on live values. Open (the arrow points down, after a press on the row), it is the whole trace: every
+  call as its card with output and diffs, held in place under the pointer; another press folds it. A sub-agent
+  still at work keeps its card until it finishes; checklists, the reader's own shell commands and notices always
+  show. The running turn's activity line names the step it is on after its timer. Every loaded turn folds, so
+  an older turn's calls can be opened too. Settings > Agent > **Focused agent view**
+  (`appearance.agent-focused-view`, default on, the app's own key) turns it off: every call is a card again.
+  Headless scenes and tests draw the full trace unless they ask (`--scene work-focused`,
+  `work-focused-settled`, `work-focused-open`).
 - **Settings** (departs from `27-settings.png`): the rail's top button is a gear that opens it; there is no app
   menu button. The sidebar holds the search, then General, Appearance, Themes, Keybindings and the grouped pages
   (Code: Editor, Markdown, Terminal; Agents: Agent, Presence; System: Interface, Platform, Developer), then

@@ -189,8 +189,6 @@ pub enum RowItem {
     Activity,
     /// The work row of the turn `start..end`, in the focused view (`focus.rs`).
     Work(usize, usize),
-    /// A run of a running turn's calls `start..end`, a line each (`focus::steps_row`).
-    Steps(usize, usize),
     /// A turn's current thought: the reasoning message's newest part only.
     Thought(usize),
 }
@@ -246,7 +244,6 @@ fn row_key(app: &App, session_id: &str, item: RowItem) -> String {
         RowItem::Activity => "activity".into(),
         RowItem::Work(i, _) => messages.get(i).map_or_else(|| format!("work:{i}"), |m| format!("work:{}", m.id)),
         RowItem::Thought(i) => messages.get(i).map_or_else(|| format!("row:{i}"), |m| format!("msg:{}", m.id)),
-        RowItem::Steps(i, _) => messages.get(i).map_or_else(|| format!("steps:{i}"), |m| format!("steps:{}", m.id)),
     }
 }
 
@@ -261,10 +258,6 @@ fn build_row(app: &App, session_id: &str, item: RowItem, tab_id: u64) -> El {
         RowItem::Work(start, end) => {
             let key = messages.get(start).map_or_else(String::new, |m| format!("work:{}", m.id));
             tracked(super::focus::work_row(app, session_id, session, start, end), session_id, &key, tab_id)
-        }
-        RowItem::Steps(start, end) => {
-            let key = messages.get(start).map_or_else(String::new, |m| format!("steps:{}", m.id));
-            tracked(super::focus::steps_row(app, session, start, end), session_id, &key, tab_id)
         }
         RowItem::Thought(index) => match messages.get(index) {
             Some(message) => tracked(reasoning_row(app, message, true, true), session_id, &format!("msg:{}", message.id), tab_id),

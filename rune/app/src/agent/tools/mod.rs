@@ -13,7 +13,6 @@ mod shell;
 mod text;
 mod todos;
 
-pub use card::tool_symbol;
 pub use diff::is_edit_tool;
 pub use group::{group_at, group_end, is_todos, visible};
 pub use icons::Icons;

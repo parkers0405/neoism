@@ -368,6 +368,10 @@ impl App {
                 .and_then(|s| super::focus::current_step(&s.messages[s.live_from.unwrap_or(0).min(s.messages.len())..]));
             if *activity.step.borrow() != step { *activity.step.borrow_mut() = step; step_changed = true; }
             activity.opacity.set(opacity);
+            // The work row above the turn breathes with it: a slow shimmer and counting dots.
+            let t = activity.turn.elapsed().as_secs_f32();
+            self.work_dots.set(".".repeat((t * 2.2) as usize % 4));
+            self.work_ink.set(mix(rgb(self.pal.muted), rgb(self.pal.fg), (t * 2.4).sin() * 0.5 + 0.5));
             activity.tick(self.pal, self.ty.scale(), self.wordmark.fire_enabled && std::env::var("NEOISM_REDUCED_MOTION").as_deref() != Ok("1"));
         }
         // Following the end of an overflowing transcript, the line pins above the composer.

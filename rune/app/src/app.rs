@@ -131,6 +131,9 @@ pub struct App {
     pub font_families: (String, String),
     /// Agent turns fold to a work row and the reply (`agent/focus.rs`); off shows every call.
     pub focused_view: bool,
+    /// The running turn's work row: its dots and its shimmer (`agent/focus.rs`).
+    pub work_dots: rune::LiveText,
+    pub work_ink: rune::Live<rune::Color>,
     /// A sent message slides to the top of the view, the reply filling in under it (`agent/turn.rs`).
     pub turn_at_top: bool,
     pub fonts_dirty: bool,
@@ -388,6 +391,7 @@ impl App {
             ty: Type { size: config.font_size, weight: config.font_weight, code_family: crate::ui::fonts::code_family(&config.font_families.1) },
             font_families: config.font_families,
             turn_at_top: config.turn_at_top,
+            work_dots: rune::LiveText::new(""), work_ink: rune::Live::new(rune::Color::WHITE),
             // Tests and headless scenes draw the full trace unless they ask for this.
             focused_view: config.focused_view && !cfg!(test) && std::env::var_os("NEOISM_RUNE_OFFLINE").is_none(),
             fonts_dirty: true,

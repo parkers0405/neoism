@@ -984,22 +984,6 @@ fn main() {
                 s.sessions.get_mut("fixture-work").unwrap().streaming = true;
                 s.sessions.get_mut("fixture-work").unwrap().live_from = Some(0);
             }),
-            ("work-focused-long", |s| {
-                s.focused_view = true;
-                s.load_fixture("fixture-work", "Conversation work transcript", include_str!("../fixtures/work-transcript.json"));
-                let session = s.sessions.get_mut("fixture-work").unwrap();
-                session.streaming = true;
-                session.live_from = Some(0);
-                // A long run of calls: the newest few are listed, the rest counted.
-                let call = session.messages.iter().find(|m| m.tool == "grep").cloned().unwrap();
-                let at = session.messages.len() - 1;
-                for n in 0..9 {
-                    let mut extra = call.clone();
-                    extra.id = format!("extra-{n}");
-                    extra.title = format!("Grep(pattern_{n})");
-                    session.messages.insert(at, extra);
-                }
-            }),
             ("work-focused-settled", |s| {
                 s.focused_view = true;
                 s.load_fixture("fixture-work", "Conversation work transcript", include_str!("../fixtures/work-transcript.json"));

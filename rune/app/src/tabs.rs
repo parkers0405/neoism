@@ -144,7 +144,11 @@ impl App {
             TabKind::Home | TabKind::Terminal if let Some(program) = self.tab_program(tab.id) => crate::home::program_title(program).into(),
             TabKind::Home => "Home".into(),
             TabKind::Terminal => "Terminal".into(),
-            TabKind::GitDiff => "Git Diff".into(),
+            TabKind::GitDiff => match (self.git_panel.pulls.open, self.git_panel.issues.open) {
+                (Some(n), _) => format!("Pull request #{n}"),
+                (_, Some(n)) => format!("Issue #{n}"),
+                _ => "Git Diff".into(),
+            },
             TabKind::Database { path } if path.is_empty() => "Database".into(),
             TabKind::Database { path } | TabKind::Editor { path } => path.rsplit('/').next().unwrap_or(path).to_owned(),
             TabKind::Agent { session: None } => "Neoism".into(),

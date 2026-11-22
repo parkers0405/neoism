@@ -16,6 +16,8 @@ pub enum Scope {
     Uncommitted,
     /// Everything on this branch against the repository's default branch.
     Branch,
+    /// A pull request's changes, as the host reports them.
+    Pull(u64),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,7 +97,7 @@ impl Review {
 
     /// What the request for this scope is called, so an answer for another scope is dropped.
     pub(super) fn request_key(&self, base: Option<&str>) -> String {
-        match self.scope { Scope::Uncommitted => "uncommitted".into(), Scope::Branch => format!("branch:{}", base.unwrap_or("")) }
+        match self.scope { Scope::Uncommitted => "uncommitted".into(), Scope::Branch => format!("branch:{}", base.unwrap_or("")), Scope::Pull(n) => format!("pull:{n}") }
     }
 
     pub(super) fn set(&mut self, files: Vec<GitFileChange>, diffs: Vec<GitFileDiff>, truncated: bool) {
@@ -157,6 +159,9 @@ impl App {
         self.git_panel.message.focused = false;
         self.git_panel.selected = Some(path.into());
         self.git_panel.review.jump = Some(path.into());
+        self.git_panel.pulls.open = None;
+        self.git_panel.issues.open = None;
+        if matches!(self.git_panel.review.scope, Scope::Pull(_)) { self.git_panel.review.scope = Scope::Uncommitted; self.git_panel.review.files.clear(); self.git_panel.review.rows.clear(); }
         self.git_panel.diff_error = None;
         self.git_panel.epoch = self.git_panel.epoch.wrapping_add(1);
         self.load_git_review();
@@ -183,6 +188,8 @@ impl App {
                 self.git_panel.diff_error = Some("This repository's default branch is unknown, so there is nothing to compare the branch against.".into());
                 return;
             }
+            // A pull request's files came with it; there is nothing to ask for.
+            (Scope::Pull(_), _) => return,
             (Scope::Uncommitted, _) => GitClientMessage::DiffFiles { paths: self.git_panel.files.iter().map(|f| f.path.clone()).collect() },
         };
         self.git_panel.diff_pending = self.git_request(message, Operation::Diff(key));
@@ -298,11 +305,14 @@ pub fn review(app: &App) -> El {
                 a.open_git_changes();
             }));
     }
+    if state.pulls.open.is_some() { return super::pulls::detail(app); }
+    if state.issues.open.is_some() { return super::issues::detail(app); }
     let review = &state.review;
     let base = state.sync.as_ref().and_then(|s| s.default_branch.clone());
     let scope_name = |scope: Scope| match scope {
         Scope::Uncommitted => "Uncommitted changes".to_owned(),
         Scope::Branch => format!("Branch against {}", base.as_deref().unwrap_or("the default branch")),
+        Scope::Pull(n) => format!("Pull request #{n}"),
     };
     let (added, deleted) = review.totals();
     let all_collapsed = !review.files.is_empty() && review.files.iter().all(|f| f.collapsed);
@@ -390,6 +400,11 @@ pub fn review(app: &App) -> El {
     if review.scope_menu {
         let mut menu = col().key("git-review-scope-menu").absolute(10.0 * s, (BAR_H - 2.0) * s).w(280.0 * s).padding(4.0 * s).gap(s)
             .radius(10.0 * s).fill(rgb(p.bg)).border(s, rgb(p.border)).on_press(|_: &mut App| {});
+        if let Scope::Pull(number) = review.scope {
+            menu = menu.child(row().key("git-scope:back").w_full().h(30.0 * s).px(8.0 * s).center_y().radius(7.0 * s).hover(rgb(p.hover))
+                .child(text(format!("Back to pull request #{number}")).font(app.ty.sans(12.5, 500.0)).color(rgb(p.fg)))
+                .on_press(move |a: &mut App| { a.git_panel.review.scope_menu = false; a.open_git_pull(number); }));
+        }
         for scope in [Scope::Uncommitted, Scope::Branch] {
             let on = review.scope == scope;
             menu = menu.child(row().key(format!("git-scope:{scope:?}")).w_full().h(30.0 * s).px(8.0 * s).gap(8.0 * s).center_y().radius(7.0 * s)

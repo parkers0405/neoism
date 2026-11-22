@@ -121,6 +121,22 @@ video so agents can read the motion without playing it. Extract any frame with
   The sidebars, Settings (breadcrumb header, search above the categories), the palette, finder and menus use
   the proportional chat font (`Type::sans`, titles at 600) and line icons (`glyph::*_LINE`); new panels should
   follow them. Key hints, paths in previews and code stay monospaced.
+- **Git panel** (`app/src/git.rs`, `app/src/git/`; after t3code's source control, read from its code): the
+  status bar's branch pill opens a right-hand panel with three tabs. **Changes** has a branch picker (search,
+  switch, create), one button that names the next step for the branch (`actions.rs` `quick`: commit, push,
+  pull, publish, open a pull request, chained as daemon steps that stop at the first failure) with a menu of
+  the single actions and the reason a disabled one cannot run, a row that opens the diff, the file checklist
+  and a message box; an empty message is written from the changed files. The **diff** tab (`review.rs`) is
+  every changed file in one virtual scroll, a folding header per file, stacked or side by side, a file list,
+  a scope switch (uncommitted, or the branch against the default branch) and line comments that go into the
+  newest agent chat's draft with their file and line. **Pull requests** (`pulls.rs`) lists and filters them
+  and opens one in the diff tab: checks, review threads (resolve), conversation, review (comment, request
+  changes, approve), merge by method, check out, and its changes in the diff view. **Issues** (`issues.rs`)
+  does the same for issues, with a reply box and a button that starts an agent chat on the issue. Hosted
+  data comes from the daemon through `gh`, so it is GitHub only. Sync, StageAll, CreateBranch, DiffRange
+  and issues need a daemon of this version or later; against an older one the panel still commits, pushes
+  and lists pull requests. Scenes: `git-panel`, `git-review`, `git-review-split`, `git-pulls`, `git-pull`,
+  `git-issues`, `git-issue`.
 - **Focused agent view** (departs from `05..08`; `app/src/agent/focus.rs`): a turn has two states and its work
   row's arrow says which. Folded (the arrow points right), running or done, none of its calls show: it is the
   prompt, the work row (`Working · 9 steps · 1 file changed`, failures counted in red; `Worked` once done), the

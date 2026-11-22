@@ -11,6 +11,8 @@ use rune::{El, Key, KeyEvent, ScrollSpec, TextEdit, Tx, WheelEvent, col, el, row
 use std::{cell::Cell, rc::Rc};
 
 mod actions;
+mod issues;
+mod pulls;
 mod review;
 pub use actions::{Step, Sync, Tab};
 pub use review::{Review, review};
@@ -37,6 +39,8 @@ pub struct State {
     diff_dirty: bool,
     cursor: usize,
     pub review: Review,
+    pub pulls: pulls::Pulls,
+    pub issues: issues::Issues,
     file_scroll: Rc<Cell<(f32, f32)>>,
     pub tab: Tab,
     upstream: Option<String>,
@@ -97,6 +101,18 @@ impl App {
         if open { self.refresh_git_panel(); }
     }
 
+    /// Show one of the panel's tabs, loading its list the first time.
+    pub fn git_show_tab(&mut self, tab: Tab) {
+        self.git_panel.tab = tab;
+        self.git_panel.branch_menu = false;
+        self.git_panel.action_menu = false;
+        match tab {
+            Tab::Pulls if !self.git_panel.pulls.loaded => self.git_pulls_load(),
+            Tab::Issues if !self.git_panel.issues.loaded => self.git_issues_load(),
+            _ => {}
+        }
+    }
+
     pub fn toggle_git_panel(&mut self) {
         self.git_panel.open = !self.git_panel.open;
         if self.git_panel.open {
@@ -117,6 +133,8 @@ impl App {
         }
         self.git_panel.diff_pending = None;
         self.git_panel.diff_dirty = false;
+        self.git_panel.pulls.disconnected();
+        self.git_panel.issues.disconnected();
     }
 
     pub fn git_connected(&mut self) {
@@ -168,11 +186,14 @@ impl App {
         self.git_panel.diff_pending = None;
         self.git_panel.diff_dirty = false;
         self.git_panel.review = Review { split: self.git_panel.review.split, hide_files: self.git_panel.review.hide_files, ..Review::default() };
+        self.git_panel.pulls.open = None;
+        self.git_panel.issues.open = None;
     }
 
     pub fn apply_git_panel(&mut self, message: GitServerMessage, request_id: u64) {
         if self.apply_project_reply(&message, request_id) { return; }
         if self.apply_editor_git(&message, request_id) { return; }
+        if self.git_pulls_reply(&message, request_id) || self.git_issues_reply(&message, request_id) { return; }
         // Watch events are scoped independently from request/reply traffic. Never accept a
         // previous workspace's broadcast, even if it arrives after its panel was reset.
         if let GitServerMessage::RepoStatus { token, snapshot } = &message {
@@ -290,27 +311,20 @@ pub fn view(app: &App) -> El {
         col().key(format!("git-tab:{name}")).h_full().px(8.0 * s).center()
             .child(text(name).font(app.ty.sans(12.5, if on { 600.0 } else { 450.0 })).color(rgb(if on { p.fg } else { p.muted })))
             .child(el().absolute(8.0 * s, (HEAD_H - 2.0) * s).w_full().h(2.0 * s).radius(s).fill(if on { rgb(p.fg) } else { rune::Color::TRANSPARENT }))
-            .on_press(move |a: &mut App| { a.git_panel.tab = which; a.git_panel.branch_menu = false; a.git_panel.action_menu = false; })
+            .on_press(move |a: &mut App| a.git_show_tab(which))
     };
     let header = row().h(HEAD_H * s).w_full().pl(8.0 * s).pr(8.0 * s).center_y().border_sides([0.0, 0.0, 1.0, 0.0], rgb(p.border))
         .child(tab("Changes", Tab::Changes)).child(tab("Pull requests", Tab::Pulls)).child(tab("Issues", Tab::Issues))
         .child(el().grow(1.0))
-        .child(button(app, "↻").on_press(|a: &mut App| a.refresh_git_panel()))
+        .child(button(app, "↻").on_press(|a: &mut App| match a.git_panel.tab { Tab::Changes => a.refresh_git_panel(), Tab::Pulls => a.git_pulls_load(), Tab::Issues => a.git_issues_load() }))
         .child(button(app, "×").on_press(|a: &mut App| a.toggle_git_panel()));
     let card = col().w_full().h_full().fill(rgb(panel_bg(p))).border(s, rgb(p.border)).radius(14.0 * s).clip_rounded(14.0 * s).child(header);
     let card = match state.tab {
         Tab::Changes => changes(app, card),
-        Tab::Pulls => card.child(empty(app, "Pull requests", "This repository's pull requests will list here.")),
-        Tab::Issues => card.child(empty(app, "Issues", "This repository's issues will list here.")),
+        Tab::Pulls => pulls::list(app, card),
+        Tab::Issues => issues::list(app, card),
     };
     col().key("git-panel").w(WIDTH * s).h_full().padding(6.0 * s).child(card)
-}
-
-fn empty(app: &App, title: &str, note: &str) -> El {
-    let s = app.ty.scale();
-    col().w_full().grow(1.0).center().gap(4.0 * s).padding(20.0 * s)
-        .child(text(title.to_owned()).font(app.ty.sans(13.0, 600.0)).color(rgb(app.pal.fg)))
-        .child(text(note.to_owned()).font(app.ty.sans(12.0, 400.0)).color(rgb(app.pal.muted)).wrap())
 }
 
 /// The Changes tab: branch, the one smart action, what changed, the files and the message.
@@ -412,7 +426,7 @@ fn changes(app: &App, card: El) -> El {
     if state.branch_menu {
         let query = state.branch_query.text.trim().to_lowercase();
         let mut list = menu("git-branch-menu", HEAD_H + BRANCH_H - 2.0)
-            .child(rune::text_input(&state.branch_query, app.ty.sans(12.5, 400.0)).key("git-branch-query").w_full().h(30.0 * s).px(8.0 * s).single_line()
+            .child(rune::text_input(&state.branch_query, app.ty.sans(12.5, 400.0)).key("git-branch-query").w_full().h(30.0 * s).px(8.0 * s).py(7.0 * s).single_line()
                 .radius(7.0 * s).fill(rgb(p.surface)).color(rgb(p.fg)).placeholder("Search or name a new branch", rgb(p.muted))
                 .on_edit(|a: &mut App| &mut a.git_panel.branch_query)
                 .on_input_key(|a: &mut App, e: &KeyEvent, _: &mut Tx| match e.key {
@@ -462,7 +476,7 @@ fn changes(app: &App, card: El) -> El {
 }
 
 /// A small coloured state label.
-fn pill(app: &App, label: &str, color: u32) -> El {
+pub(super) fn pill(app: &App, label: &str, color: u32) -> El {
     let s = app.ty.scale();
     row().h(18.0 * s).px(7.0 * s).gap(5.0 * s).center_y().radius(9.0 * s).fill(rgb(color).alpha(0.14))
         .child(el().w(5.0 * s).h(5.0 * s).radius(2.5 * s).fill(rgb(color)))
@@ -520,6 +534,9 @@ pub fn fixture(app: &mut App, review: bool) {
         ], false);
     }
 }
+
+pub fn pulls_fixture(app: &mut App, open: bool) { fixture(app, false); pulls::fixture(app, open); }
+pub fn issues_fixture(app: &mut App, open: bool) { fixture(app, false); issues::fixture(app, open); }
 
 pub fn long_fixture(app: &mut App) {
     fixture(app, true);

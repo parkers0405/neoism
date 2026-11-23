@@ -123,7 +123,7 @@ fn tab_row(app: &App, pane: &Pane, framed: bool) -> El {
                     None => text(g).font(app.ty.icon_sized(13.0)).color(color),
                 }
             } else if matches!(tab.kind, TabKind::Agent { .. }) {
-                crate::ui::neoism_mark(app, 13.0 * s, &format!("pane-tab-icon:{tab_id}"))
+                crate::ui::agent_tab_mark(app, &tab.kind, &format!("pane-tab-icon:{tab_id}"))
             } else { text(g).font(app.ty.icon_sized(13.0)).color(color) })
             .child(app.title(&title_key, title, app.ty.tab(), fg, None))
             .on_hover_change(move |a: &mut App, inside: bool, _: &mut rune::Tx| {
@@ -146,12 +146,7 @@ fn tab_row(app: &App, pane: &Pane, framed: bool) -> El {
             .on_press(move |a: &mut App| {
                 if let Some(index) = a.tabs.iter().position(|t| t.id == tab_id) { a.close_tab(index); }
             });
-        // An agent at work shows on its tab, whichever tab is open.
-        let working = matches!(&tab.kind, TabKind::Agent { session: Some(id) } if app.session_live(id));
-        if working && app.tab_hover != Some(tab_id) {
-            close = close.child(el().w(12.0).h(12.0).radius(6.0).center().fill(rgb(p.accent).alpha(0.22))
-                .child(el().w(6.0).h(6.0).radius(3.0).fill(rgb(p.accent))));
-        } else if modified && app.tab_hover != Some(tab_id) {
+        if modified && app.tab_hover != Some(tab_id) {
             // Unsaved: a yellow dot in a soft halo takes the close glyph's place (`buffer_tabs`).
             close = close.child(el().w(12.0).h(12.0).radius(6.0).center().fill(rgb(p.yellow).alpha(0.22))
                 .child(el().w(8.0).h(8.0).radius(4.0).fill(rgb(p.yellow))));

@@ -173,9 +173,10 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     let (wordmark_moving, animating) = app.wordmark.tick(&visible_wordmarks, clock);
     if wordmark_moving { wake!("wordmark", std::time::Duration::ZERO); }
     if animating { wake!("wordmark-effect", std::time::Duration::ZERO); }
-    // Running tool spinners step every ~90 ms (8 steps per 1/1.35 s lap), on live offsets.
+    // Tools and conversation status marks share live offsets. Tabs move without the sidebar.
     app.tools.clock = clock;
-    if app.running_tools() || app.server.progress().is_some() || app.sidebar_working() || app.project_job.is_some() {
+    if app.running_tools() || app.server.progress().is_some() || app.sidebar_working() || app.project_job.is_some()
+        || app.tabs.iter().any(|t| agent::sidebar::Status::for_tab(app, &t.kind).animated()) {
         app.tools.spinner.tick(clock, app.ty.scale());
         wake!("spinner", std::time::Duration::from_millis(45));
     }
@@ -671,6 +672,10 @@ fn main() {
                     s.sessions.entry("d".into()).or_default().compacting = true;
                     s.threads.push(serde_json::from_value(serde_json::json!({"session_id": "f", "title": "Finished chat", "directory": "/projects/rune"})).unwrap());
                     s.finished.insert("f".into());
+                    for id in ["a", "b", "d", "e", "f"] {
+                        s.open_tab(crate::tabs::TabKind::Agent { session: Some(id.into()) });
+                    }
+                    s.tabs.iter_mut().for_each(|t| t.draft.focused = false);
                     return;
                 }
                 s.conv_header = Some(agent::ConvHeader::Projects);

@@ -21,7 +21,6 @@ pub struct TabDrag {
     size: [f32; 2],
     label: String,
     icon: (&'static str, u32),
-    agent_icon: bool,
     moving: bool,
     slots: Vec<(Source, f32)>,
     strip_key: String,
@@ -211,10 +210,9 @@ impl App {
                 }), _ => false,
             };
             let point = d.window_point();
-            let agent_icon = matches!(&source, Source::Buffer(id) if self.tabs.iter().any(|t| t.id == *id && matches!(t.kind, TabKind::Agent { .. })));
             let pressed = source.clone();
             let home = match &source { Source::Buffer(id) => self.layout.pane_of(*id).unwrap_or(self.layout.focus), _ => self.layout.focus };
-            self.tab_drag = Some(TabDrag { agent_icon, source, point, grab: [(point[0]-x).clamp(0.0,w),point[1]-y], size: [w,h], label, icon, moving: false, slots, strip_key, viewport, dirty, drop: None, home: (home, self.layout.pane_count() > 1) });
+            self.tab_drag = Some(TabDrag { source, point, grab: [(point[0]-x).clamp(0.0,w),point[1]-y], size: [w,h], label, icon, moving: false, slots, strip_key, viewport, dirty, drop: None, home: (home, self.layout.pane_count() > 1) });
             // The reference activates on press, so the content under a dragged tab
             // remains that tab throughout the gesture, including an outside drop.
             match pressed {
@@ -278,11 +276,12 @@ pub fn overlay(app: &App) -> El {
     let Some(drag) = app.tab_drag.as_ref().filter(|d| d.moving) else { return el() };
     let workspace = matches!(drag.source, Source::Workspace(_));
     let s = app.ty.scale();
-    let icon = if drag.agent_icon {
-        match app.tools.icons.agent(Some("neoism")) {
-            Some(image) => el().w(13.0*s).h(13.0*s).pixels(image.pixels()),
-            None => text("n").font(app.ty.tab()).color(rgb(app.pal.fg)),
-        }
+    let agent = match &drag.source {
+        Source::Buffer(id) => app.tabs.iter().find(|t| t.id == *id && matches!(t.kind, TabKind::Agent { .. })),
+        Source::Workspace(_) => None,
+    };
+    let icon = if let Some(tab) = agent {
+        super::agent_tab_mark(app, &tab.kind, "tab-drag-agent-icon")
     } else if workspace { super::icon(app, glyph::FOLDER, 1.25, rgb(app.pal.folder))
     } else { text(drag.icon.0).font(app.ty.icon_sized(13.0)).color(rgb(drag.icon.1)) };
     let close = if drag.dirty {

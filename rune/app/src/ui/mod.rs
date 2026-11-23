@@ -40,6 +40,17 @@ pub fn neoism_mark(app: &App, size: f32, key: &str) -> El {
     }
 }
 
+pub(crate) fn agent_tab_mark(app: &App, kind: &crate::tabs::TabKind, key: &str) -> El {
+    use crate::agent::sidebar::{Status, status_mark};
+    let status = Status::for_tab(app, kind);
+    let size = 13.0 * app.ty.scale();
+    if status == Status::Idle {
+        neoism_mark(app, size, key)
+    } else {
+        el().key(key.to_owned()).w(size).h(size).center().child(status_mark(app, status))
+    }
+}
+
 pub trait ChildIf {
     fn child_if(self, condition: bool, f: impl FnOnce() -> El) -> Self;
 }

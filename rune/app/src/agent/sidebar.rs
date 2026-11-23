@@ -372,15 +372,8 @@ pub fn conversations(app: &App) -> El {
         let item = keyboard_row(index, item);
         // A conversation at work turns the loader beside its age: the theme's ink while it
         // runs, red for background work, yellow while it waits on a permission.
-        let compacting = app.sessions.get(&t.session_id).is_some_and(|s| s.compacting);
-        let status = match app.activity_of(t) {
-            _ if compacting => Status::Compacting,
-            "running" => Status::Running,
-            "background" => Status::Background,
-            "permission" => Status::NeedsYou,
-            _ if app.finished.contains(&t.session_id) => Status::Finished,
-            _ => Status::Idle,
-        };
+        let status = Status::for_session(app, &t.session_id, app.activity_of(t));
+        let status = if status == Status::Idle && app.finished.contains(&t.session_id) { Status::Finished } else { status };
         item.fill(if open { rgb(p.surface).alpha(0.45) } else if keyboard { rgb(p.hover) } else { Color::TRANSPARENT })
             .hover(if open { rgb(p.surface).alpha(0.45) } else { rgb(p.hover).alpha(0.7) })
             .child(row().w_full().center_y().gap(6.0 * s)
@@ -508,14 +501,44 @@ pub fn conversations(app: &App) -> El {
 
 /// What a conversation is doing, as its card's mark says it.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Status { Idle, Running, Background, Compacting, NeedsYou, Finished }
+pub(crate) enum Status { Idle, Running, Background, Compacting, NeedsYou, Finished }
+
+impl Status {
+    fn for_session(app: &App, id: &str, activity: &str) -> Self {
+        match activity {
+            _ if app.sessions.get(id).is_some_and(|s| s.compacting) => Self::Compacting,
+            "running" => Self::Running,
+            "background" => Self::Background,
+            "permission" => Self::NeedsYou,
+            _ => Self::Idle,
+        }
+    }
+
+    pub(crate) fn for_tab(app: &App, kind: &TabKind) -> Self {
+        let TabKind::Agent { session: Some(id) } = kind else { return Self::Idle };
+        let activity = app.thread_activity.get(id).map(String::as_str)
+            .or_else(|| app.threads.iter().find(|t| t.session_id == *id).map(|t| app.activity_of(t)));
+        let activity = match activity {
+            // A just-started turn or a sub-agent may only have a local session status.
+            None | Some("idle") if app.session_live(id) => "running",
+            Some(activity) => activity,
+            None if app.background_count(id) > 0 => "background",
+            None => "idle",
+        };
+        Self::for_session(app, id, activity)
+    }
+
+    pub(crate) fn animated(self) -> bool {
+        matches!(self, Self::Running | Self::Background | Self::Compacting)
+    }
+}
 
 /// Four squares in a card's top right corner, in place of its age, while the conversation is
 /// not idle. Waiting on you they sit still on a yellow diamond; finished and not yet opened,
 /// on a white one. At work they move, each kind its own way: the
 /// ink orbit while a reply runs, a red chase round the diamond for background work, a green
 /// draw-in and out while it compacts. All ride the shared live squares (`tools::Spinner`).
-fn status_mark(app: &App, status: Status) -> El {
+pub(crate) fn status_mark(app: &App, status: Status) -> El {
     let (p, s) = (app.pal, app.ty.scale());
     let (size, dot) = (11.0 * s, 2.5 * s);
     let centre = (size - dot) / 2.0;

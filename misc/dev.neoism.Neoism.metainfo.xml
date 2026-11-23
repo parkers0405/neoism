@@ -52,11 +52,11 @@
   </categories>
 
   <releases>
-    <release version="0.7.166" date="2026-11-22">
+    <release version="0.7.167" date="2026-11-22">
       <description>
-        <p>Adds a Git panel for branch and working-tree changes, stacked and side-by-side diffs, GitHub pull request reviews, and issue conversations.</p>
+        <p>Lets Git commit messages grow as you type, tightens collapsed diff headers, smooths the end of trackpad scrolling in Agent conversations on macOS, and preserves zsh history when terminal tabs close.</p>
       </description>
-      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.166</url>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.167</url>
     </release>
     <release version="0.7.159" date="2026-11-19">
       <description>

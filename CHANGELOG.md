@@ -2,6 +2,17 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.167] - 2026-11-22
+
+### Easier commit messages and smoother conversation scrolling
+
+- The Git commit message box grows for multiline text, then scrolls once it reaches its height limit.
+- Collapsed file headers sit closer together in the diff, and toolbar tooltips appear above the review content.
+- On macOS, Agent conversation scrolling coasts more smoothly as a trackpad swipe comes to rest.
+- Integrated zsh terminals preserve command history when a tab closes, while respecting disabled history and history filters.
+
+Stable platform bundles and the daemon image use one immutable tagged source. Local and platform checks, publication, and independent download verification are reported separately.
+
 ## [0.7.166] - 2026-11-22
 
 ### Git changes, pull requests, and issues in one panel

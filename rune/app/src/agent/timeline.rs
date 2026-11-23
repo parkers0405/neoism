@@ -1046,11 +1046,12 @@ mod reasoning_tests {
         let folded_call = |id| update(serde_json::json!({"id":id,"kind":"Tool","role":"Assistant","tool":"bash","status":"running"}));
         let thought = |id, lines| update(serde_json::json!({"id":id,"kind":"Reasoning","role":"Assistant","title":"Thinking",
             "text":"A thought with enough words to take several lines where it is displayed. ".repeat(lines)}));
-        for (id, lines, call, activity) in [("short", 1, "first", "activity"), ("long", 12, "next", "activity-pinned")] {
+        // Leave room for differences in font metrics on Linux and macOS.
+        for (id, lines, call, activity) in [("short", 1, "first", "activity"), ("long", 40, "next", "activity-pinned")] {
             rt.update(|a, _| { a.apply_agent(thought(id, lines)); a.tick_activity(); });
             for _ in 0..120 { frame(&mut rt); }
             let thought_key = format!("msg:{id}");
-            let y = rt.presented(activity).expect("activity follows the visible content").0[1];
+            let y = rt.presented(activity).unwrap_or_else(|| panic!("{id} thought should show {activity}")).0[1];
             if lines == 1 {
                 assert!(rt.presented("activity-pinned").is_none(), "short thought stays inline");
                 let rect = rt.presented(&thought_key).unwrap().0;

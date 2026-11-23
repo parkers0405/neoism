@@ -16,7 +16,7 @@
 //! - `tablewheel:<notches per second>:<seconds>` / `tabletouch:<points per second>:<seconds>`:
 //!   horizontal wheel/trackpad motion over the active Markdown file's table at source line 0;
 //!   negative scrolls right (the `md-interactions` fixture starts with this table)
-//! - `hand:<seconds>[:<flick|read|fight>[:<seed>]]`: on macOS, scroll as a hand on the trackpad
+//! - `hand:<seconds>[:<flick|read|fight|medium>[:<seed>]]`: on macOS, scroll as a hand on the trackpad
 //!   does (`native/HumanScroll.swift`): real scroll events with finger and momentum phases,
 //!   posted to the app's own event queue on their own clock, through AppKit and winit
 //! - `keys:<text>:<per second>`: type `text` into the focused surface, a character at a time
@@ -115,7 +115,7 @@ impl Drive {
                 "hand" => {
                     let mut parts = rest.split(':');
                     let seconds = parts.next()?.parse().ok()?;
-                    let profile = match parts.next() { None | Some("mixed") => 0, Some("flick") => 1, Some("read") => 2, Some("fight") => 3, _ => return None };
+                    let profile = match parts.next() { None | Some("mixed") => 0, Some("flick") => 1, Some("read") => 2, Some("fight") => 3, Some("medium") if seconds >= 4.0 => 4, _ => return None };
                     Step::Hand { seconds, profile, seed: parts.next().map_or(Some(7), |seed| seed.parse().ok())? }
                 }
                 "keys" => { let (text, rate) = rest.rsplit_once(':')?; Step::Keys { text: text.chars().collect(), rate: rate.parse().ok()? } }

@@ -118,6 +118,43 @@ private final class Hand {
     func rest(_ s: Double) { Thread.sleep(forTimeInterval: min(s, max(0, seconds - elapsed()))) }
 
     func run() {
+        if profile == 4 {
+            // Fixed report positions and deadlines. Keep the existing whole-point quantizer;
+            // zero reports late in momentum are the point of this workload.
+            let uptime = { ProcessInfo.processInfo.systemUptime }
+            for direction in [1.0, -1.0] {
+                residual = 0
+                park()
+                let start = uptime()
+                var frame = 0
+                func tickMedium() {
+                    frame += 1
+                    Thread.sleep(forTimeInterval: max(0, start + Double(frame) / 120 - uptime()))
+                }
+                post(0, phase: 1, momentum: 0)
+                var last = 0.0
+                for i in 1...48 {
+                    tickMedium()
+                    let x = Double(i) / 48
+                    // Hermite stroke: 250 points, final derivative 450 pt/s.
+                    let pos = 250 * x * x * (3 - 2*x) + 180 * x * x * (x - 1)
+                    post(direction * (pos - last), phase: 2, momentum: 0)
+                    last = pos
+                }
+                post(0, phase: 4, momentum: 0)
+                var v = 450.0
+                while v > 22 {
+                    tickMedium()
+                    if frame == 49 { DispatchQueue.main.async { fputs("[medium] coast begin\n", stderr) } }
+                    v *= exp(-1 / (120.0 * 0.42))
+                    post(direction * v / 120, phase: 0, momentum: frame == 49 ? 1 : 2)
+                }
+                post(0, phase: 0, momentum: 3)
+                DispatchQueue.main.async { fputs("[medium] coast end\n", stderr) }
+                Thread.sleep(forTimeInterval: 0.25)
+            }
+            return
+        }
         var direction = 1.0 // positive deltas scroll towards older messages
         while elapsed() < seconds {
             let kind: Int32

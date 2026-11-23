@@ -396,6 +396,7 @@ impl App {
         }
         if self.project_menu.is_some() { return self.project_menu_clip(); }
         match self.focus {
+            Focus::Details if self.git_panel.open && self.git_panel.message.focused => self.rects.get(crate::git::COMMIT_SCROLL_KEY).copied(),
             Focus::Buffers(_) => self.rects.get(&format!("pane-tab-strip:{}", self.layout.focus)).copied(),
             Focus::Workspaces(_) => self.rects.get("workspace-tabs").copied(),
             Focus::Content if matches!(self.active_tab().kind, TabKind::Editor { .. }) => self.active_buffer().and_then(|b| b.view_rect),

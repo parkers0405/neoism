@@ -345,8 +345,8 @@ fn button(app: &App, label: &str) -> El {
 const HEAD_H: f32 = 40.0;
 const BRANCH_H: f32 = 36.0;
 const ACTION_H: f32 = 34.0;
-const MESSAGE_H: f32 = 56.0;
 const FILE_H: f32 = 26.0;
+pub(crate) const COMMIT_SCROLL_KEY: &str = "git-commit-scroll";
 
 pub fn view(app: &App) -> El {
     if !app.git_panel.open { return el(); }
@@ -399,7 +399,7 @@ fn changes(app: &App, card: El) -> El {
     }
     // The message, then the button that uses it.
     let input = rune::text_input(&state.message, app.ty.sans(13.0, 400.0).lh(18.0 * s)).key("git-commit-message")
-        .w_full().h(MESSAGE_H * s).px(10.0 * s).py(8.0 * s).radius(9.0 * s).fill(rgb(p.surface)).border(s, rgb(p.border))
+        .w_full().px(10.0 * s).py(8.0 * s)
         .color(rgb(p.fg)).placeholder("Message", rgb(p.muted)).caret(rune::Color::TRANSPARENT, crate::ui::cursor::selection(app))
         .on_edit(|a: &mut App| { a.focus = Focus::Details; &mut a.git_panel.message })
         .on_input_key(|a: &mut App, e: &KeyEvent, tx: &mut Tx| {
@@ -408,6 +408,9 @@ fn changes(app: &App, card: El) -> El {
             if e.key == Key::Enter && e.mods.cmd { a.git_commit(); return true; }
             false
         });
+    let input = rune::auto_grow(input, 1, 6).key(COMMIT_SCROLL_KEY).max_h(124.0 * s)
+        .on_layout(|a: &mut App, rect| { a.rects.insert(COMMIT_SCROLL_KEY.into(), rect); })
+        .fill(rgb(p.surface)).border(s, rgb(p.border)).radius(9.0 * s).clip_rounded(9.0 * s);
     let quick = state.quick();
     let enabled = !quick.steps.is_empty() && !busy;
     let label = if busy { state.running.unwrap_or("Working\u{2026}") } else { quick.label };
@@ -667,6 +670,31 @@ pub fn long_fixture(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shift_return_grows_the_commit_box_and_keeps_it_bounded() {
+        let mut app = App::new();
+        fixture(&mut app, false);
+        let mut rt = rune::Runtime::new(app, |a: &App, _: &mut rune::Cx<App>| view(a), (400.0, 674.0), rune::Env::new(true, 1.0));
+        let bounds = |rt: &rune::Runtime<App>, key| rt.elements().into_iter()
+            .find(|e| e.key.as_deref() == Some(key)).unwrap().rect;
+        for _ in 0..3 { rt.frame(1.0 / 120.0); }
+        let [x, y, _, _] = bounds(&rt, "git-commit-message");
+        rt.pointer_down(x + 12.0, y + 14.0);
+        rt.pointer_up(x + 12.0, y + 14.0);
+        let before = bounds(&rt, COMMIT_SCROLL_KEY)[3];
+        let newline = |rt: &mut rune::Runtime<App>| rt.key(KeyEvent { key: Key::Enter, mods: rune::Mods { shift: true, ..Default::default() } });
+        newline(&mut rt);
+        for _ in 0..60 { rt.frame(1.0 / 120.0); }
+        assert!(rt.state.git_panel.message.text.contains('\n'));
+        assert!(bounds(&rt, COMMIT_SCROLL_KEY)[3] > before + 10.0);
+        for _ in 0..10 { newline(&mut rt); }
+        for _ in 0..60 { rt.frame(1.0 / 120.0); }
+        let viewport = bounds(&rt, COMMIT_SCROLL_KEY);
+        assert!(viewport[3] <= 125.0 * rt.state.ty.scale());
+        let clip = rt.state.cursor_clip().expect("the commit caret is clipped to its viewport");
+        assert!(clip.into_iter().zip(viewport).all(|(a, b)| (a - b).abs() < 0.5));
+    }
 
     #[test]
     fn large_review_renders_only_a_viewport_of_rows() {

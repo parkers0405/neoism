@@ -96,7 +96,7 @@ impl Review {
         // How many rows a line of `chars` characters takes.
         let pieces = |line: &Line| if cols == 0 || !matches!(line.kind, Kind::Add | Kind::Remove | Kind::Context) { 1 } else { line.text.chars().count().div_ceil(cols).max(1) };
         for (f, file) in self.files.iter().enumerate() {
-            if f > 0 { self.rows.push(Row::Gap); }
+            if f > 0 && !self.files[f - 1].collapsed { self.rows.push(Row::Gap); }
             self.rows.push(Row::Header(f));
             if file.collapsed { continue; }
             let notes = |rows: &mut Vec<Row>, i: usize| if let Some(found) = noted.get(&(f, i)) { rows.extend(found.iter().map(|k| Row::Note(*k))); };
@@ -367,7 +367,7 @@ pub(super) fn icon_tool(app: &App, key: &str, icon: crate::ui::feather::Icon, na
     el().key(key.to_owned()).w(30.0 * s).h(28.0 * s).center().radius(8.0 * s).hover_group()
         .fill(if on { rgb(p.hover) } else { rune::Color::TRANSPARENT }).border(s, rgb(if on { p.border } else { p.bg })).hover(rgb(p.hover))
         .child(crate::ui::feather::view(app, icon, 15.0 * s, if on { p.fg } else { p.dim }))
-        .child(el().absolute(-30.0 * s, 32.0 * s).w(90.0 * s).center().group_opacity(0.0, 1.0)
+        .child(el().absolute(-30.0 * s, 32.0 * s).w(90.0 * s).center().raise().group_opacity(0.0, 1.0)
             .child(el().h(20.0 * s).px(7.0 * s).center().radius(6.0 * s).fill(rgb(p.fg))
                 .child(text(name.to_owned()).font(app.ty.sans(11.0, 500.0)).color(rgb(p.bg)))))
 }
@@ -771,7 +771,12 @@ mod tests {
         assert_eq!((review.row_of("a.rs"), review.row_of("b.rs")), (Some(0), Some(7)));
         review.files[0].collapsed = true;
         review.rebuild();
-        assert_eq!((review.rows.len(), review.row_of("b.rs")), (1 + 1 + 3, Some(2)));
+        assert_eq!((review.rows.len(), review.row_of("b.rs")), (1 + 3, Some(1)));
+        review.files[1].collapsed = true;
+        review.rebuild();
+        assert_eq!(review.rows, [Row::Header(0), Row::Header(1)]);
+        assert_eq!(review.chunks, [0..1, 1..2]);
+        review.files[1].collapsed = false;
         // A reload keeps what was folded.
         let files: Vec<GitFileChange> = review.files.iter().map(|f| GitFileChange { path: f.path.clone(), status: f.status, additions: 0, deletions: 0, staged: false }).collect();
         review.set(files, vec![], false);

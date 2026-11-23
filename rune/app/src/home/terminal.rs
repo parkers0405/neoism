@@ -14,6 +14,8 @@ pub const LONG_RUNNING: Duration = Duration::from_millis(50);
 
 pub struct Terminal {
     pub shell: Shell,
+    /// The previous shell directory must not override an explicit workspace selection.
+    pub cwd_before_workspace_change: Option<String>,
     pub composer: Composer,
     /// The measured pane (blocks area plus composer), in points.
     pub area: [f32; 2],
@@ -81,6 +83,7 @@ impl Terminal {
     pub fn new(cwd: String, colors: Colors) -> Terminal {
         Terminal {
             shell: Shell::new(cwd, colors),
+            cwd_before_workspace_change: None,
             composer: Composer::default(),
             area: [0.0; 2],
             scroll: Rc::default(),

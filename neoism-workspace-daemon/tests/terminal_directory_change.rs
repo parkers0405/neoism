@@ -129,7 +129,7 @@ async fn confirmed(
     .expect("real shell cwd confirmation")
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn integrated_shells_home_to_quoted_repo_confirms_real_pwd_and_cargo() {
     for shell in ["/bin/bash", "/bin/zsh"] {
@@ -183,6 +183,7 @@ async fn integrated_shells_home_to_quoted_repo_confirms_real_pwd_and_cargo() {
         );
         registry.handle(ClientMessage::PtyInput { session_id: id.clone(), bytes: b"stty -echo; printf 'PWD_%s\\n' CHECK; pwd; cargo locate-project --message-format plain; printf 'DONE_%s\\n' SELECTED\r".to_vec() });
         let result = until(&mut owner, "DONE_SELECTED").await;
+        let repo = repo.canonicalize().unwrap();
         assert!(result.contains(repo.to_str().unwrap()), "{result}");
         assert!(
             result.contains(repo.join("Cargo.toml").to_str().unwrap()),
@@ -193,13 +194,14 @@ async fn integrated_shells_home_to_quoted_repo_confirms_real_pwd_and_cargo() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn integrated_bash_busy_builtin_read_defers_without_any_control_bytes() {
     let shell = "/bin/bash";
     let home = tempfile::tempdir().unwrap();
     let target = home.path().join("selected");
     std::fs::create_dir(&target).unwrap();
+    let target = target.canonicalize().unwrap();
     let (registry, mut owner) = SessionRegistry::new();
     let created = registry.handle_subscribed(
         ClientMessage::CreatePty {
@@ -218,7 +220,7 @@ async fn integrated_bash_busy_builtin_read_defers_without_any_control_bytes() {
     };
     let _cleanup = Cleanup(registry.clone(), id.clone());
     until(&mut owner, "\x1b]133;B").await;
-    registry.handle(ClientMessage::PtyInput { session_id: id.clone(), bytes: b"stty -echo; printf 'BUSY_%s\\n' READY; if IFS= read -r -t 0.7 answer; then printf 'INJECTED=%s\\n' \"$answer\"; else printf 'NO_%s\\n' INPUT; fi\r".to_vec() });
+    registry.handle(ClientMessage::PtyInput { session_id: id.clone(), bytes: b"stty -echo; printf 'BUSY_%s\\n' READY; if IFS= read -r -t 1 answer; then printf 'INJECTED=%s\\n' \"$answer\"; else printf 'NO_%s\\n' INPUT; fi\r".to_vec() });
     until(&mut owner, "BUSY_READY").await;
     let start = std::time::Instant::now();
     assert!(registry
@@ -230,16 +232,23 @@ async fn integrated_bash_busy_builtin_read_defers_without_any_control_bytes() {
         bytes: b"touch WRONG_CWD\r".to_vec(),
     });
     assert!(matches!(blocked.as_slice(), [ServerMessage::Error { .. }]));
-    assert!(tokio::time::timeout(
-        Duration::from_millis(120),
-        confirmed(&mut owner, &id, "busy")
-    )
-    .await
-    .is_err());
-    assert_eq!(
-        confirmed(&mut owner, &id, "busy").await,
-        target.to_str().unwrap()
-    );
+    // Retain ALL output while waiting: otherwise an injected line consumed by
+    // read could be discarded by the confirmation helper and escape this test.
+    let mut busy_output = String::new();
+    let cwd = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            match owner.recv().await.unwrap() {
+                ServerMessage::PtyOutput { bytes, .. } => busy_output.push_str(&String::from_utf8_lossy(&bytes)),
+                ServerMessage::TerminalDirectoryChanged { session_id, request_id, directory }
+                    if session_id == id && request_id == "busy" => break directory,
+                ServerMessage::TerminalDirectoryChangeFailed { message, .. } => panic!("{message}"),
+                _ => {}
+            }
+        }
+    }).await.expect("busy shell eventually confirms cwd");
+    assert_eq!(cwd, target.to_str().unwrap());
+    assert!(busy_output.contains("NO_INPUT"), "{busy_output}");
+    assert!(!busy_output.contains("INJECTED="), "{busy_output}");
     assert!(start.elapsed() >= Duration::from_millis(400));
     registry.handle(ClientMessage::PtyInput {
         session_id: id.clone(),

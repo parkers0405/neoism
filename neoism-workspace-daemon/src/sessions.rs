@@ -472,6 +472,20 @@ impl SessionRegistry {
             env.push(("TERM".to_string(), "xterm-256color".to_string()));
         }
         ensure_neoism_pty_env(&mut env);
+        // The macOS PTY launcher gives its direct child a login argv[0]. Bash
+        // then ignores --rcfile, so none of our authenticated hooks are loaded.
+        // Like the zsh wrapper, use env's exec (same PID, no monitor process) to
+        // preserve the explicitly integrated interactive/non-login invocation.
+        // Identity was captured above from bash itself, not this launcher.
+        #[cfg(target_os = "macos")]
+        let (shell, args) = if shell.as_deref().and_then(|s| Path::new(s).file_name()).is_some_and(|s| s == "bash")
+            && args.first().is_some_and(|s| s == "--rcfile") {
+            let mut forwarded = vec![shell.unwrap()];
+            forwarded.extend(args);
+            (Some("/usr/bin/env".into()), forwarded)
+        } else {
+            (shell, args)
+        };
         let config = PtySessionConfig {
             shell,
             args,

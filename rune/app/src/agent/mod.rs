@@ -181,6 +181,7 @@ pub struct Session {
     pub turn_started: Option<std::time::Instant>,
     pub queued_prompts: u32,
     pub status: Option<String>,
+    retry_warning: Option<std::rc::Rc<str>>,
     pub compacting: bool,
     pub selection: Option<slash::Selection>,
     /// First message of a turn that streamed while open here; its tool and thinking rows stay
@@ -737,7 +738,10 @@ impl App {
         // A sub-agent starting before any of its rows arrived is still a turn seen live.
         if streaming && self.families.is_child(session_id) { self.sessions.entry(session_id.to_owned()).or_default(); }
         let Some(session) = self.sessions.get_mut(session_id) else { return };
-        if !streaming { session.activity_reveal = None; }
+        if !streaming {
+            session.activity_reveal = None;
+            session.set_retry_warning(None);
+        }
         if session.streaming == streaming { return; }
         session.streaming = streaming;
         // A turn's rows differ while it runs (`focus.rs`): the list is computed again.
@@ -916,6 +920,7 @@ impl App {
         // the history only.
         if let AgentServerMessage::SessionEvent { session_id, kind, .. } = &message && kind == "stream.resumed" {
             let session_id = session_id.clone();
+            if let Some(session) = self.sessions.get_mut(&session_id) { session.set_retry_warning(None); }
             self.agent_stream_resumed(&session_id);
             return true;
         }
@@ -1186,6 +1191,7 @@ impl App {
                 // What the old catalog said was running is only still running if the new one
                 // says so again.
                 self.thread_activity.clear();
+                for session in self.sessions.values_mut() { session.set_retry_warning(None); }
                 for thread in &mut self.threads {
                     thread.catalog_activity = None;
                     thread.busy = false;
@@ -1203,6 +1209,23 @@ impl App {
             AgentServerMessage::ProviderState { session_id, context_limit, .. } => {
                 if let Some(limit) = context_limit.filter(|l| *l > 0) { self.sessions.entry(session_id).or_default().context_limit = Some(limit); }
             }
+            AgentServerMessage::SessionEvent { session_id, kind, properties }
+                if kind == "session.status" && properties["status"]["type"] == "retry" => {
+                let status = &properties["status"];
+                if !self.session_live(&session_id) { return false; }
+                let Some(session) = self.sessions.get_mut(&session_id) else { return false };
+                let warning = status["attempt"].as_u64().filter(|&attempt| attempt >= 3).map(|attempt| {
+                    let reason: String = status["message"].as_str().unwrap_or_default().trim().chars()
+                        .take(180).map(|c| if c.is_control() { ' ' } else { c }).collect();
+                    let reason = if reason.trim().is_empty() { "Provider request failed" } else { reason.trim() };
+                    std::rc::Rc::from(format!("Retrying ({attempt}): {reason}"))
+                });
+                return session.set_retry_warning(warning);
+            }
+            AgentServerMessage::SessionEvent { session_id, kind, properties }
+                if kind == "message.part.updated" && properties["part"]["type"] == "step-finish" => {
+                return self.sessions.get_mut(&session_id).is_some_and(|session| session.set_retry_warning(None));
+            }
             // These carry no state consumed by Rune, including the family and slash
             // handlers above. Keep unclassified events conservative, not ignored.
             AgentServerMessage::SessionEvent { .. }
@@ -1211,6 +1234,15 @@ impl App {
             | AgentServerMessage::ThreadSwitched { .. } => return false,
             _ => {}
         }
+        true
+    }
+}
+
+impl Session {
+    fn set_retry_warning(&mut self, warning: Option<std::rc::Rc<str>>) -> bool {
+        if self.retry_warning == warning { return false; }
+        if self.retry_warning.is_some() != warning.is_some() { self.structure += 1; }
+        self.retry_warning = warning;
         true
     }
 }

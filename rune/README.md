@@ -159,8 +159,7 @@ video so agents can read the motion without playing it. Extract any frame with
   `settings`, `settings-themes`, `settings-backgrounds`, `keybinds`. Cmd+W no longer closes a tab by default
   (rebindable in Keybindings). Rows inside a page sit under section headings (`Settings::section`: Fonts,
   Effects, Window, Panels, …). Themes and Backgrounds open with a small mock Neoism window in the theme's
-  colours; Backgrounds draws the picture behind its conversation, with an opacity slider (committed on release),
-  Cover/Contain and the gallery of installed pictures. `ui.window.background-image.fit` is honoured by the window.
+  colours; Backgrounds draws the picture behind its conversation, with live sliders for opacity, blur, pixelation (`ui.window.background-image.pixel-size`) and ordered dithering (`ui.window.background-image.dither`). Sliders save on release. Pixelation and dithering are off by default and can be combined. Cover/Contain and the gallery of installed pictures sit below the preview.
 - **All-projects catalog** (`agent/catalog.rs`): on `~` or with the filter on "All projects" the sidebar asks the
   daemon for the project list (`ListSessionProjects`) and each project's chats five at a time
   (`ListProjectSessions`). The first twelve projects load at once and the next twelve as the list is scrolled

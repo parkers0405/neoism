@@ -722,6 +722,14 @@ pub(crate) fn forward_agent_server_event(
                     }
                 }
                 if let Some(message) = history_from_part(part) {
+                    // A completed provider step also clears ephemeral retry UI, even if no text streamed.
+                    if part.get("type").and_then(Value::as_str) == Some("step-finish") {
+                        let _ = tx.send(AgentServerMessage::SessionEvent {
+                            session_id: source_session.clone(),
+                            kind: event_type.clone(),
+                            properties: properties.clone(),
+                        });
+                    }
                     let _ = tx.send(AgentServerMessage::MessageUpdated {
                         session_id: source_session.clone(),
                         message,
@@ -826,10 +834,17 @@ pub(crate) fn forward_agent_server_event(
                 _ => StreamingState::Generating,
             };
             let _ = tx.send(AgentServerMessage::StreamingState {
-                session_id: source_session,
+                session_id: source_session.clone(),
                 state,
                 label,
             });
+            if status_type == Some("retry") {
+                let _ = tx.send(AgentServerMessage::SessionEvent {
+                    session_id: source_session,
+                    kind: event_type,
+                    properties,
+                });
+            }
             return;
         }
         "session.execution.updated" => {
@@ -1449,6 +1464,24 @@ mod tests {
         rx: &mut reply_queue::AgentReplyReceiver,
     ) -> AgentServerMessage {
         rx.try_recv().expect("provider snapshot")
+    }
+
+    #[test]
+    fn provider_retry_and_step_finish_reach_the_session_client() {
+        let (tx, mut rx) = reply_queue::channel();
+        let status = json!({"type": "retry", "attempt": 3, "message": "Provider is overloaded", "next": 1234});
+        forward_agent_server_event(&tx, "root", json!({"type": "session.status", "properties": {
+            "sessionID": "root", "status": status
+        }}));
+        assert!(matches!(rx.try_recv().unwrap(), AgentServerMessage::StreamingState { .. }));
+        assert!(matches!(rx.try_recv().unwrap(), AgentServerMessage::SessionEvent { session_id, kind, properties }
+            if session_id == "root" && kind == "session.status" && properties["status"] == status));
+
+        forward_agent_server_event(&tx, "root", json!({"type": "message.part.updated", "properties": {
+            "sessionID": "root", "part": { "id": "finish", "type": "step-finish", "tokens": {"input": 5}, "cost": 0 }
+        }}));
+        assert!(matches!(rx.try_recv().unwrap(), AgentServerMessage::SessionEvent { session_id, kind, properties }
+            if session_id == "root" && kind == "message.part.updated" && properties["part"]["type"] == "step-finish"));
     }
 
     #[test]

@@ -223,6 +223,8 @@ impl Picker {
 
 impl App {
     pub fn open_picker(&mut self, mode: Mode) {
+        // The picker takes over keyboard input; don't revive an editor popup on close.
+        if let Some(buffer) = self.active_buffer_mut() { buffer.lsp.dismiss(); }
         let mut picker = Picker::new(mode);
         if mode.categorized() {
             picker.systems = self.palette_systems();
@@ -434,11 +436,13 @@ impl App {
     }
 
     /// Persist a background choice (`ui.window.background-image[-disabled]`).
-    pub fn apply_background(&mut self, choice: &backgrounds::Choice) {
+    pub fn apply_background(&mut self, choice: &backgrounds::Choice) -> serde_json::Value {
+        let effects = self.wallpaper.effects;
         let image = match choice {
-            // A new picture keeps the opacity and fit already chosen.
+            // A new picture keeps the active picture's adjustments.
             backgrounds::Choice::Image(path) => json!({"path": path, "opacity": if self.wallpaper.active() { self.wallpaper.opacity } else { 1.0 },
-                "blur": if self.wallpaper.active() { self.wallpaper.blur } else { 0.0 }, "fit": if self.wallpaper.active() && !self.wallpaper.cover { "contain" } else { "cover" }, "position-x": 0.5, "position-y": 0.5}),
+                "blur": effects.blur, "pixel-size": effects.pixel_size, "dither": effects.dither,
+                "fit": if self.wallpaper.active() && !self.wallpaper.cover { "contain" } else { "cover" }, "position-x": 0.5, "position-y": 0.5}),
             _ => serde_json::Value::Null,
         };
         self.set_setting("ui.window.background-image-disabled", json!(*choice == backgrounds::Choice::None));
@@ -446,45 +450,53 @@ impl App {
         // Show the choice now rather than after the daemon's write lands on disk.
         self.wallpaper = crate::ui::wallpaper::Wallpaper::from_config(&json!({"ui": {"window": {
             "background-image-disabled": *choice == backgrounds::Choice::None, "background-image": image }}}));
+        image
     }
 
     /// The preview image for a background path, once decoded. The first ask starts a decode on
     /// a worker thread; `take_decoded_previews` (from `poll`) turns the pixels into an image.
     pub fn background_preview(&self, path: &std::path::Path) -> Option<rune::Image> {
-        if let Some(image) = self.background_previews.borrow().get(path) { return image.clone(); }
-        self.background_previews.borrow_mut().insert(path.to_owned(), None);
-        let (queue, wake, path) = (self.decoded_previews.clone(), self.waker.clone(), path.to_owned());
-        std::thread::spawn(move || {
-            if let Some(pixels) = backgrounds::decode(&path) { queue.lock().unwrap().push((path, pixels)); }
-            if let Some(wake) = wake { wake(); }
-        });
-        None
+        self.background_image(path, backgrounds::Effects::default())
     }
 
-    /// A background picture as the window shows it: plain, or blurred by `blur` source pixels
-    /// (whole pixels, so a slider settles on a handful of cached pictures).
-    pub fn background_image(&self, path: &std::path::Path, blur: f32) -> Option<rune::Image> {
-        let sigma = blur.round();
-        if sigma < 1.0 { return self.background_preview(path); }
-        let key = std::path::PathBuf::from(format!("{}#blur={sigma}", path.display()));
-        if let Some(image) = self.background_previews.borrow().get(&key) { return image.clone(); }
-        self.background_previews.borrow_mut().insert(key.clone(), None);
-        let (queue, wake, path) = (self.decoded_previews.clone(), self.waker.clone(), path.to_owned());
-        std::thread::spawn(move || {
-            if let Some(pixels) = backgrounds::decode_blurred(&path, sigma) { queue.lock().unwrap().push((key, pixels)); }
-            if let Some(wake) = wake { wake(); }
-        });
-        None
+    /// Use the last rendered effect for this path while a slider's new value is processing.
+    pub fn background_image(&self, path: &std::path::Path, effects: backgrounds::Effects) -> Option<rune::Image> {
+        let key = (path.to_owned(), effects);
+        let styled = effects != backgrounds::Effects::default();
+        let mut cache = self.background_previews.borrow_mut();
+        if let Some(Some(image)) = cache.entries.get(&key) { return Some(image.clone()); }
+        if !cache.entries.contains_key(&key) && (!styled || cache.pending_effects < 2) {
+            cache.entries.insert(key.clone(), None);
+            cache.pending_effects += usize::from(styled);
+            let (queue, wake) = (self.decoded_previews.clone(), self.waker.clone());
+            std::thread::spawn(move || {
+                let pixels = if styled { backgrounds::decode_effects(&key.0, effects) } else { backgrounds::decode(&key.0) };
+                queue.lock().unwrap().push((key, pixels));
+                if let Some(wake) = wake { wake(); }
+            });
+        }
+        styled.then(|| cache.finished_effects.iter().rev().filter(|key| key.0 == path)
+            .find_map(|key| cache.entries.get(key).and_then(Clone::clone))).flatten()
     }
 
     /// Move decoded previews into the image cache. Returns whether any arrived.
     pub fn take_decoded_previews(&mut self) -> bool {
         let decoded: Vec<_> = self.decoded_previews.lock().unwrap().drain(..).collect();
         let Some(images) = &self.images else { return false };
-        for (path, (w, h, bytes)) in &decoded {
-            self.background_previews.borrow_mut().insert(path.clone(), Some(images.rgba(*w, *h, bytes.clone())));
+        let changed = !decoded.is_empty();
+        let mut cache = self.background_previews.borrow_mut();
+        for (key, pixels) in decoded {
+            cache.entries.insert(key.clone(), pixels.map(|(w, h, bytes)| images.rgba(w, h, bytes)));
+            if key.1 != backgrounds::Effects::default() {
+                cache.pending_effects -= 1;
+                cache.finished_effects.push_back(key);
+                if cache.finished_effects.len() > 6 {
+                    let old = cache.finished_effects.pop_front().unwrap();
+                    cache.entries.remove(&old);
+                }
+            }
         }
-        !decoded.is_empty()
+        changed
     }
 
     pub fn apply_theme(&mut self, name: &str) {

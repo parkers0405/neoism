@@ -88,9 +88,16 @@ pub fn row_items(messages: &[HistoryMessage], live_from: usize, activity: bool, 
 }
 
 fn folded(messages: &[HistoryMessage], body: usize, end: usize, live_from: usize, live: bool, items: &mut Vec<RowItem>) {
-    // The thought being had: the turn's newest row, while it runs.
-    let thought = (body..end).rev().find(|&i| messages[i].kind != Kind::Assistant || written(&messages[i]))
-        .filter(|&i| live && messages[i].kind == Kind::Reasoning && tools::visible(&messages[i], i, 0));
+    // Hidden calls don't replace visible content. Keep the latest thought through the calls
+    // it led to, until the next visible message takes its place or the turn ends.
+    let thought = live.then(|| (body..end).rev().find(|&i| {
+        let message = &messages[i];
+        match message.kind {
+            Kind::Assistant => written(message),
+            Kind::Tool | Kind::Subtask => kept(message) && tools::visible(message, i, 0),
+            _ => tools::visible(message, i, live_from.min(i)),
+        }
+    })).flatten().filter(|&i| messages[i].kind == Kind::Reasoning);
     for i in body..end {
         let message = &messages[i];
         match message.kind {
@@ -242,8 +249,8 @@ mod tests {
         let rows = |n: usize| row_items(&messages[..n], 0, true, true, &HashSet::new());
         // Thinking: the note written before the call stays, with the thought.
         assert_eq!(rows(4), [Message(0), Work(0, 4), Message(1), Thought(3), Activity]);
-        // The next call folds the thought; the note is still the newest text.
-        assert_eq!(rows(5), [Message(0), Work(0, 5), Message(1), Activity]);
+        // A hidden call doesn't displace the thought.
+        assert_eq!(rows(5), [Message(0), Work(0, 5), Message(1), Thought(3), Activity]);
         // The reply follows the note: both stay.
         assert_eq!(rows(6), [Message(0), Work(0, 6), Message(1), Message(5), Activity]);
         // Pressed open while it runs: every call.

@@ -361,7 +361,11 @@ fn list(app: &App, picker: &Picker, rows: &[super::Row], width: f32) -> El {
     let selected = (!rows.is_empty()).then_some(picker.selected);
     crate::ui::rows::view(LIST_KEY, &reset, width, row_h * s, visible, picker.top, selected, rgb(p.hover), 3.0 * s, rows.len(), built)
         .pb(4.0 * s)
-        .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert(LIST_KEY.into(), r); })
+        .on_layout(|a: &mut App, r: [f32; 4]| {
+            if a.rects.insert(LIST_KEY.into(), r) != Some(r) {
+                if let Some(wake) = &a.waker { wake(); }
+            }
+        })
         .on_wheel(|a: &mut App, e: rune::WheelEvent, tx: &mut Tx| a.palette_wheel(&e, tx))
 }
 

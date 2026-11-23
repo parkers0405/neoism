@@ -1,6 +1,6 @@
 //! The workspace root: where the finder, tree, git watch and new conversations look. An explicit
-//! directory change goes through the main terminal first (`ChangeTerminalDirectory`), and the
-//! root follows the directory the host confirms (`model.changeWorkspaceDirectory`).
+//! directory change goes through the main terminal when supported, then the workspace moves
+//! to the directory the host confirms.
 //!
 //! One terminal per workspace owns the working directory (`mainTerminalSurface`): the one the
 //! user starred, else the first Home or Terminal tab with a shell. While it is the active tab,
@@ -11,6 +11,12 @@ use crate::app::App;
 use crate::daemon::Family;
 use crate::tabs::TabKind;
 use neoism_protocol::pty::ClientMessage as PtyClient;
+
+pub(crate) enum DirectoryChange {
+    Starting { path: String },
+    Shell { request_id: String, session_id: String },
+    Workspace { request_id: u64 },
+}
 
 /// Keep an SSH tunnel alive until its close request has reached the server.
 pub struct ClosingConnection {
@@ -69,7 +75,10 @@ impl App {
     pub fn follow_main_terminal(&mut self) -> bool {
         let active = self.active_tab().id;
         if self.pending_cd.is_some() || self.main_terminal_tab() != Some(active) { return false; }
-        let Some(cwd) = self.terminals.get(&active).map(|t| shell_directory(&t.shell.cwd, &self.cwd)) else { return false };
+        let Some(term) = self.terminals.get_mut(&active) else { return false };
+        let cwd = shell_directory(&term.shell.cwd, &self.cwd);
+        if term.cwd_before_workspace_change.as_ref().is_some_and(|old| same_directory(old, &cwd)) { return false; }
+        if crate::startup::absolute(&cwd) { term.cwd_before_workspace_change = None; }
         if !crate::startup::absolute(&cwd) || same_directory(&cwd, &self.cwd) || cwd.chars().any(char::is_control) { return false; }
         if self.root_refused.as_deref() == Some(cwd.as_str()) { return false; }
         // What a shell says is a claim, not a folder: an `ssh` or a container inside the
@@ -106,57 +115,101 @@ impl App {
 
     /// `cd` the workspace to `path` (absolute).
     pub fn change_directory(&mut self, path: &str) {
+        if !crate::startup::absolute(path) || path.chars().any(char::is_control) {
+            return self.directory_error("Choose an absolute directory without control characters.");
+        }
+        if self.pending_cd.is_some() {
+            return self.directory_error("Still waiting for the previous directory change.");
+        }
+        if self.daemon.is_some() && !self.workspace_ready {
+            // A fast pick on the splash can arrive before the host has registered this workspace.
+            self.pending_cd = Some(DirectoryChange::Starting { path: path.to_owned() });
+            return;
+        }
         let session = self.main_terminal_tab()
             .and_then(|id| self.terminals.get(&id))
             .and_then(|term| term.shell.session.clone());
         let (Some(session_id), Some(daemon)) = (session, &self.daemon) else {
-            self.set_workspace_root(path);
+            self.request_workspace_root(path);
             return;
         };
-        let request_id = format!(
-            "rune-cd-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0)
-        );
+        let request_id = format!("rune-cd-{}", uuid::Uuid::new_v4());
         let message = PtyClient::ChangeTerminalDirectory {
-            session_id,
+            session_id: session_id.clone(),
             directory: path.to_owned(),
             request_id: request_id.clone(),
         };
         if let Ok(value) = serde_json::to_value(&message) {
             daemon.send(Family::Pty, value);
         }
-        self.pending_cd = Some(request_id);
+        self.pending_cd = Some(DirectoryChange::Shell { request_id, session_id });
     }
 
     /// The shell confirmed (or refused) a requested `cd`.
     pub(crate) fn directory_changed(
         &mut self,
+        session: &str,
         request_id: &str,
-        directory: Option<&str>,
+        result: Result<&str, &str>,
     ) {
-        if self.pending_cd.as_deref() != Some(request_id) {
-            return;
-        }
-        self.pending_cd = None;
-        if let Some(directory) = directory {
-            self.set_workspace_root(directory);
+        let Some(DirectoryChange::Shell { .. }) = self.pending_cd.take_if(|pending| matches!(pending,
+            DirectoryChange::Shell { request_id: id, session_id, .. } if id == request_id && session_id == session)) else { return };
+        match result {
+            Ok(directory) => {
+                if let Some(term) = self.terminals.values_mut().find(|term| term.shell.session.as_deref() == Some(session)) {
+                    term.shell.cwd = directory.to_owned();
+                }
+                self.request_workspace_root(directory);
+            }
+            Err(message) => self.directory_error(message),
         }
     }
 
-    /// Move everything workspace-scoped to `root` and declare it to the host.
-    pub fn set_workspace_root(&mut self, root: &str) {
-        let root = root.trim_end_matches('/').to_owned();
-        if root == self.cwd {
-            return;
+    pub(crate) fn directory_terminal_closed(&mut self, session: &str) {
+        if matches!(&self.pending_cd, Some(DirectoryChange::Shell { session_id, .. }) if session_id == session) {
+            self.pending_cd = None;
+            self.directory_error("The main terminal closed before confirming the directory change.");
         }
-        self.view_workspace_root(&root);
-        if self.workspace_ready {
-            if let Some(d) = &self.daemon {
-                d.send(Family::Workspace, serde_json::json!({"SetWorkspaceRoot":{"workspace_id":self.workspace_id,"root_dir":self.cwd}}));
+    }
+
+    pub(crate) fn directory_disconnected(&mut self) {
+        if self.pending_cd.take().is_some() {
+            self.directory_error("The connection closed before confirming the directory change. Try again after reconnecting.");
+        }
+    }
+
+    fn directory_error(&mut self, message: &str) {
+        tracing::warn!("Directory change failed: {message}");
+    }
+
+    fn request_workspace_root(&mut self, root: &str) {
+        if let Some(daemon) = &self.daemon {
+            let request_id = daemon.request(Family::Workspace, json!({"SetWorkspaceRoot":{"workspace_id":self.workspace_id,"root_dir":root}}), None);
+            self.pending_cd = Some(DirectoryChange::Workspace { request_id });
+        } else {
+            self.apply_explicit_root(root);
+        }
+    }
+
+    fn apply_explicit_root(&mut self, root: &str) {
+        self.root_probe = None;
+        self.root_refused = None;
+        for (id, term) in &mut self.terminals {
+            if term.shell.session.is_none() && !self.pending_pty.contains(id) {
+                term.shell.cwd = root.to_owned();
+                term.cwd_before_workspace_change = None;
+            } else {
+                // A terminal already at its prompt (or still starting) must report a new
+                // directory before it can pull the workspace away from the explicit choice.
+                term.cwd_before_workspace_change = Some(shell_directory(&term.shell.cwd, root));
             }
+        }
+        let filter_changed = std::mem::take(&mut self.conv_all);
+        let normalized = normalize_root(root);
+        if !same_directory(&normalized, &self.cwd) {
+            self.view_workspace_root(&normalized);
+        } else if filter_changed {
+            self.refresh_threads();
         }
     }
 
@@ -164,7 +217,7 @@ impl App {
     /// git (`activateWorkspace` over `workspaceView`). Nothing is sent to the host.
     fn view_workspace_root(&mut self, root: &str) {
         // `/` is a folder too: trimmed to nothing it left the workspace with no root at all.
-        let root = match root.trim_end_matches('/') { "" if root.starts_with('/') => "/".to_owned(), trimmed => trimmed.to_owned() };
+        let root = normalize_root(root);
         let home = crate::startup::home();
         self.workspace_name = if root == home {
             "~".into()
@@ -185,6 +238,17 @@ impl App {
         }
         self.refresh_threads();
         self.watch_git();
+    }
+}
+
+fn normalize_root(root: &str) -> String {
+    let trimmed = root.trim_end_matches('/');
+    if trimmed.is_empty() && root.starts_with('/') {
+        "/".to_owned()
+    } else if trimmed.len() == 2 && trimmed.len() < root.len() && drive_path(trimmed) {
+        format!("{trimmed}/")
+    } else {
+        trimmed.to_owned()
     }
 }
 
@@ -268,7 +332,7 @@ pub struct State {
     agent_resync_due: bool,
     workspace_closing: Option<u64>,
     activity: Option<crate::agent::Activity>,
-    pending_cd: Option<String>,
+    pending_cd: Option<DirectoryChange>,
     main_terminal: Option<u64>,
     notes: crate::tree::Tree,
     tree: crate::tree::Tree,
@@ -541,6 +605,17 @@ impl App {
         request_id: u64,
         message: &serde_json::Value,
     ) {
+        if self.pending_cd.take_if(|pending| matches!(pending,
+            DirectoryChange::Workspace { request_id: id } if *id == request_id)).is_some() {
+            let workspace = &message["HostWorkspaceUpserted"]["workspace"];
+            if workspace["id"].as_str() == Some(&self.workspace_id)
+                && let Some(root) = workspace["root_dir"].as_str().filter(|root| crate::startup::absolute(root))
+            {
+                self.apply_explicit_root(root);
+            } else {
+                self.directory_error(message["Error"]["message"].as_str().unwrap_or("The host did not confirm the selected directory."));
+            }
+        }
         if let Some(resolved) = message.get("InitialWorkspaceResolved") { self.adopt_workspace(&resolved["workspace"]); }
         // The daemon's record says whether the workspace is shared (`workspace.visibility`).
         for record in ["InitialWorkspaceResolved", "HostWorkspaceUpserted"].iter().filter_map(|key| message.get(*key)).map(|m| &m["workspace"]) {
@@ -557,6 +632,9 @@ impl App {
             && !self.workspace_ready
         {
             self.workspace_ready = true;
+            if let Some(DirectoryChange::Starting { path }) = self.pending_cd.take_if(|pending| matches!(pending, DirectoryChange::Starting { .. })) {
+                self.change_directory(&path);
+            }
             self.agent_connected();
             if std::mem::take(&mut self.agent_resync_due) { self.agent_resync(true); }
             self.terminals_connected();
@@ -1066,5 +1144,61 @@ mod tests {
         app.terminals.get_mut(&home).unwrap().shell.cwd = "/".into();
         assert!(app.follow_main_terminal());
         assert_eq!(app.cwd, "/");
+    }
+
+    #[test]
+    fn directory_choices_move_the_first_terminal_before_the_workspace_without_popups() {
+        let path = "/new";
+        for from_project_menu in [false, true] {
+            let mut app = App::new();
+            app.cwd = "/old".into();
+            let home = app.active_tab().id;
+            let term = app.terminals.get_mut(&home).unwrap();
+            term.shell.session = Some("shell".into());
+            term.shell.cwd = app.cwd.clone();
+            let (daemon, _inbox) = Daemon::start_to(Some(crate::daemon::Target { url: "ws://127.0.0.1:9/session".into(), ..Default::default() }), || {});
+            app.daemon = Some(daemon);
+            app.workspace_ready = true;
+
+            let all_projects = app.project_rows()[0].value.clone();
+            app.activate_project(&all_projects);
+            assert_eq!(app.cwd, "/old");
+            assert!(app.pending_cd.is_none());
+            if from_project_menu {
+                app.activate_project(&format!("project:{path}"));
+            } else {
+                app.change_directory(path);
+            }
+            let Some(DirectoryChange::Shell { request_id, .. }) = &app.pending_cd else { panic!("both folder choices must try the live shell") };
+            let request_id = request_id.clone();
+            app.directory_changed("shell", &request_id, Ok(path));
+            let Some(DirectoryChange::Workspace { request_id, .. }) = app.pending_cd else { panic!("the host should confirm the workspace") };
+            assert_eq!(app.cwd, "/old");
+            app.workspace_reply(request_id, &json!({"HostWorkspaceUpserted":{"workspace":{"id":app.workspace_id,"root_dir":path}}}));
+
+            assert_eq!(app.cwd, path);
+            assert!(!app.conv_all);
+            assert_eq!(app.terminals[&home].shell.cwd, path);
+            assert!(!app.follow_main_terminal());
+            assert!(app.root_probe.is_none(), "the old terminal prompt cannot undo the selection");
+            assert!(app.modal.is_none(), "a successful directory change should not interrupt the user");
+
+            app.terminals.get_mut(&home).unwrap().shell.cwd = "/a-real-shell-cd".into();
+            app.follow_main_terminal();
+            let (id, _) = app.root_probe.clone().expect("a later shell cd is followed");
+            app.root_probe_reply(id, &json!({"Stat":{}}));
+            assert_eq!(app.cwd, "/a-real-shell-cd");
+        }
+    }
+
+    #[test]
+    fn a_refused_directory_change_keeps_the_current_root_without_a_popup() {
+        let mut app = App::new();
+        app.cwd = "/old".into();
+        app.pending_cd = Some(DirectoryChange::Shell { request_id: "cd".into(), session_id: "shell".into() });
+        app.directory_changed("shell", "cd", Err("Shell has unsubmitted input"));
+        assert!(app.pending_cd.is_none());
+        assert_eq!(app.cwd, "/old");
+        assert!(app.modal.is_none(), "directory changes never open a popup, including failures");
     }
 }

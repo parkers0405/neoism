@@ -16,6 +16,7 @@ mod audit_routes;
 pub mod auth_cli;
 mod background_job;
 mod caller;
+mod wake_pair;
 mod command_routes;
 mod computer_use;
 mod config;
@@ -436,6 +437,9 @@ async fn listen_impl(
         "server state opened"
     );
     state.start_session_list_backfill();
+    if actual.ip().is_loopback() {
+        let _ = state.inner.wake_listener.set(actual);
+    }
     let api = app_router::app_with_cors(state.clone(), &options.cors);
     let app = match gui {
         Some(root) => gui::with_gui(api, root.for_listener(actual)),

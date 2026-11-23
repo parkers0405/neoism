@@ -1025,12 +1025,16 @@ async fn authenticate_request(
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
-    let claims = match state
-        .inner
-        .caller_policy
-        .authenticate_request(supplied)
-        .await
-    {
+    let authenticated = if let Some(token) = supplied.filter(|v| v.starts_with(crate::wake_pair::PREFIX)) {
+        let scope = crate::wake_pair::authorize(&state, request.method(), request.uri(), token).await;
+        if scope.is_some() && request.method() == Method::POST
+            && !crate::wake_pair::allow_text_prompt(request.body_mut()).await
+        {
+            return auth_error(StatusCode::BAD_REQUEST, "wake.invalid_prompt", "Local wake accepts only prompt text");
+        }
+        scope.map(Some).ok_or_else(|| "invalid local wake scope".to_owned())
+    } else { state.inner.caller_policy.authenticate_request(supplied).await };
+    let claims = match authenticated {
         Ok(claims) => claims,
         Err(message) => {
             return auth_error(StatusCode::UNAUTHORIZED, "auth.invalid_token", &message)

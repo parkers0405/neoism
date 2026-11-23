@@ -349,7 +349,7 @@ impl App {
         match &self.active_tab().kind { TabKind::Editor { path } => self.buffers.get(path), _ => None }
     }
 
-    fn active_buffer_mut(&mut self) -> Option<&mut Buffer> {
+    pub(crate) fn active_buffer_mut(&mut self) -> Option<&mut Buffer> {
         let TabKind::Editor { path } = self.active_tab().kind.clone() else { return None };
         self.buffers.get_mut(&path)
     }

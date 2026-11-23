@@ -84,6 +84,7 @@ pub struct Activity {
     /// Background tasks running when the line was built (it is rebuilt when this changes).
     pub background: usize,
     pub queued: u32,
+    retry_warning: Option<std::rc::Rc<str>>,
     glyphs: Vec<Glyph>,
     dots: Vec<Dot>,
     time: LiveText,
@@ -122,7 +123,7 @@ impl Activity {
             flames: Pixels::new(), fire_frame: Cell::new(None),
         }).collect();
         let dots = (0..3).map(|_| Dot { offset: Live::new([0.0, 0.0]), color: Live::new(Color::WHITE) }).collect();
-        Activity { session: session.to_owned(), state, background: 0, queued: 0, glyphs, dots, time: LiveText::new(""), step: Default::default(), opacity: Live::new(1.0), changed: Instant::now(), turn }
+        Activity { session: session.to_owned(), state, background: 0, queued: 0, retry_warning: None, glyphs, dots, time: LiveText::new(""), step: Default::default(), opacity: Live::new(1.0), changed: Instant::now(), turn }
     }
 
     /// Advance every glyph, dot and the timer to `now` (seconds on the frame clock).
@@ -226,6 +227,10 @@ impl Activity {
         // Padding, not margin: a virtual row drops its top margin, which slid this line (and its
         // dark glyph shadows) up over the reply's last line.
         let line = row().w_full().center_y().child(letters).child(dots).child(time).children(step);
+        let warning = self.retry_warning.as_deref().map(|warning| {
+            text(warning.to_owned()).key("activity-retry-warning").font(app.ty.sans(13.0, 400.0)).color(rgb(p.red))
+                .w_full().h(LINE_H * s).pl(3.3 * s).truncate()
+        });
         let queued = (self.queued > 0).then(|| {
             let label = if self.queued == 1 { "Queued".into() } else { format!("Queued x{}", self.queued) };
             let branch = if self.background > 0 { "\u{251c}\u{2500}" } else { "\u{2570}\u{2500}" };
@@ -238,7 +243,7 @@ impl Activity {
             text(format!("\u{2570}\u{2500} {} background {noun} running", self.background)).font(app.ty.sized(13.0)).color(rgb(p.muted))
                 .h(LINE_H * s).pl(3.3 * s)
         });
-        rune::col().key("activity").w_full().pt(app.activity_top_padding(&self.session)).live_opacity(&self.opacity).child(line).children(queued).children(background)
+        rune::col().key("activity").w_full().pt(app.activity_top_padding(&self.session)).live_opacity(&self.opacity).child(line).children(warning).children(queued).children(background)
     }
 }
 
@@ -254,6 +259,7 @@ impl App {
             .unwrap_or_else(|| self.threads.iter().find(|t| t.session_id == root).is_some_and(|t| self.activity_of(t) == "background"));
         let background = (catalog_background || self.background_count(session_id) > 0).then_some(State::Background);
         let Some(session) = self.sessions.get(session_id).filter(|_| self.session_live(session_id)) else { return background };
+        if session.retry_warning.is_some() { return Some(State::Generating); }
         let from = session.live_from.unwrap_or(0);
         let running = |s: &str| matches!(s, "" | "running" | "pending");
         let live = &session.messages[from.min(session.messages.len())..];
@@ -295,8 +301,7 @@ impl App {
         self.background_jobs.get(root).copied().unwrap_or(0)
     }
 
-    /// The transcript is scrolled to its end and overflows its view (`activity_geometry`'s
-    /// `following`): the activity line then holds the bottom row instead of riding the content.
+    /// The activity line pins only while following an overflowing transcript.
     pub fn activity_follows_end(&self, session_id: &str) -> bool {
         let Some(session) = self.sessions.get(session_id).filter(|_| self.activity_state(session_id).is_some()) else { return false };
         let (offset, max) = session.scroll.get();
@@ -313,7 +318,7 @@ impl App {
 
     /// The row the activity line takes (its top margin and line), including an optimistic send's reservation.
     pub fn activity_row_height(&self) -> f32 {
-        let lines = self.activity.as_ref().map_or(1, |a| 1 + usize::from(a.queued > 0) + usize::from(a.background > 0));
+        let lines = self.activity.as_ref().map_or(1, |a| 1 + usize::from(a.retry_warning.is_some()) + usize::from(a.queued > 0) + usize::from(a.background > 0));
         let session = self.activity.as_ref().map(|a| a.session.as_str()).or_else(|| match &self.active_tab().kind {
             crate::tabs::TabKind::Agent { session } => session.as_deref(),
             _ => None,
@@ -329,6 +334,7 @@ impl App {
         let background = session.as_deref().map_or(0, |id| self.background_count(id));
         let queued = session.as_deref().and_then(|id| self.sessions.get(id)).map_or(0, |s| s.queued_prompts);
         let id = session.as_deref().unwrap_or_default();
+        let warning = self.sessions.get(id).filter(|_| self.session_live(id)).and_then(|s| s.retry_warning.as_ref());
         // Keep the background clock by family, not in the disposable on-screen activity line.
         // A server snapshot replaces this fallback with the oldest running job's real start.
         let start = if state == Some(State::Background) {
@@ -343,7 +349,9 @@ impl App {
             (None, Some(_)) => { self.activity = None; true }
             (Some(state), Some(current)) if current.session == id && current.state == state && current.background == background && current.queued == queued => {
                 current.turn = turn;
-                false
+                let changed = current.retry_warning.as_ref() != warning;
+                if changed { current.retry_warning = warning.cloned(); }
+                changed
             }
             (Some(state), current) => {
                 // The same word keeps its letters where they are; only a new one scrambles in.
@@ -351,6 +359,7 @@ impl App {
                 let mut activity = Activity::new(id, state, turn);
                 activity.background = background;
                 activity.queued = queued;
+                activity.retry_warning = warning.cloned();
                 if let Some(changed) = changed { activity.changed = changed; }
                 self.activity = Some(activity);
                 true
@@ -389,6 +398,49 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_provider_errors_warn_until_recovery_or_idle() {
+        use neoism_protocol::agent::AgentServerMessage as M;
+        use serde_json::json;
+        let mut app = App::new();
+        app.load_fixture("retry", "Retry", "[]");
+        let retry = |attempt| M::SessionEvent {
+            session_id: "retry".into(), kind: "session.status".into(),
+            properties: json!({"status": {"type": "retry", "attempt": attempt, "message": "Provider is overloaded"}}),
+        };
+        let warning = |app: &App| app.activity.as_ref().and_then(|a| a.retry_warning.clone());
+        app.apply_agent(M::CatalogActivity { session_id: "retry".into(), activity: "running".into() });
+        app.apply_agent(retry(2));
+        app.tick_activity();
+        let normal_height = app.activity_row_height();
+        assert!(warning(&app).is_none());
+
+        app.apply_agent(retry(3));
+        app.tick_activity();
+        assert_eq!(warning(&app).as_deref(), Some("Retrying (3): Provider is overloaded"));
+        assert_eq!(app.activity_state("retry"), Some(State::Generating));
+        assert!(app.activity_row_height() > normal_height);
+
+        // The server publishes busy/queue metadata when backoff ends, before it knows the outcome.
+        app.apply_agent(M::QueueUpdate { session_id: "retry".into(), count: 0, preview: None, started_at: None });
+        app.tick_activity();
+        assert!(warning(&app).is_some());
+        app.apply_agent(M::SessionEvent { session_id: "retry".into(), kind: "message.part.updated".into(),
+            properties: json!({"part": {"type": "step-finish"}}) });
+        app.tick_activity();
+        assert!(warning(&app).is_none());
+        assert_eq!(app.activity_row_height(), normal_height);
+
+        app.apply_agent(retry(3));
+        app.tick_activity();
+        assert!(warning(&app).is_some());
+        app.apply_agent(M::SessionIdle { session_id: "retry".into() });
+        app.apply_agent(retry(4)); // A late retry cannot resurrect a cancelled turn.
+        app.apply_agent(M::CatalogActivity { session_id: "retry".into(), activity: "running".into() });
+        app.tick_activity();
+        assert!(warning(&app).is_none());
+    }
 
     #[test]
     fn attaching_to_a_catalogued_run_restores_activity_before_history_arrives() {

@@ -185,6 +185,26 @@ pub(super) async fn bash_tool(
     env.extend(context.env.clone());
     env.insert("TERM".into(), "xterm-256color".into());
     env.insert("NEOISM_TERMINAL".into(), "1".into());
+    // Dispatch authority wins over login-shell caches, inherited process env,
+    // project config and concurrent conversations. Never modify global env.
+    const HANDOFF: &str = "NEOISM_WAKE_HANDOFF_V1";
+    env.insert(HANDOFF.into(), "unavailable".into());
+    // This is only a cost filter, not a permission check. Same-user native
+    // shell access is trusted. A file guard keeps secrets out of argv, env,
+    // tool results and process metadata and unlinks the file on return/cancel.
+    let _handoff = if command.contains(" wake pair ") {
+        // The native process runner otherwise inherits these. A pairing CLI
+        // only needs the session delegation, never server signing authority.
+        for name in ["NEOISM_AGENT_TOKEN", "NEOISM_DAEMON_TOKEN", "NEOISM_AGENT_AUTH_CONFIG", "NEOISM_AGENT_SIGNING_KEY", "NEOISM_WAKE_TOKEN"] {
+            env.insert(name.into(), String::new());
+        }
+        if let (Some(state), Some(session)) = (context.state(), context.session_scope.as_ref()) {
+            crate::wake_pair::handoff(state, session)?.map(|file| {
+                env.insert(HANDOFF.into(), file.path().to_string_lossy().into_owned());
+                file
+            })
+        } else { None }
+    } else { None };
     let spec = crate::local_process::ProcessSpec {
         executable: shell.clone(),
         args: runtime.command_args(&command, false),

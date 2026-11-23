@@ -1,4 +1,4 @@
-//! Serialized live cwd control for daemon-spawned, source-integrated Linux shells.
+//! Serialized live cwd control for daemon-spawned, source-integrated Linux/macOS shells.
 //! Caller authentication/capabilities are checked by the socket just like PTY writes.
 //! Lock order is control -> PTY for BOTH output observations and input writes.
 use neoism_protocol::pty::ServerMessage;
@@ -66,9 +66,9 @@ impl DirectoryControl {
     pub(super) fn completion_revision(&self) -> u64 { self.revision }
 
     pub(super) fn completion_ready(&self, pty: &PtySession) -> bool {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let foreground = self.foreground_shell(pty);
-        #[cfg(all(unix, not(target_os = "linux")))]
+        #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
         let foreground = unsafe { libc::tcgetpgrp(*pty.main_fd()) == pty.shell_pid() as libc::pid_t };
         #[cfg(not(unix))]
         let foreground = { let _ = pty; false };
@@ -227,8 +227,8 @@ impl DirectoryControl {
             }
             return fail("Directory request cancelled; no queued shell input was sent");
         }
-        if self.token.is_none() || !cfg!(target_os = "linux") {
-            return fail("Live directory control requires a daemon-managed integrated bash/zsh shell on Linux");
+        if self.token.is_none() || !cfg!(any(target_os = "linux", target_os = "macos")) {
+            return fail("Live directory control requires a daemon-managed integrated bash/zsh shell on Linux or macOS");
         }
         if !directory.starts_with('/') || directory.chars().any(char::is_control) {
             return fail(
@@ -309,11 +309,16 @@ impl DirectoryControl {
         if let Some(active) = self.active.take() {
             #[cfg(target_os = "linux")]
             let cwd = std::fs::read_link(format!("/proc/{}/cwd", pty.shell_pid()));
-            #[cfg(not(target_os = "linux"))]
+            // The helper uses proc_pidinfo(PROC_PIDVNODEPATHINFO) on macOS.
+            // Only call after verifying foreground identity, and recheck below:
+            // its fallback to shell_pid must not grant success on a failed pgid query.
+            #[cfg(target_os = "macos")]
+            let cwd = neoism_terminal_pty::foreground_process_path(*pty.main_fd(), pty.shell_pid());
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             let cwd: std::io::Result<PathBuf> =
                 Err(std::io::ErrorKind::Unsupported.into());
             match cwd {
-                Ok(cwd) if cwd == active.target => {
+                Ok(cwd) if cwd == active.target && self.foreground_shell(pty) => {
                     let _ = active.tx.try_send(ServerMessage::TerminalDirectoryChanged {
                         session_id: active.session_id, request_id: active.request_id,
                         directory: cwd.to_string_lossy().into_owned(),
@@ -347,7 +352,7 @@ impl DirectoryControl {
     }
 
     fn foreground_shell(&self, pty: &PtySession) -> bool {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let pid = pty.shell_pid() as libc::pid_t;
             let fd = *pty.main_fd();
@@ -358,10 +363,13 @@ impl DirectoryControl {
             {
                 return false;
             }
-            return std::fs::read_link(format!("/proc/{pid}/exe")).ok().as_ref()
-                == self.executable.as_ref();
+            #[cfg(target_os = "linux")]
+            let executable = std::fs::read_link(format!("/proc/{pid}/exe")).ok();
+            #[cfg(target_os = "macos")]
+            let executable = macos_executable(pid);
+            return self.executable.is_some() && executable.as_ref() == self.executable.as_ref();
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             let _ = pty;
             false
@@ -369,9 +377,38 @@ impl DirectoryControl {
     }
 }
 
+/// Query the mapped executable, never argv or the truncated process name.
+/// Match the canonical executable captured before spawning the integrated shell.
+#[cfg(target_os = "macos")]
+fn macos_executable(pid: libc::pid_t) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    #[link(name = "proc")]
+    unsafe extern "C" {
+        fn proc_pidpath(pid: libc::c_int, buffer: *mut libc::c_void, size: u32) -> libc::c_int;
+    }
+    let mut bytes = [0u8; 4096]; // PROC_PIDPATHINFO_MAXSIZE
+    let length = unsafe { proc_pidpath(pid, bytes.as_mut_ptr().cast(), bytes.len() as u32) };
+    if length <= 0 || length as usize >= bytes.len() {
+        return None;
+    }
+    let end = bytes.iter().position(|b| *b == 0)?;
+    if end == 0 {
+        return None;
+    }
+    std::fs::canonicalize(std::ffi::OsStr::from_bytes(&bytes[..end])).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_identity_is_os_executable_and_invalid_pid_fails_closed() {
+        assert_eq!(macos_executable(std::process::id() as libc::pid_t),
+            Some(std::env::current_exe().unwrap().canonicalize().unwrap()));
+        assert_eq!(macos_executable(-1), None);
+    }
+
     fn mark(kind: &str) -> Vec<u8> {
         format!("\x1b]777;neoism-control;nonce;{kind}\x07").into_bytes()
     }

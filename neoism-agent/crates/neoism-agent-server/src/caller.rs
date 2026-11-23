@@ -79,6 +79,13 @@ fn canonical_daemon_token_from_disk() -> Option<String> {
 }
 
 impl CallerPolicy {
+    /// Never discover a signing key on disk or delegate hosted/worker authority.
+    pub(crate) fn local_wake_key(&self) -> Option<&[u8]> {
+        if self.strict_hosted || self.worker.is_some() || self.tenant_resolver.is_some()
+            || !matches!(self.hosted_config, Ok(None)) { return None; }
+        self.local_token.as_deref().map(str::as_bytes).or(self.daemon_key.as_deref())
+            .filter(|k| k.len() >= 16)
+    }
     pub(crate) fn from_env() -> Self {
         Self::from_env_with_resolver(None)
     }

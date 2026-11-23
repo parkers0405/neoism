@@ -615,19 +615,15 @@ impl App {
 
     /// The Backgrounds gallery: pick a picture, the pack's, or none.
     pub fn choose_background(&mut self, choice: crate::palette::backgrounds::Choice) {
-        self.apply_background(&choice);
+        let image = self.apply_background(&choice);
         if let Some(settings) = &mut self.settings {
-            let image = match &choice {
-                crate::palette::backgrounds::Choice::Image(path) => json!({"path": path, "opacity": self.wallpaper.opacity, "blur": self.wallpaper.blur, "fit": if self.wallpaper.cover { "cover" } else { "contain" }}),
-                _ => Value::Null,
-            };
             settings.set_local("ui.window.background-image", image);
             settings.set_local("ui.window.background-image-disabled", json!(choice == crate::palette::backgrounds::Choice::None));
             settings.background_choice = Some(choice);
         }
     }
 
-    /// Change one field of the configured picture (`opacity`, `blur`, `fit`). The window shows it at
+    /// Change one field of the configured picture. The window shows it at
     /// once; `commit` writes it (a slider commits when it is let go).
     pub fn set_background_field(&mut self, field: &str, value: Value, commit: bool) {
         let Some(settings) = &mut self.settings else { return };

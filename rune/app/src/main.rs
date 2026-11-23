@@ -324,6 +324,13 @@ fn main() {
         on_key: Some(on_key),
         scenes: &[
             ("welcome", |_| {}),
+            ("timeline-long-user-token", |s| {
+                let token = "0123456789abcdef".repeat(8);
+                s.load_fixture("long-user-token", "Long user token", &serde_json::json!([
+                    {"id": "short", "role": "User", "kind": "User", "text": "Short message"},
+                    {"id": "long", "role": "User", "kind": "User", "text": format!("> {token}\n\nCheck this identifier:\n{token}\nThanks!")},
+                ]).to_string());
+            }),
             ("timeline-inline-image", |s| {
                 let source = concat!("An inline local preview:\n\n![NEOISM preview](", env!("CARGO_MANIFEST_DIR"), "/assets/splash/neoism-wordmark.png)");
                 for image in s.markdown_images(source).values() { let _ = image.wait(); }
@@ -553,10 +560,14 @@ fn main() {
             ("settings-themes", |s| { s.open_settings(); if let Some(settings) = &mut s.settings { settings.category = settings::Category::Themes; settings.loading = false; } }),
             ("settings-backgrounds", |s| {
                 s.open_settings();
+                let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../neoism-frontend/shared/assets/illuminated/public-domain/reusable-art/A.jpeg");
+                let config = serde_json::json!({"ui": {"window": {"background-image": {"path": path, "opacity": 0.6, "pixel-size": 12, "dither": 65}}}});
+                s.reload_wallpaper_from(Some(config.clone()));
                 if let Some(settings) = &mut s.settings {
                     settings.category = settings::Category::Backgrounds;
                     settings.loading = false;
-                    settings.values = serde_json::json!({"ui": {"window": {"background-image": {"path": "/tmp/none.png", "opacity": 0.6}}}});
+                    settings.values = config;
+                    settings.backgrounds = palette::backgrounds::catalog(&crate::config::dir(), Some(path));
                 }
             }),
             ("keybinds", |s| { s.open_settings(); if let Some(settings) = &mut s.settings { settings.category = settings::Category::Keybinds; settings.loading = false; } }),
@@ -892,6 +903,13 @@ fn main() {
             ("tree-git", tree::git::fixture),
             // A live turn mid-stream: the animated "Crafting . . ." status line.
             ("streaming", replay::start),
+            ("streaming-retry", |s| {
+                use neoism_protocol::agent::AgentServerMessage as M;
+                s.load_fixture("fixture-retry", "Provider retry", include_str!("../fixtures/code-timeline.json"));
+                s.apply_agent(M::CatalogActivity { session_id: "fixture-retry".into(), activity: "running".into() });
+                s.apply_agent(M::SessionEvent { session_id: "fixture-retry".into(), kind: "session.status".into(),
+                    properties: serde_json::json!({"status": {"type": "retry", "attempt": 3, "message": "Provider is overloaded"}}) });
+            }),
             ("streaming-fire-themed", |s| {
                 s.pal = ui::theme::palette("catppuccin_mocha");
                 s.wordmark.fire_enabled = true;

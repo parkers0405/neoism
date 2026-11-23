@@ -30,6 +30,7 @@ pub struct AppState {
 }
 
 pub(crate) struct InnerState {
+    pub(crate) wake_listener: std::sync::OnceLock<std::net::SocketAddr>,
     pub(crate) services: AgentServices,
     pub(crate) store: SessionStore,
     pub(crate) artifact_root: PathBuf,
@@ -1130,6 +1131,7 @@ impl AppState {
                 artifact_root,
                 provider_service,
                 caller_policy,
+                wake_listener: Default::default(),
                 management_policy,
                 management_lock: Mutex::new(()),
                 external_catalog_import_lock: Mutex::new(()),

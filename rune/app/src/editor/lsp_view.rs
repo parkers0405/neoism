@@ -230,43 +230,41 @@ fn place(app: &App, cell: [f32; 4], w: f32, h: f32) -> (f32, f32) {
     )
 }
 
-/// The hover card or the completion menu for the focused editor, in window coordinates.
-pub fn overlay(app: &App) -> El {
+/// Use the same visibility decision for painting and for cursor compositing.
+fn popup(app: &App) -> Option<(&super::Buffer, [f32; 4])> {
     if app.focus != crate::app::Focus::Content
         || app.settings.is_some()
         || app.picker.is_some()
         || app.finder.is_some()
         || app.modal.is_some()
     {
-        return el();
+        return None;
     }
-    let (Some(buffer), Some(cell)) = (
-        app.active_buffer(),
-        app.active_buffer()
-            .and_then(|b| super::view::cursor_rect(app, b)),
-    ) else {
-        return el();
-    };
+    let buffer = app.active_buffer()?;
+    if buffer.lsp.completion.is_none() && !buffer.lsp.hover.as_ref().is_some_and(|h| h.text.is_some()) {
+        return None;
+    }
+    let cell = super::view::cursor_rect(app, buffer)?;
     let cell = if buffer.lsp.completion.is_none() { buffer.lsp.hover.as_ref().and_then(|h| h.anchor).unwrap_or(cell) } else { cell };
     if let Some(view) = buffer.view_rect {
         if cell[1] + cell[3] <= view[1] || cell[1] >= view[1] + view[3] {
-            return el();
+            return None;
         }
     }
+    Some((buffer, cell))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn popup_visible(app: &App) -> bool { popup(app).is_some() }
+
+/// The hover card or the completion menu for the focused editor, in window coordinates.
+pub fn overlay(app: &App) -> El {
+    let Some((buffer, cell)) = popup(app) else { return el() };
     if let Some(completion) = &buffer.lsp.completion {
         return completion_menu(app, buffer, completion, cell);
     }
     if let Some(text) = buffer.lsp.hover.as_ref().and_then(|h| h.text.as_deref()) {
-        return hover_card(
-            app,
-            text,
-            buffer
-                .lsp
-                .hover
-                .as_ref()
-                .and_then(|h| h.anchor)
-                .unwrap_or(cell),
-        );
+        return hover_card(app, text, cell);
     }
     el()
 }

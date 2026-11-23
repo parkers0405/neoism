@@ -93,7 +93,10 @@ impl App {
 
     pub(crate) fn close_terminal(&mut self, tab_id: u64) {
         let Some(term) = self.terminals.remove(&tab_id) else { return };
-        if let Some(session_id) = term.shell.session { self.send_pty(PtyClient::ClosePty { session_id }); }
+        if let Some(session_id) = term.shell.session {
+            self.directory_terminal_closed(&session_id);
+            self.send_pty(PtyClient::ClosePty { session_id });
+        }
     }
 
     /// After a (re)connect: reattach each shell from the next byte it needs (the daemon drops a
@@ -427,6 +430,7 @@ impl App {
                 if let (Some(value), Some(index)) = (preview, index) { self.set_draft(index, value); }
             }
             PtyServer::PtyClosed { session_id, exit_code } => {
+                self.directory_terminal_closed(&session_id);
                 let tab = self.terminals.iter().find(|(_, t)| t.shell.session.as_deref() == Some(&session_id)).map(|(id, _)| *id);
                 if let Some(tab_id) = tab {
                     if let Some(term) = self.terminals.get_mut(&tab_id) { term.shell.session = None; }
@@ -438,8 +442,8 @@ impl App {
                     }
                 }
             }
-            PtyServer::TerminalDirectoryChanged { request_id, directory, .. } => self.directory_changed(&request_id, Some(&directory)),
-            PtyServer::TerminalDirectoryChangeFailed { request_id, .. } => self.directory_changed(&request_id, None),
+            PtyServer::TerminalDirectoryChanged { session_id, request_id, directory } => self.directory_changed(&session_id, &request_id, Ok(&directory)),
+            PtyServer::TerminalDirectoryChangeFailed { session_id, request_id, message } => self.directory_changed(&session_id, &request_id, Err(&message)),
             _ => {}
         }
     }

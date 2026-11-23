@@ -345,20 +345,23 @@ fn gallery(app: &App, s: f32, gap: f32) -> (usize, f32) {
     (columns as usize, ((width - gap * (columns - 1.0)) / columns).floor())
 }
 
-/// The Backgrounds page: the window as it will look, the picture's opacity and fit, then
+/// The Backgrounds page: the window as it will look, the picture's adjustments, then
 /// every installed picture.
 fn backgrounds(app: &App, settings: &Settings, s: f32) -> El {
-    use crate::palette::backgrounds::Choice;
+    use crate::palette::backgrounds::{Choice, Effects, MAX_DITHER, MAX_PIXEL_SIZE};
     let p = app.pal;
     let current = settings.background();
     let image = &settings.values["ui"]["window"]["background-image"];
     let opacity = image["opacity"].as_f64().map_or(if app.wallpaper.active() { app.wallpaper.opacity } else { 1.0 }, |o| o as f32).clamp(0.0, 1.0);
     let cover = image["fit"].as_str() != Some("contain");
-    let blur = image["blur"].as_f64().map_or(app.wallpaper.blur, |b| b as f32).clamp(0.0, MAX_BLUR);
+    let effects = Effects::from_image(image);
+    let blur = f32::from(effects.blur);
+    let pixel_size = f32::from(effects.pixel_size);
+    let dither = f32::from(effects.dither);
     let has_image = matches!(current, Choice::Image(_));
     // The preview shows the hovered picture, else the chosen one.
     let shown = settings.background_hover.and_then(|i| settings.backgrounds.get(i)).map(|b| b.choice.clone()).unwrap_or_else(|| current.clone());
-    let picture = match &shown { Choice::Image(path) => app.background_image(path, blur).or_else(|| app.background_preview(path)), _ => None };
+    let picture = match &shown { Choice::Image(path) => app.background_image(path, effects).or_else(|| app.background_preview(path)), _ => None };
     let preview = mock_window(app, p, picture.as_ref().map(|image| (image, opacity, cover)), s);
 
     let words = |title: &'static str, note: &'static str| col().grow(1.0).shrink().min_w(0.0).gap(3.0 * s)
@@ -381,8 +384,13 @@ fn backgrounds(app: &App, settings: &Settings, s: f32) -> El {
             }));
     let opacity_slider = slider("background-opacity", opacity, format!("{}%", (opacity * 100.0).round() as i32), "opacity",
         |at| ((at.max(0.05) * 100.0).round() / 100.0) as f64);
-    let blur_slider = slider("background-blur", blur / MAX_BLUR, if blur < 1.0 { "Off".into() } else { format!("{} px", blur.round() as i32) }, "blur",
+    let readout = |value: u8, unit: &str| if value == 0 { "Off".into() } else { format!("{value}{unit}") };
+    let blur_slider = slider("background-blur", (blur / MAX_BLUR).min(1.0), readout(effects.blur, " px"), "blur",
         |at| (at * MAX_BLUR).round() as f64);
+    let pixel_slider = slider("background-pixel-size", pixel_size / f32::from(MAX_PIXEL_SIZE), readout(effects.pixel_size, " px"), "pixel-size",
+        |at| ((at * f32::from(MAX_PIXEL_SIZE) / 2.0).round() * 2.0) as f64);
+    let dither_slider = slider("background-dither", dither / f32::from(MAX_DITHER), readout(effects.dither, "%"), "dither",
+        |at| ((at * f32::from(MAX_DITHER) / 5.0).round() * 5.0) as f64);
     let segment = |label: &'static str, on: bool, value: &'static str| row().h(PILL_H * s - 6.0 * s).px(14.0 * s).radius(6.0 * s).center()
         .fill(if on { rgb(p.fg).alpha(0.14) } else { Color::TRANSPARENT })
         .child(text(label).font(app.ty.sans(12.0, if on { 600.0 } else { 400.0 })).color(rgb(if on { p.fg } else { p.dim })))
@@ -392,6 +400,8 @@ fn backgrounds(app: &App, settings: &Settings, s: f32) -> El {
     let options = card(app, vec![
         line("Opacity", "How strongly the picture shows behind the window.", opacity_slider),
         line("Blur", "Soften the picture so text over it reads more easily.", blur_slider),
+        line("Pixelation", "Turn fine detail into chunky square pixels.", pixel_slider),
+        line("Dither", "Add a retro patterned texture with fewer colors.", dither_slider),
         line("Fit", "Cover fills the window and crops; Contain shows the whole picture.", fit),
     ], s);
 

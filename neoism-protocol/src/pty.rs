@@ -35,6 +35,9 @@ pub enum ClientMessage {
     /// generic Ack is not a cwd confirmation. An empty directory cancels the
     /// exact request_id on the requesting connection; an already-dispatched cd
     /// still reports its real cwd result before input may resume.
+    /// Daemon-managed integrated bash/zsh shells support live changes on Linux
+    /// and macOS. The existing shell/session is retained; busy requests wait for
+    /// a verified prompt, and success requires an OS-observed matching cwd.
     ChangeTerminalDirectory {
         session_id: String,
         directory: String,

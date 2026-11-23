@@ -165,8 +165,8 @@ pub struct App {
     pub replay: Option<crate::replay::Replay>,
     /// The open universal modal (About, confirmations).
     pub modal: Option<crate::ui::modal::Modal>,
-    /// A `cd` waiting for the shell to confirm it (request id).
-    pub pending_cd: Option<String>,
+    /// An explicit directory change waiting for the shell or workspace host.
+    pub(crate) pending_cd: Option<crate::workspace::DirectoryChange>,
     /// The terminal tab whose directory the workspace follows (`mainTerminals`); `None` falls back
     /// to the first eligible terminal.
     pub main_terminal: Option<u64>,
@@ -197,10 +197,9 @@ pub struct App {
     pub wallpaper: crate::ui::wallpaper::Wallpaper,
     /// The window size in points, from the root layout.
     pub window: [f32; 2],
-    /// Background previews by image path (`None` while decoding).
-    pub background_previews: std::cell::RefCell<HashMap<std::path::PathBuf, Option<rune::Image>>>,
+    pub background_previews: std::cell::RefCell<crate::palette::backgrounds::Cache>,
     /// Pixels decoded off-thread, waiting for the image cache.
-    pub decoded_previews: std::sync::Arc<std::sync::Mutex<Vec<(std::path::PathBuf, (u32, u32, Vec<u8>))>>>,
+    pub decoded_previews: std::sync::Arc<std::sync::Mutex<Vec<crate::palette::backgrounds::Decoded>>>,
     /// The file tree sidebar.
     pub tree: crate::tree::Tree,
     /// The editor cursor moved: scroll it into view after its next layout.
@@ -562,7 +561,7 @@ impl App {
             // The lid opened on a connection that survived it: nothing was lost on the way
             // here, but the agent behind the daemon may have moved on meanwhile.
             Inbound::Woke => self.agent_resync(false),
-            Inbound::Disconnected(reason) => { self.goal_celebration.cancel(); self.connection.disconnected(reason, std::time::Instant::now()); self.tunnel_lost(); self.git_disconnected(); self.database_disconnected(); self.editor_save_error(None, "Connection lost; buffer kept open. Verify the file before retrying."); },
+            Inbound::Disconnected(reason) => { self.goal_celebration.cancel(); self.connection.disconnected(reason, std::time::Instant::now()); self.tunnel_lost(); self.git_disconnected(); self.database_disconnected(); self.directory_disconnected(); self.editor_save_error(None, "Connection lost; buffer kept open. Verify the file before retrying."); },
             Inbound::Agent(message) => { self.apply_agent(*message); }
             Inbound::Crdt { request_id, message } => { self.apply_crdt(request_id, *message); }
             Inbound::Editor(message) => self.apply_editor_message(*message),

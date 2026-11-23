@@ -45,6 +45,10 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     // the server acknowledges the send.
     let activity = (app.activity.is_some() && app.activity_state(session_id).is_some())
         || session.is_some_and(|s| s.activity_reveal.is_some());
+    // Only replace the inline row once we have enough layout information to draw the overlay.
+    let activity_pin = composer_top(app, tab_id).zip(app.rects.get(&format!("agent-area:{tab_id}")))
+        .filter(|_| app.activity_pinned)
+        .map(|(card_top, area)| (card_top - area[1] - app.activity_row_height() - 6.0).max(0.0));
     // A sub-agent's conversation is read, not written to: no input bar under it.
     let child = app.families.is_child(session_id);
     let rows_key: RowsKey = (session.map_or(0, |s| s.structure), messages.len(), live_from, activity, app.focused_view);
@@ -67,7 +71,7 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
         .growth(rune::GrowthSpec::default())
         .virtual_rows(items.len(), 120.0,
             move |a: &App, i| row_key(a, &key_id, key_items[i]).into(),
-            move |a: &App, i| build_row(a, &build_id, build_items[i], tab_id))
+            move |a: &App, i| build_row(a, &build_id, build_items[i], tab_id, activity_pin.is_some()))
         // The keys only change with the row list: a commit that leaves it alone (a reply's
         // text growing, the caret moving) doesn't ask every row for its key again.
         .virtual_rows_version(rows_key)
@@ -129,11 +133,9 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     };
     // Following the end, the activity line holds the bottom row just above the composer while
     // the streamed text scrolls up under it (`activity_geometry`).
-    let pinned = match (app.activity.as_ref().filter(|_| app.activity_pinned), composer_top(app, tab_id), app.rects.get(&format!("agent-area:{tab_id}"))) {
-        (Some(activity), Some(card_top), Some(area)) => {
-            let top = card_top - area[1] - app.activity_row_height() - 6.0;
-            col().key("activity-pinned").instant_changes().pin(Some(pad), Some(top.max(0.0)), Some(pad), None).child(activity.view(app))
-        }
+    let pinned = match (app.activity.as_ref(), activity_pin) {
+        (Some(activity), Some(top)) => col().key("activity-pinned").instant_changes()
+            .pin(Some(pad), Some(top), Some(pad), None).child(activity.view(app)),
         _ => el(),
     };
     // Away from the end, one press glides back to the newest message (the terminal's
@@ -247,12 +249,12 @@ fn row_key(app: &App, session_id: &str, item: RowItem) -> String {
     }
 }
 
-fn build_row(app: &App, session_id: &str, item: RowItem, tab_id: u64) -> El {
+fn build_row(app: &App, session_id: &str, item: RowItem, tab_id: u64, activity_pinned: bool) -> El {
     let Some(session) = app.sessions.get(session_id) else { return el() };
     let messages = session.messages.as_slice();
     match item {
         // Pinned above the composer, the line keeps its room here so text never runs under it.
-        RowItem::Activity if app.activity_pinned || app.activity.is_none() =>
+        RowItem::Activity if activity_pinned || app.activity.is_none() =>
             el().key("activity").w_full().h(app.activity_row_height()).instant_changes(),
         RowItem::Activity => app.activity.as_ref().map_or_else(el, |activity| activity.view(app).instant_changes()),
         RowItem::Work(start, end) => {
@@ -1023,6 +1025,46 @@ mod send_tests {
 #[cfg(test)]
 mod reasoning_tests {
     use super::*;
+
+    #[test]
+    fn folded_activity_follows_streaming_content_without_jumping_on_hidden_calls() {
+        use neoism_protocol::agent::AgentServerMessage as M;
+        let mut app = App::new();
+        app.focused_view = true;
+        app.load_fixture("work", "Work", r#"[{"id":"ask","kind":"User","role":"User","text":"Check it"}]"#);
+        app.set_streaming("work", true);
+        app.tick_activity();
+        let mut rt = rune::Runtime::new(app, |a: &App, cx: &mut Cx<App>| pane(a, Some("work"), cx), (1000.0, 674.0), rune::Env::new(true, 1.0));
+        let frame = |rt: &mut rune::Runtime<App>| {
+            rt.update(|a, tx| { if !a.tick_activity().1 { tx.live_only(); } });
+            rt.frame(1.0 / 120.0);
+        };
+        for _ in 0..120 { frame(&mut rt); }
+        let start = rt.presented("activity").expect("short conversation starts with inline activity").0[1];
+        let update = |message| M::MessageUpdated { session_id: "work".into(), parent_message_id: None,
+            message: serde_json::from_value(message).unwrap() };
+        let folded_call = |id| update(serde_json::json!({"id":id,"kind":"Tool","role":"Assistant","tool":"bash","status":"running"}));
+        let thought = |id, lines| update(serde_json::json!({"id":id,"kind":"Reasoning","role":"Assistant","title":"Thinking",
+            "text":"A thought with enough words to take several lines where it is displayed. ".repeat(lines)}));
+        for (id, lines, call, activity) in [("short", 1, "first", "activity"), ("long", 12, "next", "activity-pinned")] {
+            rt.update(|a, _| { a.apply_agent(thought(id, lines)); a.tick_activity(); });
+            for _ in 0..120 { frame(&mut rt); }
+            let thought_key = format!("msg:{id}");
+            let y = rt.presented(activity).expect("activity follows the visible content").0[1];
+            if lines == 1 {
+                assert!(rt.presented("activity-pinned").is_none(), "short thought stays inline");
+                let rect = rt.presented(&thought_key).unwrap().0;
+                assert!(y > start && (y - (rect[1] + rect[3])).abs() < 1.0, "activity sits just below the thought");
+            }
+            rt.update(|a, _| { a.apply_agent(folded_call(call)); a.tick_activity(); });
+            for _ in 0..120 {
+                frame(&mut rt);
+                let current = rt.presented(activity).expect("no inline/pinned handoff during hidden tool use").0[1];
+                assert!((current - y).abs() < 0.5, "activity moved: {y} -> {current}");
+            }
+            assert!(rt.presented(&thought_key).is_some(), "hidden calls don't remove the thought");
+        }
+    }
 
     #[test]
     fn thinking_label_stays_above_the_reasoning_heading() {

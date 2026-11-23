@@ -352,16 +352,15 @@ impl App {
         }
         // The project filter and the add-project card draw their own caret and highlight.
         if self.project_menu.is_some() || self.project_add.is_some() { return None; }
-        let row = if let Some(picker) = &self.picker { self.palette_row_rect(picker).map(|r| (r, 10.0, 13.0)) }
-            else { None };
-        if let Some((r, pad_x, font)) = row {
+        if let Some(picker) = &self.picker {
+            let r = self.palette_row_rect(picker)?;
             let s = self.ty.scale();
-            let (font, row_h) = (font * s, r[3]);
+            let (font, row_h) = (13.0 * s, r[3]);
             let w = (font * 0.6).max(2.0);
             let h = (row_h - 5.0 * s).max(font).min(row_h);
             // Where the row is drawn: a window that just moved still slides it back into place.
-            let slide = if self.finder.is_some() || self.picker.is_some() { self.list_residual.value() } else { 0.0 };
-            return Some([(r[0] + pad_x * s - w - 2.0 * s).max(r[0]), r[1] + slide + (row_h - h) / 2.0, w, h]);
+            let slide = self.list_residual.value();
+            return Some([(r[0] + 8.0 * s - w).max(r[0]), r[1] + slide + (row_h - h) / 2.0, w, h]);
         }
         match self.focus {
             // The focused tab's rect by its id; the `+` slot past the last tab by its pane.

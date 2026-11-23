@@ -93,10 +93,7 @@ pub fn glass_cursor_allowed(app: &App) -> bool {
     // Slash/mention suggestions sit above the composer; other composer pickers own
     // the focused query field themselves. Neither needs to cover that field's caret.
     cursor_in_overlay(app) || (app.terminals.get(&app.active_tab().id).is_none_or(|t| t.more.is_none())
-        // lsp_view::overlay only mounts while Content owns focus. Its remembered
-        // popup state must not force ordinary cursors on tabs/workspaces/sidebar.
-        && (app.focus != crate::app::Focus::Content
-            || app.active_buffer().is_none_or(|b| b.lsp.hover.is_none() && b.lsp.completion.is_none())))
+        && !crate::editor::lsp_view::popup_visible(app))
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -107,10 +104,16 @@ fn glass_cursor_hidden_editor_popup_does_not_override_tab_or_workspace_material(
     app.open_file("cursor-test.rs", None);
     app.apply_opened_file("cursor-test.rs", b"let value = 1;\n");
     let editor = app.active_tab().id;
-    app.buffers.get_mut("cursor-test.rs").unwrap().lsp.hover = Some(crate::editor::lsp::Hover {
-        seq: 7, text: Some("A visible hover".into()), anchor: None,
-    });
+    let buffer = app.buffers.get_mut("cursor-test.rs").unwrap();
+    buffer.view_rect = Some([100.0, 100.0, 700.0, 400.0]);
+    buffer.lsp.hover = Some(crate::editor::lsp::Hover { seq: 7, text: None, anchor: None });
     app.focus = Focus::Content;
+    assert!(glass_cursor_allowed(&app), "a pending hover doesn't cover the caret");
+    let hover = app.active_buffer_mut().unwrap().lsp.hover.as_mut().unwrap();
+    hover.text = Some("A visible hover".into());
+    hover.anchor = Some([120.0, 550.0, 9.0, 22.0]);
+    assert!(glass_cursor_allowed(&app), "an offscreen hover doesn't cover the caret");
+    app.active_buffer_mut().unwrap().lsp.hover.as_mut().unwrap().anchor = None;
     assert!(!glass_cursor_allowed(&app), "a genuinely visible popup retains ordering fallback");
     for focus in [Focus::Buffers(app.active), Focus::Workspaces(0), Focus::Sidebar] {
         app.focus = focus;
@@ -125,6 +128,32 @@ fn glass_cursor_hidden_editor_popup_does_not_override_tab_or_workspace_material(
     assert!(glass_cursor_allowed(&app), "workspace restoration retains chrome focus and glass");
     app.focus = Focus::Content;
     assert!(!glass_cursor_allowed(&app), "returning to the editor restores real popup ordering");
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn glass_cursor_theme_picker_does_not_restore_a_stale_editor_popup() {
+    let mut app = App::new();
+    app.open_file("theme-test.rs", None);
+    app.apply_opened_file("theme-test.rs", b"let value = 1;\n");
+    app.focus = crate::app::Focus::Content;
+    let buffer = app.active_buffer_mut().unwrap();
+    buffer.view_rect = Some([100.0, 100.0, 700.0, 400.0]);
+    buffer.lsp.hover = Some(crate::editor::lsp::Hover { seq: 7, text: Some("Editor hover".into()), anchor: None });
+    assert!(!glass_cursor_allowed(&app));
+    app.open_picker(crate::palette::Mode::Themes);
+    assert!(app.cursor_target().is_none(), "wait for picker layout, not the underlying editor caret");
+    assert!(glass_cursor_allowed(&app));
+    app.rects.insert("picker-results".into(), [120.0, 150.0, 300.0, 200.0]);
+    assert!(app.cursor_target().is_some());
+    let theme = if app.pal.name == "nvchad_one" { "pastel_dark" } else { "nvchad_one" };
+    let index = app.picker.as_ref().unwrap().rows().iter().position(|row| {
+        matches!(row.target, crate::palette::Target::Theme(name) if name == theme)
+    }).unwrap();
+    app.accept_picker(Some(index), &mut rune::Tx::default());
+    assert_eq!(app.pal.name, theme);
+    assert!(app.picker.is_none());
+    assert!(glass_cursor_allowed(&app), "theme change must not revive an editor popup");
 }
 
 #[cfg(all(test, target_os = "macos"))]

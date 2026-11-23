@@ -72,11 +72,11 @@ pub fn view(app: &App, id: &str, message: &str, attachments: &[neoism_protocol::
             // The chip is as wide as its text needs, never wider than the bubble's own text column.
             let inner = (max_w - 2.0 * pad - 20.0 * s).max(1.0);
             body = body.child(col().max_w(inner + 20.0 * s).px(10.0 * s).py(6.0 * s).radius(10.0 * s).fill(Color::BLACK.alpha(0.22)).clip_rounded(10.0 * s)
-                .child(text(quoted).max_w(inner).font(app.ty.chat_sized(FONT * 0.93).lh(LINE_H * 0.95 * s)).color(Color::WHITE.alpha(0.78)).wrap().max_lines(3)));
+                .child(text(quoted).max_w(inner).font(app.ty.chat_sized(FONT * 0.93).lh(LINE_H * 0.95 * s)).color(Color::WHITE.alpha(0.78)).wrap_anywhere().max_lines(3)));
         }
         let body = body
             .child(text(message).max_w((max_w - 2.0 * pad).max(1.0))
-            .font(app.ty.chat_sized(FONT).lh(LINE_H * s)).color(Color::WHITE).wrap()
+            .font(app.ty.chat_sized(FONT).lh(LINE_H * s)).color(Color::WHITE).wrap_anywhere()
             // White over the blue bubble: the accent highlight would vanish into it.
             .selectable(true).selection_color(Color::WHITE.alpha(0.3)));
         content = content.child(col().max_w(max_w)

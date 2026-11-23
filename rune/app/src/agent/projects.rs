@@ -140,8 +140,10 @@ impl App {
         } else if value == ADD_WORKSPACE {
             self.open_file_browser(crate::browser::Mode::ChooseDirectory);
         } else if let Some(path) = value.strip_prefix("project:") {
-            self.conv_all = false;
-            if trimmed(path) != trimmed(&self.cwd) { self.set_workspace_root(path); }
+            self.change_directory(path);
+            self.conv_selected = 0;
+            self.conv_header = None;
+            return;
         }
         self.conv_selected = 0;
         self.conv_header = None;

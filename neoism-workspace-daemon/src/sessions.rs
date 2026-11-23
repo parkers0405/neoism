@@ -932,12 +932,15 @@ fn integrated_zsh_for_spawn(shell: &str,presentation:Presentation) -> Option<(St
     let zsh_rc_dir = dir.join("zsh");
     fs::create_dir_all(&zsh_rc_dir).ok()?;
     let zsh_rc = zsh_rc_dir.join(".zshrc");
+    let original = std::env::var_os("ZDOTDIR").filter(|dir| !dir.is_empty())
+        .map(PathBuf::from).or_else(dirs::home_dir)?;
+    let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\"'\"'"));
+    // Load the user's .zshenv, then keep the wrapper reachable until .zshrc runs.
+    fs::write(zsh_rc_dir.join(".zshenv"), format!(
+        "ZDOTDIR={}\nif [ -r \"$ZDOTDIR/.zshenv\" ]; then source \"$ZDOTDIR/.zshenv\"; fi\n__neoism_user_zdotdir=${{ZDOTDIR:-$HOME}}\nZDOTDIR={}\n",
+        quote(&original), quote(&zsh_rc_dir),
+    )).ok()?;
     let script = if presentation==Presentation::Grid {
-        let original=std::env::var_os("ZDOTDIR").map(PathBuf::from).or_else(||std::env::var_os("HOME").map(PathBuf::from))?;
-        let quote=|path:&Path| format!("'{}'",path.to_string_lossy().replace('\'',"'\"'\"'"));
-        // zsh reads the user's .zshenv before .zshrc. Restore the wrapper
-        // location only until our .zshrc has loaded, then restore their ZDOTDIR.
-        fs::write(zsh_rc_dir.join(".zshenv"),format!("ZDOTDIR={}\nif [ -r \"$ZDOTDIR/.zshenv\" ]; then source \"$ZDOTDIR/.zshenv\"; fi\n__neoism_user_zdotdir=$ZDOTDIR\nZDOTDIR={}\n",quote(&original),quote(&zsh_rc_dir))).ok()?;
         // Login zsh reads .zprofile before .zshrc, while ZDOTDIR still
         // points at our wrapper. Forward it, retaining any user ZDOTDIR change.
         fs::write(zsh_rc_dir.join(".zprofile"),format!("ZDOTDIR=$__neoism_user_zdotdir\nif [ -r \"$ZDOTDIR/.zprofile\" ]; then source \"$ZDOTDIR/.zprofile\"; fi\n__neoism_user_zdotdir=$ZDOTDIR\nZDOTDIR={}\n",quote(&zsh_rc_dir))).ok()?;
@@ -957,8 +960,19 @@ fn integrated_zsh_for_spawn(shell: &str,presentation:Presentation) -> Option<(St
 #[cfg(not(windows))]
 fn block_zsh_script(zsh_rc_dir: &PathBuf) -> String {
     format!(
-        r#"if [ -r "$HOME/.zshrc" ]; then
-  source "$HOME/.zshrc"
+        r#"# macOS /etc/zshrc derives HISTFILE from the temporary ZDOTDIR.
+# Repair that default before loading user settings, which may override it.
+if [[ -n ${{HISTFILE:-}} && $HISTFILE == "$ZDOTDIR/.zsh_history" ]]; then
+  HISTFILE="${{__neoism_user_zdotdir:-$HOME}}/.zsh_history"
+fi
+ZDOTDIR=${{__neoism_user_zdotdir:-$HOME}}
+if [ -r "$ZDOTDIR/.zshrc" ]; then
+  source "$ZDOTDIR/.zshrc"
+fi
+# A tab can be closed without zsh reaching its normal exit-time history save.
+# Let zsh append its own entries, keeping the user's history filters and modes.
+if [[ -n ${{HISTFILE:-}} && $SAVEHIST -gt 0 && ! -o SHARE_HISTORY && ! -o INC_APPEND_HISTORY_TIME ]]; then
+  setopt INC_APPEND_HISTORY
 fi
 neoism() {{
   if [ "${{1:-}}" = cd ]; then
@@ -1022,7 +1036,6 @@ zsh() {{
 #[cfg(not(windows))]
 fn grid_zsh_script(zsh_rc_dir:&PathBuf)->String {
     block_zsh_script(zsh_rc_dir)
-        .replace("if [ -r \"$HOME/.zshrc\" ]; then\n  source \"$HOME/.zshrc\"\nfi", "ZDOTDIR=${__neoism_user_zdotdir:-$HOME}\nif [ -r \"$ZDOTDIR/.zshrc\" ]; then\n  source \"$ZDOTDIR/.zshrc\"\nfi")
         .replace("  PROMPT=''\n", "")
         .replace("  RPROMPT=''\n", "")
         .replace("RPROMPT=''\n", "")
@@ -1295,6 +1308,58 @@ mod tests {
         assert!(precmd.contains("133;A\\007\\033]133;B"));
         assert!(precmd.contains("PROMPT=''"));
         assert!(precmd.contains("RPROMPT=''"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn zsh_history_survives_tab_close_without_saving_ignored_commands() {
+        use std::io::Write;
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::{Command, Stdio};
+
+        let Some(zsh) = preferred_zsh() else { return };
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let user = root.path().join("user config");
+        let wrapper = root.path().join("wrapper");
+        for dir in [&home, &user, &wrapper] {
+            fs::create_dir(dir).unwrap();
+        }
+        let rc = wrapper.join(".zshrc");
+        fs::write(&rc, block_zsh_script(&wrapper)).unwrap();
+        let wrapper_history = wrapper.join(".zsh_history");
+        let user_history = user.join(".zsh_history");
+
+        for disabled in [false, true] {
+            fs::write(user.join(".zshrc"), if disabled { "unset HISTFILE\n" } else { "setopt HIST_IGNORE_SPACE\n" }).unwrap();
+            let mut child = Command::new(&zsh)
+                // Disable host startup files and simulate the defaults from macOS /etc/zshrc.
+                .args(["-d", "-f", "-i"])
+                .env_clear()
+                .env("HOME", &home)
+                .env("ZDOTDIR", &wrapper)
+                .env("HISTFILE", &wrapper_history)
+                .env("__neoism_user_zdotdir", &user)
+                .env("TEST_RC", &rc)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let mut input = child.stdin.take().unwrap();
+            input.write_all(b"HISTSIZE=1000 SAVEHIST=1000; source \"$TEST_RC\"\nprint kept-command\n print ignored-command\nbuiltin kill -KILL $$\n").unwrap();
+            drop(input);
+            assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
+            assert!(!wrapper_history.exists());
+            if disabled {
+                assert!(!user_history.exists());
+            } else {
+                let history = fs::read_to_string(&user_history).unwrap();
+                assert!(history.lines().any(|line| line == "print kept-command"));
+                assert!(!history.contains("ignored-command"));
+                fs::remove_file(&user_history).unwrap();
+            }
+        }
     }
 
     #[test]

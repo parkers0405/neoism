@@ -361,6 +361,8 @@ async fn read_shell_history(max_entries: usize) -> Vec<FilesServerMessage> {
         #[cfg_attr(not(windows), allow(unused_mut))]
         let mut candidates = vec![
             std::env::var_os("HISTFILE").map(std::path::PathBuf::from),
+            std::env::var_os("ZDOTDIR").filter(|dir| !dir.is_empty())
+                .map(|dir| std::path::PathBuf::from(dir).join(".zsh_history")),
             Some(home.join(".zsh_history")),
             Some(home.join(".bash_history")),
         ];

@@ -38,6 +38,9 @@ pub struct Scroller {
     vel: f32,
     /// Trackpad: direct movement not yet applied and continuously decaying velocity.
     pending: f32,
+    /// Native transcript momentum: newly reported distance and the previous frame's half.
+    release: f32,
+    carry: f32,
     coast: f32,
     clock: Option<f64>,
     source: Option<Source>,
@@ -51,7 +54,7 @@ pub struct Scroller {
 
 impl Scroller {
     pub fn moving(&self) -> bool {
-        self.remaining.abs() > 0.25 || self.vel.abs() > 2.0 || self.pending != 0.0 || self.coast.abs() >= TRACKPAD_STOP
+        self.remaining.abs() > 0.25 || self.vel.abs() > 2.0 || self.pending != 0.0 || self.release != 0.0 || self.carry != 0.0 || self.coast.abs() >= TRACKPAD_STOP
     }
 
     /// Feed a wheel event: `notch_px` is how far one notch travels on this surface.
@@ -116,6 +119,9 @@ impl Scroller {
             }
             if self.remaining.abs() <= 0.25 && self.vel.abs() <= 2.0 { by += self.remaining; self.remaining = 0.0; self.vel = 0.0; }
         }
+        // A two-frame box filter fills a single missing report without predicting motion.
+        let half = std::mem::take(&mut self.release) * 0.5;
+        by += std::mem::replace(&mut self.carry, half) + half;
         if self.coast.abs() >= TRACKPAD_STOP {
             self.coast *= (-dt / TRACKPAD_TAU).exp();
             by += self.coast * dt;
@@ -132,6 +138,7 @@ impl Scroller {
             self.remaining = 0.0;
             self.vel = 0.0;
             self.coast = 0.0;
+            self.carry = 0.0;
         }
         ((target - offset).abs() > 0.01).then_some(target)
     }
@@ -242,6 +249,20 @@ pub fn handle(app_scrollers: &mut Scrollers, key: &str, e: &WheelEvent, notch_px
 
 /// `handle` for a view whose handler changed state the view reads (it re-runs).
 pub fn take(app_scrollers: &mut Scrollers, key: &str, e: &WheelEvent, notch_px: f32, source: Source, tx: &mut Tx) -> bool {
+    #[cfg(target_os = "macos")]
+    if key.starts_with("conversation:") {
+        if !e.momentum && (e.phase == rune::GesturePhase::Began || e.dy != 0.0) {
+            if let Some(s) = app_scrollers.views.get_mut(key) { s.release = 0.0; s.carry = 0.0; }
+        } else if e.precise && e.momentum && e.dy != 0.0 && e.dx.abs() <= e.dy.abs() {
+            let s = app_scrollers.views.entry(key.to_owned()).or_default();
+            let (reported, max) = source();
+            let at = (s.offset(reported) + s.pending + s.carry + s.release).clamp(0.0, max.max(0.0));
+            s.release += (at - e.dy).clamp(0.0, max.max(0.0)) - at;
+            s.source = Some(source);
+            tx.wake_after(std::time::Duration::ZERO);
+            return true;
+        }
+    }
     if e.dy == 0.0 || (e.precise && e.dx.abs() > e.dy.abs()) { return false; }
     app_scrollers.wheel(key, e, notch_px, source);
     tx.wake_after(std::time::Duration::ZERO);
@@ -253,6 +274,29 @@ mod tests {
     use super::*;
 
     fn source(offset: f32) -> Source { Rc::new(move || (offset, 10_000.0)) }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn transcript_bridges_a_momentum_gap_but_not_a_new_touch() {
+        let mut views = Scrollers::default();
+        let mut tx = Tx::default();
+        let key = "conversation:test";
+        views.own(key);
+        let mut event = WheelEvent::new(0.0, -10.0).precise(true);
+        event.momentum = true;
+        assert!(take(&mut views, key, &event, 60.0, source(500.0), &mut tx));
+        for (frame, pos) in [(0, 505.0), (1, 510.0)] {
+            views.step(frame as f64 / 120.0, &mut tx);
+            assert_eq!(views.take_moves()[0].to, pos);
+        }
+        assert!(!views.step(2.0 / 120.0, &mut tx));
+        take(&mut views, key, &event, 60.0, source(510.0), &mut tx);
+        views.step(3.0 / 120.0, &mut tx);
+        assert_eq!(views.take_moves()[0].to, 515.0);
+        let touch = WheelEvent::new(0.0, 0.0).precise(true).phase(rune::GesturePhase::Began);
+        take(&mut views, key, &touch, 60.0, source(515.0), &mut tx);
+        assert!(!views.step(4.0 / 120.0, &mut tx));
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

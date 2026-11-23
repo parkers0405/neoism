@@ -181,7 +181,10 @@ impl App {
 
     /// Open the diff of what changed, starting at the file under the cursor.
     pub fn open_git_changes(&mut self) {
-        let path = self.git_panel.files.get(self.git_panel.cursor).map(|f| f.path.clone()).unwrap_or_default();
+        let path = match self.git_panel.tree.get(self.git_panel.cursor) {
+            Some(tree::Node::File { index, .. }) => self.git_panel.files.get(*index).map(|f| f.path.clone()),
+            _ => None,
+        }.unwrap_or_default();
         self.open_git_review(&path);
     }
 
@@ -297,6 +300,18 @@ fn tool(app: &App, key: &str, label: &str, on: bool) -> El {
         .child(text(label.to_owned()).font(app.ty.sans(12.0, 500.0)).color(rgb(if on { p.fg } else { p.dim })))
 }
 
+/// A square icon button of a toolbar; its name appears under it while the pointer is on it.
+pub(super) fn icon_tool(app: &App, key: &str, icon: crate::ui::feather::Icon, name: &str, on: bool) -> El {
+    let s = app.ty.scale();
+    let p = app.pal;
+    el().key(key.to_owned()).w(30.0 * s).h(28.0 * s).center().radius(8.0 * s).hover_group()
+        .fill(if on { rgb(p.hover) } else { rune::Color::TRANSPARENT }).border(s, rgb(if on { p.border } else { p.bg })).hover(rgb(p.hover))
+        .child(crate::ui::feather::view(app, icon, 15.0 * s, if on { p.fg } else { p.dim }))
+        .child(el().absolute(-30.0 * s, 32.0 * s).w(90.0 * s).center().group_opacity(0.0, 1.0)
+            .child(el().h(20.0 * s).px(7.0 * s).center().radius(6.0 * s).fill(rgb(p.fg))
+                .child(text(name.to_owned()).font(app.ty.sans(11.0, 500.0)).color(rgb(p.bg)))))
+}
+
 fn status_tag(status: GitChangeStatus, p: &crate::ui::palettes::Palette) -> (&'static str, u32) {
     match status {
         GitChangeStatus::Added | GitChangeStatus::Untracked => ("A", p.green),
@@ -331,27 +346,32 @@ pub fn review(app: &App) -> El {
     };
     let (added, deleted) = review.totals();
     let all_collapsed = !review.files.is_empty() && review.files.iter().all(|f| f.collapsed);
-    let bar = row().w_full().h(BAR_H * s).px(10.0 * s).gap(6.0 * s).center_y().border_sides([0.0, 0.0, 1.0, 0.0], rgb(p.border))
-        .child(row().key("git-review-scope").h(28.0 * s).px(10.0 * s).gap(6.0 * s).center_y().radius(8.0 * s).border(s, rgb(p.border))
+    let pull = matches!(review.scope, Scope::Pull(_));
+    let mut bar = row().w_full().h(BAR_H * s).px(10.0 * s).gap(6.0 * s).center_y().border_sides([0.0, 0.0, 1.0, 0.0], rgb(p.border));
+    if !pull {
+        bar = bar.child(row().key("git-review-scope").h(28.0 * s).px(10.0 * s).gap(6.0 * s).center_y().radius(8.0 * s).border(s, rgb(p.border))
             .fill(if review.scope_menu { rgb(p.hover) } else { rgb(p.surface) }).hover(rgb(p.hover))
             .child(text(scope_name(review.scope)).font(app.ty.sans(12.5, 550.0)).color(rgb(p.fg)))
             .child(feather::view(app, if review.scope_menu { Icon::Up } else { Icon::Down }, 13.0 * s, p.muted))
-            .on_press(|a: &mut App| a.git_panel.review.scope_menu = !a.git_panel.review.scope_menu))
+            .on_press(|a: &mut App| a.git_panel.review.scope_menu = !a.git_panel.review.scope_menu));
+    }
+    let bar = bar
         .child(text(format!("{} {}", review.files.len(), if review.files.len() == 1 { "file" } else { "files" })).font(app.ty.sans(12.0, 400.0)).color(rgb(p.muted)).ml(6.0 * s).truncate().shrink())
         .child(text(format!("+{added}")).font(app.ty.sized(11.0)).color(rgb(p.green)))
         .child(text(format!("\u{2212}{deleted}")).font(app.ty.sized(11.0)).color(rgb(p.red)))
         .child(el().grow(1.0))
-        .child(tool(app, "git-review-split", if review.split { "Side by side" } else { "Stacked" }, review.split).on_press(|a: &mut App| {
+        .child(icon_tool(app, "git-review-split", if review.split { Icon::Columns } else { Icon::Rows }, if review.split { "Side by side" } else { "Stacked" }, review.split).on_press(|a: &mut App| {
             a.git_panel.review.split = !a.git_panel.review.split;
             a.git_panel.review.target = None;
             a.git_review_relayout();
         }))
-        .child(tool(app, "git-review-fold", if all_collapsed { "Expand all" } else { "Collapse all" }, false).on_press(move |a: &mut App| {
+        .child(icon_tool(app, "git-review-fold", if all_collapsed { Icon::Unfold } else { Icon::Fold }, if all_collapsed { "Expand all" } else { "Collapse all" }, false).on_press(move |a: &mut App| {
             for file in &mut a.git_panel.review.files { file.collapsed = !all_collapsed; }
             a.git_review_relayout();
         }))
-        .child(tool(app, "git-review-files", "Files", !review.hide_files).on_press(|a: &mut App| a.git_panel.review.hide_files = !a.git_panel.review.hide_files))
-        .child(tool(app, "git-review-refresh", "Refresh", false).on_press(|a: &mut App| a.load_git_review()));
+        .child(icon_tool(app, "git-review-files", Icon::SidePane, "File list", !review.hide_files).on_press(|a: &mut App| a.git_panel.review.hide_files = !a.git_panel.review.hide_files))
+        // A pull request's own bar already has Refresh.
+        .child_if(!pull, || icon_tool(app, "git-review-refresh", Icon::Refresh, "Refresh", false).on_press(|a: &mut App| a.load_git_review()));
     let rows = col().w_full().growth(rune::GrowthSpec::default()).virtual_rows(review.rows.len(), ROW * s,
         |_: &App, i| format!("diff:{i}").into(), |a: &App, i| diff_row(a, i))
         .virtual_rows_version(state.epoch);
@@ -371,25 +391,30 @@ pub fn review(app: &App) -> El {
     }
     let mut body = row().w_full().grow(1.0).shrink().h(0.0).child(list);
     if !review.hide_files && !review.files.is_empty() {
-        let mut tree = col().key("git-review-tree").w(TREE_W * s).h_full().border_sides([0.0, 0.0, 0.0, 1.0], rgb(p.border)).scroll(ScrollSpec { stick_bottom: false })
-            .child(text("Files").font(app.ty.sans(11.5, 500.0)).color(rgb(p.muted)).px(12.0 * s).pt(10.0 * s).pb(6.0 * s));
-        for file in &review.files {
-            let (tag, color) = status_tag(file.status, p);
-            let (dir, name) = file.path.rsplit_once('/').map_or(("", file.path.as_str()), |(d, n)| (d, n));
-            let path = file.path.clone();
-            tree = tree.child(row().key(format!("git-review-file:{}", file.path)).w_full().h(28.0 * s).px(12.0 * s).gap(8.0 * s).center_y().hover(rgb(p.hover))
-                .child(text(tag).font(app.ty.sized(11.0)).color(rgb(color)))
-                .child(text(name.to_owned()).font(app.ty.sans(12.5, 500.0)).color(rgb(p.fg)).truncate().shrink())
-                .child(text(dir.to_owned()).font(app.ty.sans(11.5, 400.0)).color(rgb(p.muted)).truncate().grow(1.0).shrink())
-                .on_press(move |a: &mut App| {
-                    if let Some(file) = a.git_panel.review.files.iter_mut().find(|f| f.path == path) { if file.collapsed { file.collapsed = false; } }
-                    a.git_review_relayout();
-                    a.git_panel.review.jump = Some(path.clone());
-                }));
+        let mut tree = col().key("git-review-tree").w(TREE_W * s).h_full().px(4.0 * s).border_sides([0.0, 0.0, 0.0, 1.0], rgb(p.border)).scroll(ScrollSpec { stick_bottom: false })
+            .child(text("Files").font(app.ty.sans(11.5, 500.0)).color(rgb(p.muted)).px(8.0 * s).pt(10.0 * s).pb(6.0 * s));
+        for node in tree::rows(review.files.iter().map(|f| f.path.as_str()), &state.closed) {
+            let (path, name, ink, is_dir) = match &node {
+                tree::Node::Dir { path, name, .. } => (path.clone(), name.clone(), p.fg, true),
+                tree::Node::File { index, .. } => { let f = &review.files[*index]; (f.path.clone(), f.path.rsplit('/').next().unwrap_or(&f.path).to_owned(), p.dim, false) }
+            };
+            let tag = match &node { tree::Node::File { index, .. } => Some(status_tag(review.files[*index].status, p)), _ => None };
+            let mut line = row().key(format!("git-review-file:{path}")).w_full().h(26.0 * s).px(8.0 * s).gap(6.0 * s).center_y().radius(6.0 * s).hover(rgb(p.hover))
+                .child(tree::label(app, &node, &name, ink));
+            if let Some((tag, color)) = tag { line = line.child(text(tag).font(app.ty.sized(10.5)).color(rgb(color))); }
+            tree = tree.child(line.on_press(move |a: &mut App| {
+                if is_dir {
+                    if !a.git_panel.closed.remove(&path) { a.git_panel.closed.insert(path.clone()); }
+                    a.git_panel.retree();
+                    return;
+                }
+                if let Some(file) = a.git_panel.review.files.iter_mut().find(|f| f.path == path) { file.collapsed = false; }
+                a.git_review_relayout();
+                a.git_panel.review.jump = Some(path.clone());
+            }));
         }
         body = body.child(tree);
     }
-    let pull = matches!(review.scope, Scope::Pull(_));
     let mut surface = col().key("git-review-surface").w_full().h_full().fill(rgb(p.bg)).clip_rounded(0.0);
     if pull { surface = surface.child(super::pulls::strip(app, true)); }
     let mut surface = surface.child(bar).child(body);
@@ -397,19 +422,24 @@ pub fn review(app: &App) -> El {
     if let Some((f, i)) = review.target {
         if let (Some(file), Some(line)) = (review.files.get(f), review.files.get(f).and_then(|file| file.lines.get(i))) {
             let place = format!("{}{}", file.path, line.new.or(line.old).map(|n| format!(":{n}")).unwrap_or_default());
-            surface = surface.child(row().key("git-comment").w_full().px(12.0 * s).py(10.0 * s).gap(8.0 * s).center_y().border_sides([1.0, 0.0, 0.0, 0.0], rgb(p.border)).fill(rgb(panel_bg(p)))
-                .child(text(place).font(app.ty.sized(11.0)).color(rgb(p.muted)).truncate().max_w(260.0 * s))
-                .child(rune::text_input(&review.comment, app.ty.sans(12.5, 400.0)).key("git-comment-input").grow(1.0).w(0.0).h(32.0 * s).px(10.0 * s).single_line()
-                    .radius(8.0 * s).fill(rgb(p.surface)).border(s, rgb(p.border)).color(rgb(p.fg)).placeholder(if pull { "Comment on this line\u{2026}" } else { "Add a comment for the agent\u{2026}" }, rgb(p.muted))
+            surface = surface.child(col().key("git-comment").w_full().px(14.0 * s).py(12.0 * s).gap(8.0 * s).border_sides([1.0, 0.0, 0.0, 0.0], rgb(p.border)).fill(rgb(panel_bg(p)))
+                .child(row().w_full().gap(8.0 * s).center_y()
+                    .child(feather::view(app, Icon::Comment, 14.0 * s, p.dim))
+                    .child(text(place).font(app.ty.sized(11.5)).color(rgb(p.fg)).truncate().shrink())
+                    .child(text(line.text.trim().to_owned()).font(app.ty.sized(11.0)).color(rgb(p.muted)).truncate().grow(1.0).shrink()))
+                .child(rune::text_input(&review.comment, app.ty.sans(13.0, 400.0).lh(19.0 * s)).key("git-comment-input").w_full().h(92.0 * s).padding(10.0 * s)
+                    .radius(10.0 * s).fill(rgb(p.surface)).border(s, rgb(p.border)).color(rgb(p.fg))
+                    .placeholder(if pull { "Comment on this line. Cmd+Enter adds it to your review." } else { "Comment for the agent. Cmd+Enter adds it to the chat." }, rgb(p.muted))
                     .on_edit(|a: &mut App| &mut a.git_panel.review.comment)
                     .on_input_key(|a: &mut App, e: &KeyEvent, _: &mut Tx| match e.key {
-                        Key::Enter => { a.git_comment_submit(); true }
+                        Key::Enter if e.mods.cmd => { a.git_comment_submit(); true }
                         Key::Escape => { a.git_panel.review.target = None; a.git_panel.epoch = a.git_panel.epoch.wrapping_add(1); true }
                         _ => false,
                     }))
-                .child(tool(app, "git-comment-cancel", "Cancel", false).on_press(|a: &mut App| { a.git_panel.review.target = None; a.git_panel.epoch = a.git_panel.epoch.wrapping_add(1); }))
-                .child(el().key("git-comment-add").h(30.0 * s).px(12.0 * s).center().radius(8.0 * s).fill(rgb(p.fg))
-                    .child(text(if pull { "Add to review" } else { "Add to chat" }).font(app.ty.sans(12.5, 600.0)).color(rgb(p.bg))).on_press(|a: &mut App| a.git_comment_submit())));
+                .child(row().w_full().gap(8.0 * s).center_y().child(el().grow(1.0))
+                    .child(tool(app, "git-comment-cancel", "Cancel", false).on_press(|a: &mut App| { a.git_panel.review.target = None; a.git_panel.epoch = a.git_panel.epoch.wrapping_add(1); }))
+                    .child(el().key("git-comment-add").h(30.0 * s).px(14.0 * s).center().radius(8.0 * s).fill(rgb(p.fg))
+                        .child(text(if pull { "Add to review" } else { "Add to chat" }).font(app.ty.sans(12.5, 600.0)).color(rgb(p.bg))).on_press(|a: &mut App| a.git_comment_submit()))));
         }
     } else if pull {
         surface = surface.child(super::pulls::finish(app));
@@ -448,11 +478,26 @@ fn tint(kind: Kind, p: &crate::ui::palettes::Palette) -> Option<(u32, rune::Colo
     }
 }
 
-/// A line of code in the theme's syntax colours, as the editor draws it.
-fn code(app: &App, lang: Option<&str>, source: &str) -> El {
+/// The width of a line-number column, in characters.
+const DIGITS: usize = 5;
+
+/// One side of a diff line as a single run of text: its numbers, its sign and its code in
+/// the theme's syntax colours. One element per line keeps a fast scroll at the display's rate.
+fn code(app: &App, lang: Option<&str>, line: &Line, numbers: &[Option<usize>]) -> El {
     use rune_kit::syntax::{Paint, Syntax, highlight};
     let p = app.pal;
-    let spans: Vec<rune::Span> = highlight(lang, source).iter().map(|(range, paint)| {
+    let mut out = String::with_capacity(line.text.len() + 16);
+    for number in numbers {
+        match number { Some(n) => out.push_str(&format!("{n:>DIGITS$} ")), None => out.push_str(&" ".repeat(DIGITS + 1)) }
+    }
+    let gutter = out.len();
+    let (sign, sign_color) = match line.kind { Kind::Add => ("+ ", p.green), Kind::Remove => ("\u{2212} ", p.red), _ => ("  ", p.muted) };
+    out.push(' ');
+    out.push_str(sign);
+    let start = out.len();
+    out.push_str(&line.text);
+    let mut spans = vec![rune::Span::new(0, gutter).color(rgb(p.muted)), rune::Span::new(gutter, start).color(rgb(sign_color))];
+    spans.extend(highlight(lang, &line.text).iter().map(|(range, paint)| {
         let color = match paint {
             Paint::Kind(kind) => match kind {
                 Syntax::Keyword => p.syn_keyword,
@@ -467,9 +512,12 @@ fn code(app: &App, lang: Option<&str>, source: &str) -> El {
             },
             Paint::Color(_) => p.fg,
         };
-        rune::Span::new(range.start, range.end).color(rgb(color))
-    }).collect();
-    rune::rich(source.to_owned(), spans).font(app.ty.sized(12.0)).color(rgb(p.fg))
+        rune::Span::new(start + range.start, start + range.end).color(rgb(color))
+    }));
+    // A rich run wraps at its own measure; give it the line's real width so it never does.
+    let style = app.ty.sized(12.0);
+    let width = rune::text::advance("m", style).max(1.0) * out.chars().count() as f32 + 2.0;
+    rune::rich(out, spans).font(style).color(rgb(p.fg)).w(width)
 }
 
 fn diff_row(app: &App, index: usize) -> El {
@@ -486,20 +534,14 @@ fn diff_row(app: &App, index: usize) -> El {
         review.note = None;
         a.git_panel.epoch = a.git_panel.epoch.wrapping_add(1);
     };
-    // One side of a line: a coloured edge, its number on a deeper wash, the sign, the code.
-    let side = |f: usize, i: usize, numbers: [Option<Option<usize>>; 2]| {
+    // One side of a line: a coloured edge and wash on the row, and one run of text in it.
+    let side = |f: usize, i: usize, numbers: &[Option<usize>]| {
         let line = &review.files[f].lines[i];
         let chosen = review.target == Some((f, i));
-        let (color, wash, deep) = tint(line.kind, p).map_or((None, rune::Color::TRANSPARENT, rune::Color::TRANSPARENT), |(c, w, d)| (Some(c), w, d));
-        let mut out = row().w(0.0).grow(1.0).h_full().center_y().clip_rounded(0.0).fill(if chosen { rgb(p.blue).alpha(0.18) } else { wash })
-            .child(el().w(3.0 * s).h_full().fill(color.map_or(rune::Color::TRANSPARENT, rgb)));
-        for number in numbers.into_iter().flatten() {
-            out = out.child(row().w(44.0 * s).h_full().center_y().justify_end().pr(8.0 * s).fill(deep)
-                .child(text(number.map(|n| n.to_string()).unwrap_or_default()).font(app.ty.sized(11.0)).color(rgb(p.muted))));
-        }
-        out.child(text(match line.kind { Kind::Add => "+", Kind::Remove => "\u{2212}", _ => "" }).font(app.ty.sized(12.0)).color(rgb(color.unwrap_or(p.muted))).w(20.0 * s).pl(7.0 * s))
-            .child(code(app, lang(f), &line.text))
-            .hover(if chosen { rgb(p.blue).alpha(0.18) } else { rgb(p.fg).alpha(0.05) })
+        let (edge, wash) = tint(line.kind, p).map_or((rune::Color::TRANSPARENT, rune::Color::TRANSPARENT), |(c, w, _)| (rgb(c), w));
+        row().w(0.0).grow(1.0).h_full().center_y().fill(if chosen { rgb(p.blue).alpha(0.18) } else { wash })
+            .border_sides([0.0, 0.0, 0.0, 3.0], edge)
+            .child(code(app, lang(f), line, numbers))
             .on_press(pick(f, i))
     };
     match row_kind {
@@ -540,14 +582,14 @@ fn diff_row(app: &App, index: usize) -> El {
                 }
                 Kind::Meta => row().w_full().h(ROW * s).px(14.0 * s).center_y()
                     .child(text(line.text.clone()).font(app.ty.sans(11.5, 400.0).italic()).color(rgb(p.muted)).truncate()),
-                _ if review.split => row().w_full().h(ROW * s).child(side(f, i, [Some(line.old), None])).child(el().w(s).h_full().fill(rgb(p.border))).child(side(f, i, [Some(line.new), None])),
-                _ => row().w_full().h(ROW * s).child(side(f, i, [Some(line.old), Some(line.new)])),
+                _ if review.split => row().w_full().h(ROW * s).child(side(f, i, &[line.old])).child(el().w(s).h_full().fill(rgb(p.border))).child(side(f, i, &[line.new])),
+                _ => side(f, i, &[line.old, line.new]).w_full().h(ROW * s),
             }
         }
         Row::Pair(f, old, new) => {
             let lines = &review.files[f].lines;
             let half = |i: Option<usize>, left: bool| match i {
-                Some(i) => side(f, i, [Some(if left { lines[i].old } else { lines[i].new }), None]),
+                Some(i) => side(f, i, &[if left { lines[i].old } else { lines[i].new }]),
                 None => row().w(0.0).grow(1.0).h_full().fill(rgb(p.surface).alpha(0.45)),
             };
             row().w_full().h(ROW * s).child(half(old, true)).child(el().w(s).h_full().fill(rgb(p.border))).child(half(new, false))

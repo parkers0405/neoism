@@ -30,17 +30,24 @@ pub struct Pulls {
     pub(super) drafts: Vec<PullRequestInlineComment>,
     /// Pull requests already read, so opening one again shows at once while it refreshes.
     cache: std::collections::HashMap<u64, PullRequestDetail>,
+    /// Pull requests still to read ahead of a click, and the one being read.
+    ahead: std::collections::VecDeque<u64>,
+    fetching: Option<Pending>,
 }
 
 impl Pulls {
     pub(super) fn filter(&self) -> PullRequestFilter { self.filter.unwrap_or(PullRequestFilter::Open) }
     pub(super) fn busy(&self) -> bool { self.acting.is_some() }
     pub(super) fn disconnected(&mut self) {
-        (self.listing, self.reading) = (None, None);
+        (self.listing, self.reading, self.fetching) = (None, None, None);
+        self.ahead.clear();
         if self.acting.take().is_some() { self.detail_error = Some("Connection lost. Refresh the pull request before trying again.".into()); }
         self.working = None;
     }
 }
+
+/// How many of a list's pull requests are read ahead of a click.
+const AHEAD: usize = 5;
 
 /// `2026-11-20T10:00:00Z` as `2026-11-20`.
 pub(super) fn day(stamp: &str) -> &str { stamp.get(..10).unwrap_or(stamp) }
@@ -89,6 +96,18 @@ impl App {
         pulls.merge_menu = false;
         self.git_panel.selected = Some(String::new());
         self.git_pull_read();
+    }
+
+    /// Read the next listed pull request that is not known yet, one at a time, so opening
+    /// it later is instant. A click always goes first: this waits while one is being read.
+    fn git_pull_ahead(&mut self) {
+        let pulls = &mut self.git_panel.pulls;
+        if pulls.fetching.is_some() || pulls.reading.is_some() { return; }
+        while let Some(number) = pulls.ahead.pop_front() {
+            if pulls.cache.contains_key(&number) { continue; }
+            self.git_panel.pulls.fetching = self.git_request(GitClientMessage::PullRequest { request: PullRequestRequest::Read { number } }, Operation::Remote);
+            return;
+        }
     }
 
     pub fn git_pull_read(&mut self) {
@@ -195,9 +214,20 @@ impl App {
             match message {
                 GitServerMessage::PullRequest { reply: PullRequestReply::Listed { page } } if page.generation == pulls.generation => {
                     (pulls.items, pulls.total, pulls.error) = (page.items.clone(), page.total_count, None);
+                    pulls.ahead = page.items.iter().take(AHEAD).map(|i| i.summary.number).collect();
                 }
                 other => if let Some(e) = error(other) { pulls.error = Some(e); },
             }
+            self.git_pull_ahead();
+            return true;
+        }
+        if hit(&pulls.fetching) {
+            pulls.fetching = None;
+            if let GitServerMessage::PullRequest { reply: PullRequestReply::Detail { detail } } = message {
+                pulls.cache.insert(detail.summary.number, detail.clone());
+                if pulls.viewing == Some(detail.summary.number) && pulls.detail.is_none() { pulls.detail = Some(detail.clone()); }
+            }
+            self.git_pull_ahead();
             return true;
         }
         if hit(&pulls.reading) {
@@ -212,6 +242,7 @@ impl App {
                 }
                 other => if let Some(e) = error(other) { pulls.detail_error = Some(e); },
             }
+            self.git_pull_ahead();
             return true;
         }
         if hit(&pulls.acting) {
@@ -352,29 +383,65 @@ pub(super) fn finish(app: &App) -> El {
         .child(action(app, "git-pull-finish:approve", "Approve", true, !busy).on_press(|a: &mut App| a.git_pull_review(Approve))))
 }
 
-/// The band over a pull request's pages: what it is, and its two tabs.
+/// The head of a pull request's pages: what it is, then one bar with its two tabs on the
+/// left and, on the right, what can be done from the tab that is showing.
 pub(super) fn strip(app: &App, files: bool) -> El {
+    use crate::ui::feather::Icon;
+    use review::icon_tool;
     let p = app.pal;
     let s = app.ty.scale();
     let pulls = &app.git_panel.pulls;
     let number = pulls.viewing.unwrap_or_default();
-    let known = pulls.detail.as_ref().map(|d| &d.summary).filter(|d| d.number == number).or_else(|| pulls.items.iter().map(|i| &i.summary).find(|i| i.number == number));
-    let count = pulls.detail.as_ref().filter(|d| d.summary.number == number).map(|d| d.files.len());
-    let tab = |key: &str, name: String, on: bool| el().key(key.to_owned()).h(28.0 * s).px(12.0 * s).center().radius(8.0 * s)
-        .fill(if on { rgb(p.hover) } else { rune::Color::TRANSPARENT }).border(s, rgb(if on { p.border } else { p.bg })).hover(rgb(p.hover))
-        .child(text(name).font(app.ty.sans(12.5, if on { 600.0 } else { 450.0 })).color(rgb(if on { p.fg } else { p.dim })));
-    let mut band = row().key("git-pull-strip").w_full().h(46.0 * s).px(14.0 * s).gap(8.0 * s).center_y().border_sides([0.0, 0.0, 1.0, 0.0], rgb(p.border));
+    let detail = pulls.detail.as_ref().filter(|d| d.summary.number == number);
+    let known = detail.map(|d| &d.summary).or_else(|| pulls.items.iter().map(|i| &i.summary).find(|i| i.number == number));
+    let tab = |key: &str, name: String, on: bool| col().key(key.to_owned()).h_full().px(4.0 * s).center()
+        .child(text(name).font(app.ty.sans(12.5, if on { 600.0 } else { 450.0 })).color(rgb(if on { p.fg } else { p.muted })))
+        .child(el().absolute(0.0, 36.0 * s).w_full().h(2.0 * s).radius(s).fill(if on { rgb(p.fg) } else { rune::Color::TRANSPARENT }));
+    let mut title = row().w_full().px(16.0 * s).pt(12.0 * s).pb(4.0 * s).gap(8.0 * s).center_y();
     if let Some(summary) = known {
         let (state, color) = state_of(summary, p);
-        band = band.child(pill(app, state, color))
-            .child(text(summary.title.clone()).font(app.ty.sans(13.5, 650.0)).color(rgb(p.fg)).truncate().shrink())
-            .child(text(format!("#{number}")).font(app.ty.sized(11.5)).color(rgb(p.muted)));
+        title = title.child(text(summary.title.clone()).font(app.ty.sans(15.0, 650.0)).color(rgb(p.fg)).truncate().shrink())
+            .child(text(format!("#{number}")).font(app.ty.sized(12.0)).color(rgb(p.muted)))
+            .child(pill(app, state, color))
+            .child(text(format!("{}  \u{2192}  {}", summary.head_branch, summary.base_branch)).font(app.ty.sized(11.0)).color(rgb(p.muted)).truncate().shrink());
     } else {
-        band = band.child(text(format!("Pull request #{number}")).font(app.ty.sans(13.5, 650.0)).color(rgb(p.fg)));
+        title = title.child(text(format!("Pull request #{number}")).font(app.ty.sans(15.0, 650.0)).color(rgb(p.fg)));
     }
-    band.child(el().grow(1.0))
+    let mut bar = row().w_full().h(38.0 * s).px(16.0 * s).gap(14.0 * s).center_y().border_sides([0.0, 0.0, 1.0, 0.0], rgb(p.border))
         .child(tab("git-pull-tab:conversation", "Conversation".into(), !files).on_press(move |a: &mut App| a.open_git_pull(number)))
-        .child(tab("git-pull-tab:files", count.map_or("Files changed".into(), |n| format!("Files changed {n}")), files).on_press(|a: &mut App| a.git_pull_diff()))
+        .child(tab("git-pull-tab:files", detail.map_or("Files changed".into(), |d| format!("Files changed  {}", d.files.len())), files).on_press(|a: &mut App| a.git_pull_diff()))
+        .child(el().grow(1.0));
+    if let Some(summary) = known {
+        let (url, head, busy) = (summary.url.clone(), summary.head_sha.clone(), pulls.busy());
+        let open = summary.state.eq_ignore_ascii_case("open");
+        let mut actions = row().gap(4.0 * s).center_y();
+        if open && !summary.draft && detail.is_some() {
+            actions = actions.child(icon_tool(app, "git-pull-merge", Icon::Merge, "Merge", pulls.merge_menu).on_press(|a: &mut App| a.git_panel.pulls.merge_menu = !a.git_panel.pulls.merge_menu));
+        }
+        actions = actions
+            .child(icon_tool(app, "git-pull-checkout", Icon::Download, "Check out", false).on_press(move |a: &mut App| {
+                if !busy { a.git_pull_act("Checking out\u{2026}", PullRequestRequest::Checkout { number, expected_head: head.clone(), new_worktree: false }); }
+            }))
+            .child(icon_tool(app, "git-pull-browser", Icon::External, "Open on GitHub", false).on_press_tx(move |_: &mut App, tx: &mut Tx| { let _ = tx.open_url(&url); }))
+            .child(icon_tool(app, "git-pull-refresh", Icon::Refresh, "Refresh", false).on_press(|a: &mut App| a.git_pull_read()));
+        bar = bar.child(actions);
+    }
+    let mut head = col().key("git-pull-strip").w_full().child(title).child(bar);
+    // The merge methods drop down under the bar, on either tab.
+    if pulls.merge_menu {
+        if let Some(summary) = known {
+            let mut methods = row().w_full().px(16.0 * s).py(8.0 * s).gap(8.0 * s).center_y().border_sides([0.0, 0.0, 1.0, 0.0], rgb(p.border)).fill(rgb(panel_bg(p)))
+                .child(text("Merge with").font(app.ty.sans(12.0, 400.0)).color(rgb(p.muted)));
+            for (name, method) in [("Squash and merge", PullRequestMergeMethod::Squash), ("Merge commit", PullRequestMergeMethod::Merge), ("Rebase and merge", PullRequestMergeMethod::Rebase)] {
+                let head_sha = summary.head_sha.clone();
+                methods = methods.child(action(app, &format!("git-pull-merge:{name}"), name, false, !pulls.busy()).on_press(move |a: &mut App| {
+                    a.git_pull_act("Merging\u{2026}", PullRequestRequest::Merge { number, expected_head: head_sha.clone(), method });
+                }));
+            }
+            head = head.child(methods);
+        }
+    }
+    head
 }
 
 /// The open pull request's Conversation tab, in the diff tab.
@@ -393,41 +460,13 @@ pub(super) fn detail(app: &App) -> El {
         });
     };
     let summary = &detail.summary;
-    let (state, color) = state_of(summary, p);
     let open = summary.state.eq_ignore_ascii_case("open");
     let busy = pulls.busy();
-    let (url, head) = (summary.url.clone(), summary.head_sha.clone());
-    let (head_merge, head_out) = (head.clone(), head.clone());
-    let mut actions = row().gap(8.0 * s).center_y().wrap()
-        .child(action(app, "git-pull-diff", &format!("Review {} changed files", detail.files.len()), true, true).on_press(|a: &mut App| a.git_pull_diff()))
-        .child(action(app, "git-pull-checkout", "Check out", false, !busy).on_press(move |a: &mut App| {
-            a.git_pull_act("Checking out\u{2026}", PullRequestRequest::Checkout { number, expected_head: head_out.clone(), new_worktree: false });
-        }))
-        .child(action(app, "git-pull-browser", "Open on GitHub", false, true).on_press_tx(move |_: &mut App, tx: &mut Tx| { let _ = tx.open_url(&url); }))
-        .child(action(app, "git-pull-refresh", "Refresh", false, true).on_press(|a: &mut App| a.git_pull_read()));
-    if open && !summary.draft {
-        actions = actions.child(action(app, "git-pull-merge", if pulls.merge_menu { "Merge \u{25b4}" } else { "Merge \u{25be}" }, false, !busy)
-            .on_press(|a: &mut App| a.git_panel.pulls.merge_menu = !a.git_panel.pulls.merge_menu));
-    }
-    let _ = (state, color);
     let mut top = col().w_full().gap(10.0 * s)
-        .child(text(summary.title.clone()).font(app.ty.sans(21.0, 650.0)).color(rgb(p.fg)).wrap().w_full())
-        .child(row().w_full().gap(8.0 * s).center_y().wrap()
-            .child(text(format!("{} wants to merge", summary.author)).font(app.ty.sans(12.5, 400.0)).color(rgb(p.dim)))
-            .child(text(summary.head_branch.clone()).font(app.ty.sized(11.5)).color(rgb(p.fg)))
-            .child(text("into").font(app.ty.sans(12.5, 400.0)).color(rgb(p.dim)))
-            .child(text(summary.base_branch.clone()).font(app.ty.sized(11.5)).color(rgb(p.fg))))
-        .child(actions);
-    if pulls.merge_menu && open {
-        let mut methods = row().gap(8.0 * s).center_y().wrap().child(text("Merge with").font(app.ty.sans(12.0, 400.0)).color(rgb(p.muted)));
-        for (name, method) in [("Squash and merge", PullRequestMergeMethod::Squash), ("Merge commit", PullRequestMergeMethod::Merge), ("Rebase and merge", PullRequestMergeMethod::Rebase)] {
-            let head = head_merge.clone();
-            methods = methods.child(action(app, &format!("git-pull-merge:{name}"), name, false, !busy).on_press(move |a: &mut App| {
-                a.git_pull_act("Merging\u{2026}", PullRequestRequest::Merge { number, expected_head: head.clone(), method });
-            }));
-        }
-        top = top.child(methods);
-    }
+        .child(row().w_full().gap(10.0 * s).center_y().wrap()
+            .child(text(format!("{} wants to merge into {}", summary.author, summary.base_branch)).font(app.ty.sans(12.5, 400.0)).color(rgb(p.dim)))
+            .child(el().grow(1.0))
+            .child(action(app, "git-pull-diff", &format!("Review {} changed files", detail.files.len()), true, true).on_press(|a: &mut App| a.git_pull_diff())));
     if let Some(working) = pulls.working { top = top.child(text(working).font(app.ty.sans(12.0, 400.0)).color(rgb(p.dim))); }
     if let Some(error) = &pulls.detail_error { top = top.child(text(error.clone()).key("git-pull-error").font(app.ty.sans(12.0, 400.0)).color(rgb(p.red)).wrap().w_full()); }
     if let Some(notice) = &pulls.notice { top = top.child(text(notice.clone()).key("git-pull-notice").font(app.ty.sans(12.0, 400.0)).color(rgb(p.green))); }

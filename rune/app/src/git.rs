@@ -14,6 +14,7 @@ mod actions;
 mod issues;
 mod pulls;
 mod review;
+mod tree;
 pub use actions::{Step, Sync, Tab};
 pub use review::{Review, review};
 use review::Scope;
@@ -59,6 +60,9 @@ pub struct State {
     notice: Option<String>,
     /// The last commit's first line, for a pull request's title.
     subject: String,
+    /// Folders folded shut in the file lists, and the panel's rows as a tree.
+    closed: std::collections::HashSet<String>,
+    tree: Vec<tree::Node>,
     /// Background questions about the remote; their answers never block the panel.
     aux: Vec<Pending>,
     diff_scroll: Rc<Cell<(f32, f32)>>,
@@ -81,6 +85,21 @@ impl Pending {
 impl State {
     pub fn review_open(&self) -> bool { self.selected.is_some() }
 
+    /// Lay the changed files out as the folder tree again.
+    pub(super) fn retree(&mut self) {
+        self.tree = tree::rows(self.files.iter().map(|f| f.path.as_str()), &self.closed);
+        self.cursor = self.cursor.min(self.tree.len().saturating_sub(1));
+        self.epoch = self.epoch.wrapping_add(1);
+    }
+
+    /// The files a tree row stands for: the file itself, or everything under a folder.
+    fn under(&self, node: &tree::Node) -> Vec<&GitFileChange> {
+        match node {
+            tree::Node::File { index, .. } => self.files.get(*index).into_iter().collect(),
+            tree::Node::Dir { path, .. } => self.files.iter().filter(|f| f.path.starts_with(&format!("{path}/"))).collect(),
+        }
+    }
+
     /// Returns whether the files changed, so a diff is only fetched again when it would differ.
     fn set_files(&mut self, files: Vec<GitFileChange>, branch: Option<String>) -> bool {
         let changed = self.files != files;
@@ -88,7 +107,7 @@ impl State {
             self.totals = files.iter().fold((0, 0, 0), |(a, d, n), f|
                 (a + f.additions as u64, d + f.deletions as u64, n + usize::from(f.staged)));
             self.files = files;
-            self.cursor = self.cursor.min(self.files.len().saturating_sub(1));
+            self.retree();
             self.epoch = self.epoch.wrapping_add(1);
         }
         self.branch = branch;
@@ -161,15 +180,22 @@ impl App {
         if self.git_panel.pending.is_some() { self.git_look(); }
     }
 
+    /// Stage a file or a whole folder, or unstage it when all of it is staged already.
     fn git_stage(&mut self, path: &str) {
         self.focus = Focus::Details;
         self.git_panel.message.focused = false;
         if self.git_panel.pending.is_some() { return; }
-        let Some(file) = self.git_panel.files.iter().find(|f| f.path == path) else { return; };
-        let message = if file.staged { GitClientMessage::Unstage { path: path.into() } }
-            else { GitClientMessage::Stage { path: path.into() } };
+        let prefix = format!("{path}/");
+        let mut under = self.git_panel.files.iter().filter(|f| f.path == path || f.path.starts_with(&prefix)).peekable();
+        if under.peek().is_none() { return; }
+        let message = if under.all(|f| f.staged) { GitClientMessage::Unstage { path: path.into() } } else { GitClientMessage::Stage { path: path.into() } };
         self.git_panel.error = None;
         self.git_panel.pending = self.git_request(message, Operation::Write);
+    }
+
+    fn git_fold(&mut self, path: &str) {
+        if !self.git_panel.closed.remove(path) { self.git_panel.closed.insert(path.into()); }
+        self.git_panel.retree();
     }
 
     fn git_commit(&mut self) {
@@ -256,20 +282,27 @@ impl App {
                 Key::Escape if self.git_panel.branch_menu || self.git_panel.action_menu => { self.git_panel.branch_menu = false; self.git_panel.action_menu = false; }
                 Key::Escape => self.toggle_git_panel(),
                 Key::Up => self.git_panel.cursor = self.git_panel.cursor.saturating_sub(1),
-                Key::Down => self.git_panel.cursor = (self.git_panel.cursor + 1).min(self.git_panel.files.len().saturating_sub(1)),
+                Key::Down => self.git_panel.cursor = (self.git_panel.cursor + 1).min(self.git_panel.tree.len().saturating_sub(1)),
                 Key::Home => self.git_panel.cursor = 0,
-                Key::End => self.git_panel.cursor = self.git_panel.files.len().saturating_sub(1),
-                Key::Enter => {
-                    if let Some(path) = self.git_panel.files.get(self.git_panel.cursor).map(|f| f.path.clone()) { self.open_git_review(&path); }
-                }
+                Key::End => self.git_panel.cursor = self.git_panel.tree.len().saturating_sub(1),
+                Key::Enter | Key::Left | Key::Right => match self.git_panel.tree.get(self.git_panel.cursor).cloned() {
+                    Some(tree::Node::Dir { path, .. }) => self.git_fold(&path),
+                    Some(tree::Node::File { index, .. }) if event.key == Key::Enter => { if let Some(path) = self.git_panel.files.get(index).map(|f| f.path.clone()) { self.open_git_review(&path); } }
+                    _ => {}
+                },
                 Key::Text(ref t) if t == " " => {
-                    if let Some(path) = self.git_panel.files.get(self.git_panel.cursor).map(|f| f.path.clone()) { self.git_stage(&path); }
+                    let path = match self.git_panel.tree.get(self.git_panel.cursor) {
+                        Some(tree::Node::Dir { path, .. }) => Some(path.clone()),
+                        Some(tree::Node::File { index, .. }) => self.git_panel.files.get(*index).map(|f| f.path.clone()),
+                        None => None,
+                    };
+                    if let Some(path) = path { self.git_stage(&path); }
                 }
                 Key::Tab => self.git_panel.message.focused = true,
                 _ => {},
             }
             self.git_panel.epoch = self.git_panel.epoch.wrapping_add(1);
-            let row = self.git_panel.cursor as f32 * 26.0 * self.ty.scale();
+            let row = self.git_panel.cursor as f32 * FILE_H * self.ty.scale();
             tx.scroll_to(format!("git-files:{}", self.cwd), 0.0, row);
             return true;
         }
@@ -304,6 +337,8 @@ fn button(app: &App, label: &str) -> El {
 const HEAD_H: f32 = 40.0;
 const BRANCH_H: f32 = 36.0;
 const ACTION_H: f32 = 34.0;
+const MESSAGE_H: f32 = 56.0;
+const FILE_H: f32 = 26.0;
 
 pub fn view(app: &App) -> El {
     if !app.git_panel.open { return el(); }
@@ -331,7 +366,8 @@ pub fn view(app: &App) -> El {
     col().key("git-panel").w(WIDTH * s).h_full().padding(6.0 * s).child(card)
 }
 
-/// The Changes tab: branch, the one smart action, what changed, the files and the message.
+/// The Changes tab, top to bottom as the work goes: the branch, the message, the one button
+/// that acts on it, then what changed as a folder tree.
 fn changes(app: &App, card: El) -> El {
     use crate::ui::feather::{self, Icon};
     let p = app.pal;
@@ -354,7 +390,17 @@ fn changes(app: &App, card: El) -> El {
     } else if state.sync.as_ref().is_some_and(|sync| sync.has_remote) && state.upstream.is_none() && state.branch.is_some() {
         branch = branch.child(text("not published").font(app.ty.sans(11.0, 450.0)).color(rgb(p.muted)).pr(6.0 * s));
     }
-    // The one button, and the chevron beside it.
+    // The message, then the button that uses it.
+    let input = rune::text_input(&state.message, app.ty.sans(13.0, 400.0).lh(18.0 * s)).key("git-commit-message")
+        .w_full().h(MESSAGE_H * s).px(10.0 * s).py(8.0 * s).radius(9.0 * s).fill(rgb(p.surface)).border(s, rgb(p.border))
+        .color(rgb(p.fg)).placeholder("Message (empty writes one from the files)", rgb(p.muted))
+        .on_edit(|a: &mut App| { a.focus = Focus::Details; &mut a.git_panel.message })
+        .on_input_key(|a: &mut App, e: &KeyEvent, tx: &mut Tx| {
+            if crate::keys::shortcut(a, e, tx) { return true; }
+            if e.key == Key::Escape { a.git_panel.message.focused = false; return true; }
+            if e.key == Key::Enter && e.mods.cmd { a.git_commit(); return true; }
+            false
+        });
     let quick = state.quick();
     let enabled = !quick.steps.is_empty() && !busy;
     let label = if busy { state.running.unwrap_or("Working\u{2026}") } else { quick.label };
@@ -375,35 +421,42 @@ fn changes(app: &App, card: El) -> El {
         (None, _, Some(hint)) if !busy => (Some(hint.to_owned()), p.muted),
         _ => (None, p.muted),
     };
-    let mut action = col().w_full().px(14.0 * s).pb(8.0 * s).gap(6.0 * s).child(split);
-    if let Some(note) = note { action = action.child(text(note).key("git-note").font(app.ty.sans(11.5, 400.0)).color(rgb(ink)).wrap().max_h(64.0 * s)); }
-    // What changed, as one row that opens the diff.
-    let scope = row().key("git-changes").w_full().h(32.0 * s).px(14.0 * s).gap(8.0 * s).center_y().hover(rgb(p.hover))
-        .child(text("Changes").font(app.ty.sans(12.5, 600.0)).color(rgb(p.fg)))
-        .child(text(if state.files.is_empty() { "None".to_owned() } else { format!("{} uncommitted", state.files.len()) }).font(app.ty.sans(12.0, 400.0)).color(rgb(p.muted)).grow(1.0))
+    let mut compose = col().w_full().px(12.0 * s).pb(10.0 * s).gap(8.0 * s).child(input).child(split);
+    if let Some(note) = note { compose = compose.child(text(note).key("git-note").font(app.ty.sans(11.5, 400.0)).color(rgb(ink)).wrap().max_h(64.0 * s)); }
+    let mut top = col().w_full().child(branch).child(compose);
+    if let Some(pr) = &state.pr {
+        let number = pr.number;
+        let (word, color) = pulls::state_of(pr, p);
+        top = top.child(row().key("git-pr").w_full().h(30.0 * s).px(14.0 * s).gap(8.0 * s).center_y().hover(rgb(p.hover))
+            .child(pill(app, word, color))
+            .child(text(pr.title.clone()).font(app.ty.sans(12.5, 500.0)).color(rgb(p.fg)).truncate().grow(1.0).shrink())
+            .child(text(format!("#{number}")).font(app.ty.sized(11.0)).color(rgb(p.muted)))
+            .on_press(move |a: &mut App| a.open_git_pull(number)));
+    }
+    // What changed: a heading that opens the whole diff, then the tree.
+    let all_staged = !state.files.is_empty() && state.files.iter().all(|f| f.staged);
+    let heading = row().key("git-changes").w_full().h(32.0 * s).pl(14.0 * s).pr(10.0 * s).gap(8.0 * s).center_y().border_sides([1.0, 0.0, 0.0, 0.0], rgb(p.border))
+        .child(text("Changes").font(app.ty.sans(12.0, 600.0)).color(rgb(p.fg)))
+        .child(text(state.files.len().to_string()).font(app.ty.sans(11.5, 500.0)).color(rgb(p.muted)))
         .child(text(format!("+{}", state.totals.0)).font(app.ty.sized(11.0)).color(rgb(p.green)))
         .child(text(format!("\u{2212}{}", state.totals.1)).font(app.ty.sized(11.0)).color(rgb(p.red)))
-        .on_press(|a: &mut App| a.open_git_changes());
-    let mut top = col().w_full().child(branch).child(action).child(scope);
-    if let Some(pr) = &state.pr {
-        let url = pr.url.clone();
-        let open = pr.state.eq_ignore_ascii_case("open");
-        top = top.child(row().key("git-pr").w_full().h(32.0 * s).px(14.0 * s).gap(8.0 * s).center_y().hover(rgb(p.hover))
-            .child(text(format!("#{}", pr.number)).font(app.ty.sized(11.0)).color(rgb(p.muted)))
-            .child(text(pr.title.clone()).font(app.ty.sans(12.5, 500.0)).color(rgb(p.fg)).truncate().grow(1.0).shrink())
-            .child(pill(app, if pr.draft { "draft" } else if open { "open" } else if pr.state.eq_ignore_ascii_case("merged") { "merged" } else { "closed" },
-                if pr.draft { p.muted } else if open { p.green } else if pr.state.eq_ignore_ascii_case("merged") { p.magenta } else { p.red }))
-            .on_press_tx(move |_: &mut App, tx: &mut Tx| { let _ = tx.open_url(&url); }));
-    }
-    let rows = col().w_full().growth(rune::GrowthSpec::default()).virtual_rows(state.files.len(), 26.0 * s,
-        |a: &App, i| a.git_panel.files[i].path.clone().into(),
+        .child(el().grow(1.0))
+        .child_if(!state.files.is_empty(), || el().key("git-stage-all").h(22.0 * s).px(8.0 * s).center().radius(6.0 * s).hover(rgb(p.hover))
+            .child(text(if all_staged { "Unstage all" } else { "Stage all" }).font(app.ty.sans(11.5, 500.0)).color(rgb(p.dim)))
+            .on_press(move |a: &mut App| {
+                if a.git_panel.pending.is_some() { return; }
+                a.git_panel.pending = a.git_request(if all_staged { GitClientMessage::Unstage { path: ".".into() } } else { GitClientMessage::StageAll }, Operation::Write);
+            }))
+        .child_if(!state.files.is_empty(), || el().key("git-open-diff").h(22.0 * s).px(8.0 * s).center().radius(6.0 * s).hover(rgb(p.hover))
+            .child(text("Open diff").font(app.ty.sans(11.5, 500.0)).color(rgb(p.dim))).on_press(|a: &mut App| a.open_git_changes()));
+    let rows = col().w_full().growth(rune::GrowthSpec::default()).virtual_rows(state.tree.len(), FILE_H * s,
+        |_: &App, i| format!("git-row:{i}").into(),
         |a: &App, i| file_row(a, i)).virtual_rows_version(state.epoch);
     let key = format!("git-files:{}", app.cwd);
     let mirror = state.file_scroll.clone();
     let source = mirror.clone();
     let wheel_key = key.clone();
-    let mut list = col().key(key).w_full().grow(1.0).shrink().scroll(ScrollSpec { stick_bottom: false })
-        .border_sides([1.0, 0.0, 0.0, 0.0], rgb(p.border)).pt(4.0 * s)
+    let mut list = col().key(key).w_full().grow(1.0).shrink().scroll(ScrollSpec { stick_bottom: false }).px(4.0 * s).pb(6.0 * s)
         .on_scroll_offset(move |pos| mirror.set((pos.offset[1], pos.max[1])))
         .on_wheel(move |a: &mut App, e: WheelEvent, tx: &mut Tx| {
             let source = source.clone();
@@ -411,21 +464,11 @@ fn changes(app: &App, card: El) -> El {
         }).child(rows);
     if state.files.is_empty() {
         list = if !state.loaded && state.pending.is_some() { list.child(skeleton(app, 4)) } else {
-            list.child(text(if !state.loaded { "Refresh to load changes" } else { "No uncommitted changes." }).font(app.ty.sans(12.0, 400.0)).color(rgb(p.muted)).padding(14.0 * s))
+            list.child(text(if !state.loaded { "Refresh to load changes" } else { "No uncommitted changes." }).font(app.ty.sans(12.0, 400.0)).color(rgb(p.muted)).padding(10.0 * s))
         };
     }
-    let input = rune::text_input(&state.message, app.ty.sans(12.5, 400.0)).key("git-commit-message")
-        .w_full().h(72.0 * s).padding(10.0 * s).radius(10.0 * s).fill(rgb(p.surface)).border(s, rgb(p.border))
-        .color(rgb(p.fg)).placeholder("Commit message. Leave empty to write one from the files.", rgb(p.muted))
-        .on_edit(|a: &mut App| { a.focus = Focus::Details; &mut a.git_panel.message })
-        .on_input_key(|a: &mut App, e: &KeyEvent, tx: &mut Tx| {
-            if crate::keys::shortcut(a, e, tx) { return true; }
-            if e.key == Key::Escape { a.git_panel.message.focused = false; return true; }
-            if e.key == Key::Enter && e.mods.cmd { a.git_commit(); return true; }
-            false
-        });
-    let mut card = card.child(top).child(list).child(el().w_full().padding(12.0 * s).child(input));
-    // Menus float over the list, under the control that opened them.
+    let mut card = card.child(top).child(heading).child(list);
+    // Menus float over what is below the control that opened them.
     let menu = |key: &str, y: f32| col().key(key.to_owned()).absolute(10.0 * s, y * s).w((WIDTH - 32.0) * s).padding(4.0 * s).gap(s)
         .radius(10.0 * s).fill(rgb(p.bg)).border(s, rgb(p.border)).on_press(|_: &mut App| {});
     if state.branch_menu {
@@ -466,7 +509,7 @@ fn changes(app: &App, card: El) -> El {
         card = card.child(list);
     }
     if state.action_menu {
-        let mut list = menu("git-action-menu", HEAD_H + BRANCH_H + ACTION_H + 4.0);
+        let mut list = menu("git-action-menu", HEAD_H + BRANCH_H + MESSAGE_H + 8.0 + ACTION_H + 4.0);
         for (name, steps, why) in state.menu() {
             let on = !steps.is_empty() && !busy;
             let mut item = col().key(format!("git-action:{name}")).w_full().px(8.0 * s).py(6.0 * s).gap(s).radius(7.0 * s)
@@ -480,7 +523,6 @@ fn changes(app: &App, card: El) -> El {
     card
 }
 
-/// A small coloured state label.
 /// Placeholder bars where a list is still loading: a title and a line under it, per row.
 pub(super) fn skeleton(app: &App, rows: usize) -> El {
     let p = app.pal;
@@ -513,30 +555,55 @@ pub(super) fn pill(app: &App, label: &str, color: u32) -> El {
         .child(text(label.to_owned()).font(app.ty.sans(10.5, 550.0)).color(rgb(color)))
 }
 
+/// A row of the changed-files tree: a folder that folds, or a file that opens in the diff.
+/// The checkbox stages what the row stands for and never opens anything.
 fn file_row(app: &App, index: usize) -> El {
-    let f = &app.git_panel.files[index];
     let p = app.pal;
     let s = app.ty.scale();
-    let path = f.path.clone();
-    let stage_path = path.clone();
-    let (tag, color) = match f.status {
-        GitChangeStatus::Added | GitChangeStatus::Untracked => ("A", p.green),
-        GitChangeStatus::Deleted => ("D", p.red), GitChangeStatus::Renamed => ("R", p.blue),
-        GitChangeStatus::Conflict => ("!", p.red), _ => ("M", p.yellow),
+    let state = &app.git_panel;
+    let Some(node) = state.tree.get(index) else { return el().h(FILE_H * s); };
+    let under = state.under(node);
+    let staged = !under.is_empty() && under.iter().all(|f| f.staged);
+    let partly = !staged && under.iter().any(|f| f.staged);
+    let (added, deleted) = under.iter().fold((0u32, 0u32), |(a, d), f| (a + f.additions, d + f.deletions));
+    let (path, name, ink) = match node {
+        tree::Node::Dir { path, name, .. } => (path.clone(), name.clone(), p.fg),
+        tree::Node::File { index, .. } => {
+            let f = &state.files[*index];
+            (f.path.clone(), f.path.rsplit('/').next().unwrap_or(&f.path).to_owned(), match f.status {
+                GitChangeStatus::Added | GitChangeStatus::Untracked => p.green,
+                GitChangeStatus::Deleted | GitChangeStatus::Conflict => p.red,
+                _ => p.dim,
+            })
+        }
     };
-    let mut check = el().key(format!("git-stage:{}", f.path)).w(24.0 * s).h(24.0 * s).center().hover(rgb(p.hover))
-        .child(el().w(12.0 * s).h(12.0 * s).radius(2.0 * s).border(1.0, rgb(if f.staged { p.green } else { p.muted })).center()
-            .child_if(f.staged, || text("\u{f00c}").font(app.ty.icon_sized(9.0)).color(rgb(p.green))));
-    if app.git_panel.pending.is_none() { check = check.on_press(move |a: &mut App| a.git_stage(&stage_path)); }
-    // Checkbox and file label have disjoint hit regions: staging never opens a review.
-    row().w_full().h(26.0 * s).px(8.0 * s).center_y()
-        .fill(rgb(if app.focus == Focus::Details && app.git_panel.cursor == index { p.hover } else { panel_bg(p) })).child(check)
-        .child(row().key(format!("git-file:{}", f.path)).h_full().grow(1.0).shrink().gap(6.0 * s).center_y().hover(rgb(p.hover))
-            .on_press(move |a: &mut App| a.open_git_review(&path))
-            .child(text(tag).font(app.ty.sized(11.0)).color(rgb(color)))
-            .child(text(f.path.clone()).font(app.ty.sans(12.5, 400.0)).color(rgb(p.dim)).truncate().grow(1.0).shrink())
-            .child(text(format!("+{}", f.additions)).font(app.ty.sized(10.0)).color(rgb(p.green)))
-            .child(text(format!("−{}", f.deletions)).font(app.ty.sized(10.0)).color(rgb(p.red))))
+    let is_dir = matches!(node, tree::Node::Dir { .. });
+    let tag = match node {
+        tree::Node::File { index, .. } => Some(match state.files[*index].status {
+            GitChangeStatus::Added | GitChangeStatus::Untracked => ("A", p.green),
+            GitChangeStatus::Deleted => ("D", p.red), GitChangeStatus::Renamed => ("R", p.blue),
+            GitChangeStatus::Conflict => ("!", p.red), _ => ("M", p.yellow),
+        }),
+        _ => None,
+    };
+    let (stage_path, press_path) = (path.clone(), path.clone());
+    let mut check = el().key(format!("git-stage:{path}")).w(24.0 * s).h_full().center()
+        .child(el().w(13.0 * s).h(13.0 * s).radius(3.0 * s).border(s, rgb(if staged || partly { p.green } else { p.muted })).center()
+            .fill(if staged { rgb(p.green).alpha(0.18) } else { rune::Color::TRANSPARENT })
+            .child_if(staged, || text("\u{f00c}").font(app.ty.icon_sized(9.0)).color(rgb(p.green)))
+            .child_if(partly, || el().w(7.0 * s).h(2.0 * s).radius(s).fill(rgb(p.green))));
+    if state.pending.is_none() { check = check.on_press(move |a: &mut App| a.git_stage(&stage_path)); }
+    let mut line = row().key(format!("git-file:{path}")).h_full().grow(1.0).shrink().gap(6.0 * s).center_y()
+        .child(tree::label(app, node, &name, ink))
+        .on_press(move |a: &mut App| { a.git_panel.cursor = index; if is_dir { a.git_fold(&press_path) } else { a.open_git_review(&press_path) } });
+    if let Some((tag, color)) = tag { line = line.child(text(tag).font(app.ty.sized(10.5)).color(rgb(color))); }
+    if added + deleted > 0 && !is_dir {
+        line = line.child(text(format!("+{added}")).font(app.ty.sized(10.0)).color(rgb(p.green)))
+            .child(text(format!("\u{2212}{deleted}")).font(app.ty.sized(10.0)).color(rgb(p.red)));
+    }
+    row().w_full().h(FILE_H * s).pl(4.0 * s).pr(8.0 * s).center_y().radius(6.0 * s)
+        .fill(if app.focus == Focus::Details && state.cursor == index { rgb(p.hover) } else { rune::Color::TRANSPARENT }).hover(rgb(p.hover).alpha(0.6))
+        .child(check).child(line)
 }
 
 /// Deterministic, daemon-free scenes for `git-panel` / `git-review` headless captures.

@@ -5,6 +5,9 @@ use super::pulls::{action, comment, day, section};
 use super::*;
 use neoism_protocol::issue::*;
 
+/// How long a list may go unanswered before the panel says the daemon is too old.
+const UNANSWERED: std::time::Duration = std::time::Duration::from_secs(8);
+
 #[derive(Default)]
 pub struct Issues {
     pub(super) filter: IssueFilter,
@@ -23,6 +26,8 @@ pub struct Issues {
     pub(super) body: TextEdit,
     /// Issues already read, so opening one again shows at once while it refreshes.
     cache: std::collections::HashMap<u64, IssueDetail>,
+    /// When the list was asked for: a daemon older than issues never answers.
+    asked: Option<std::time::Instant>,
 }
 
 impl Issues {
@@ -51,7 +56,17 @@ impl App {
         let request = IssueRequest::List { query: issues.query.text.trim().to_owned(), filter: issues.filter, mine: issues.mine };
         issues.error = None;
         self.git_panel.issues.listing = self.git_request(GitClientMessage::Issue { request }, Operation::Remote);
+        self.git_panel.issues.asked = Some(std::time::Instant::now());
         if self.git_panel.issues.listing.is_none() { self.git_panel.issues.error = self.git_panel.error.take(); }
+    }
+
+    /// Give up on a list a daemon never answered, and say why (called each frame).
+    pub fn git_issues_tick(&mut self, tx: &mut Tx) {
+        let issues = &mut self.git_panel.issues;
+        let (Some(_), Some(asked)) = (&issues.listing, issues.asked) else { return; };
+        if asked.elapsed() < UNANSWERED { tx.wake_after(std::time::Duration::from_millis(500)); return; }
+        (issues.listing, issues.asked, issues.loaded) = (None, None, true);
+        issues.error = Some("No answer from the workspace daemon. Issues need the daemon from this version of Neoism; update and restart it.".into());
     }
 
     /// Open an issue in the diff tab.

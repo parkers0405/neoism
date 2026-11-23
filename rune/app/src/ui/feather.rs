@@ -29,6 +29,17 @@ pub enum Icon {
     Checklist,
     Plug,
     Wrench,
+    // The diff's view options (`git/review.rs`).
+    Columns,
+    Rows,
+    Fold,
+    Unfold,
+    SidePane,
+    Refresh,
+    Comment,
+    External,
+    Merge,
+    Download,
 }
 
 impl Icon {
@@ -54,6 +65,16 @@ impl Icon {
             Icon::Branch => r#"<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>"#,
             Icon::Checklist => r#"<polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>"#,
             Icon::Plug => r#"<path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8z"/>"#,
+            Icon::Columns => r#"<rect x="3" y="3" width="18" height="18" rx="2"/><line x1="12" y1="3" x2="12" y2="21"/>"#,
+            Icon::Rows => r#"<rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="12" x2="21" y2="12"/>"#,
+            Icon::Fold => r#"<polyline points="7 20 12 15 17 20"/><polyline points="7 4 12 9 17 4"/>"#,
+            Icon::Unfold => r#"<polyline points="7 15 12 20 17 15"/><polyline points="7 9 12 4 17 9"/>"#,
+            Icon::SidePane => r#"<rect x="3" y="3" width="18" height="18" rx="2"/><line x1="15" y1="3" x2="15" y2="21"/>"#,
+            Icon::Refresh => r#"<polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>"#,
+            Icon::Comment => r#"<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>"#,
+            Icon::External => r#"<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>"#,
+            Icon::Merge => r#"<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/>"#,
+            Icon::Download => r#"<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>"#,
             Icon::Wrench => r#"<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>"#,
         }
     }

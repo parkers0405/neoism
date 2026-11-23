@@ -73,6 +73,8 @@ pub struct Review {
     pub(super) width: f32,
     /// The rows in blocks of at most `CHUNK`, each within one file.
     pub(super) chunks: Vec<std::ops::Range<usize>>,
+    /// The longest shown line, in characters: how wide the diff is when lines don't wrap.
+    pub(super) longest: usize,
     pub(super) scope_menu: bool,
     /// The line a comment is being written on: file and line index.
     pub(super) target: Option<(usize, usize)>,
@@ -121,6 +123,7 @@ impl Review {
                 i += removed + added;
             }
         }
+        self.longest = self.files.iter().filter(|f| !f.collapsed).flat_map(|f| &f.lines).map(|l| l.text.chars().count()).max().unwrap_or(0);
         // Cut the rows into blocks: a new one at each file, and every `CHUNK` rows within it.
         self.chunks.clear();
         let mut start = 0;
@@ -197,7 +200,8 @@ pub(super) fn parse_patch(patch: &str) -> Vec<Line> {
         }
         // The path already heads the file; retain meaningful metadata (binary, rename,
         // modes) but omit redundant transport headers.
-        if kind == Kind::Meta && (raw.starts_with("diff --git ") || raw.starts_with("index ") || raw.starts_with("--- ") || raw.starts_with("+++ ")) { continue; }
+        // File modes say nothing a reader of the diff needs: the header already shows a file is new or gone.
+        if kind == Kind::Meta && ["diff --git ", "index ", "--- ", "+++ ", "new file mode ", "deleted file mode ", "old mode ", "new mode "].iter().any(|p| raw.starts_with(p)) { continue; }
         rows.push(Line { kind, old: old_no, new: new_no, text: content.into() });
     }
     rows
@@ -434,7 +438,9 @@ pub fn review(app: &App) -> El {
         .child(icon_tool(app, "git-review-files", Icon::SidePane, "File list", review.show_files).on_press(|a: &mut App| a.git_panel.review.show_files = !a.git_panel.review.show_files))
         // A pull request's own bar already has Refresh.
         .child_if(!pull, || icon_tool(app, "git-review-refresh", Icon::Refresh, "Refresh", false).on_press(|a: &mut App| a.load_git_review()));
-    let rows = col().w_full().growth(rune::GrowthSpec::default()).virtual_rows(review.chunks.len(), CHUNK as f32 * ROW * s,
+    // Unwrapped, the rows are as wide as the longest line and the view scrolls sideways too.
+    let rows = if review.no_wrap { col().w(content_width(app)) } else { col().w_full() };
+    let rows = rows.growth(rune::GrowthSpec::default()).virtual_rows(review.chunks.len(), CHUNK as f32 * ROW * s,
         |_: &App, i| format!("diff:{i}").into(), |a: &App, i| chunk(a, i))
         .virtual_rows_version(state.epoch);
     let mirror = state.diff_scroll.clone();
@@ -443,6 +449,7 @@ pub fn review(app: &App) -> El {
         .on_scroll_offset(move |pos| mirror.set((pos.offset[1], pos.max[1])))
         .on_layout(|a: &mut App, r: [f32; 4]| a.git_review_measure(r[2]))
         .on_wheel(|a: &mut App, e: WheelEvent, tx: &mut Tx| a.git_review_wheel(&e, tx)).child(rows);
+    if review.no_wrap { list = list.scroll_xy(); }
     if let Some(error) = &state.diff_error {
         list = list.child(text(error.clone()).font(app.ty.sans(12.5, 400.0)).color(rgb(p.red)).padding(18.0 * s).wrap());
     } else if review.files.is_empty() {
@@ -591,6 +598,16 @@ fn code(app: &App, lang: Option<&str>, line: &Line, numbers: &[Option<usize>], p
     rune::rich(out, spans).font(style).color(rgb(p.fg)).w(width)
 }
 
+/// How wide the diff's rows are when lines don't wrap: the longest line with its gutter, and
+/// never narrower than the view.
+fn content_width(app: &App) -> f32 {
+    let review = &app.git_panel.review;
+    let advance = rune::text::advance("m", app.ty.sized(12.0)).max(1.0);
+    let gutter = if review.split { DIGITS + 1 } else { 2 * (DIGITS + 1) } + 3;
+    let side = (gutter + review.longest) as f32 * advance + 16.0 * app.ty.scale();
+    (if review.split { side * 2.0 + app.ty.scale() } else { side }).max(review.width)
+}
+
 /// A file's header: the folder dimmed, the name bold (a click opens the file), its counts.
 /// A click anywhere else on it folds the file.
 fn file_header(app: &App, f: usize) -> El {
@@ -601,8 +618,8 @@ fn file_header(app: &App, f: usize) -> El {
     let (tag, color) = status_tag(file.status, p);
     let path = file.path.clone();
     let (dir, name) = file.path.rsplit_once('/').map_or((String::new(), file.path.clone()), |(d, n)| (format!("{d}/"), n.to_owned()));
-    row().key(format!("git-diff-file:{}", file.path)).w_full().h(ROW * s).px(10.0 * s).gap(8.0 * s).center_y()
-        .fill(rgb(panel_bg(p))).border_sides([1.0, 0.0, 1.0, 0.0], rgb(p.border)).hover(rgb(p.hover))
+    let review = &app.git_panel.review;
+    let mut labels = row().h_full().px(10.0 * s).gap(8.0 * s).center_y()
         .child(feather::view(app, if file.collapsed { Icon::Right } else { Icon::Down }, 13.0 * s, p.muted))
         .child(row().key(format!("git-diff-open:{}", file.path)).center_y().shrink()
             .child(text(dir).font(app.ty.sans(12.5, 400.0)).color(rgb(p.muted)).truncate().shrink())
@@ -611,7 +628,12 @@ fn file_header(app: &App, f: usize) -> El {
         .child(el().h(16.0 * s).px(5.0 * s).center().radius(4.0 * s).fill(rgb(color).alpha(0.16)).child(text(tag).font(app.ty.sized(10.0)).color(rgb(color))))
         .child(el().grow(1.0))
         .child(text(format!("+{}", file.additions)).font(app.ty.sized(11.0)).color(rgb(p.green)))
-        .child(text(format!("\u{2212}{}", file.deletions)).font(app.ty.sized(11.0)).color(rgb(p.red)))
+        .child(text(format!("\u{2212}{}", file.deletions)).font(app.ty.sized(11.0)).color(rgb(p.red)));
+    // Scrolled sideways, the bar runs the diff's full width and its labels stay in the view.
+    labels = if review.no_wrap && review.width > 0.0 { labels.w(review.width).sticky_left(0.0) } else { labels.w_full() };
+    row().key(format!("git-diff-file:{}", file.path)).w_full().h(ROW * s)
+        .fill(rgb(panel_bg(p))).border_sides([1.0, 0.0, 1.0, 0.0], rgb(p.border)).hover(rgb(p.hover))
+        .child(labels)
         .on_press(move |a: &mut App| {
             if let Some(file) = a.git_panel.review.files.get_mut(f) { file.collapsed = !file.collapsed; }
             a.git_review_relayout();

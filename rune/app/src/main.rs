@@ -373,6 +373,7 @@ fn main() {
             ("git-pull-loading", |s| { git::pulls_fixture(s, true); s.git_panel.pulls.detail = None; }),
             ("git-issues", |s| git::issues_fixture(s, false)),
             ("git-issue", |s| git::issues_fixture(s, true)),
+            ("git-review-nowrap", |s| { git::fixture(s, true); s.git_panel.review.no_wrap = true; s.git_review_fixture_relayout(); }),
             ("git-review-split", |s| { git::fixture(s, true); s.git_panel.review.split = true; s.git_review_fixture_relayout(); }),
             ("agent-new", |s| { s.open_tab(tabs::TabKind::Agent { session: None }); }),
             ("usage", |s| s.usage_fixture("accounts")),

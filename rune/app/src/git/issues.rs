@@ -163,7 +163,7 @@ pub(super) fn list(app: &App, card: El) -> El {
     filters = filters.child(chip("git-issues-filter:Mine".into(), "Mine", issues.mine)
         .on_press(|a: &mut App| { a.git_panel.issues.mine = true; a.git_panel.issues.filter = IssueFilter::Open; a.git_issues_load(); }));
     let search = rune::text_input(&issues.query, app.ty.sans(12.5, 400.0)).key("git-issues-query").w_full().h(30.0 * s).px(10.0 * s).py(7.0 * s).single_line()
-        .radius(8.0 * s).fill(rgb(p.surface)).border(s, rgb(p.border)).color(rgb(p.fg)).placeholder("Search issues, then Enter", rgb(p.muted))
+        .radius(8.0 * s).fill(rgb(p.surface)).border(s, rgb(p.border)).color(rgb(p.fg)).placeholder("Search", rgb(p.muted)).caret(rune::Color::TRANSPARENT, crate::ui::cursor::selection(app))
         .on_edit(|a: &mut App| { a.focus = Focus::Details; &mut a.git_panel.issues.query })
         .on_input_key(|a: &mut App, e: &KeyEvent, tx: &mut Tx| {
             if e.key == Key::Enter { a.git_issues_load(); return true; }
@@ -247,8 +247,9 @@ pub(super) fn detail(app: &App) -> El {
     if let Some(error) = &issues.detail_error { top = top.child(text(error.clone()).key("git-issue-error").font(app.ty.sans(12.0, 400.0)).color(rgb(p.red)).wrap().w_full()); }
     if let Some(notice) = &issues.notice { top = top.child(text(notice.clone()).font(app.ty.sans(12.0, 400.0)).color(rgb(p.green))); }
     let mut page = col().w_full().max_w(880.0 * s).padding(24.0 * s).gap(20.0 * s).child(top);
-    page = page.child(text(if detail.body.trim().is_empty() { "No description.".to_owned() } else { detail.body.trim().to_owned() })
-        .font(app.ty.sans(13.5, 400.0).lh(20.0 * s)).color(rgb(if detail.body.trim().is_empty() { p.muted } else { p.dim })).wrap().w_full());
+    if !detail.body.trim().is_empty() {
+        page = page.child(col().w_full().min_w(0.0).child(prose(app, format!("git-issue-body:{number}"), &detail.body)));
+    }
     if !detail.comments.is_empty() {
         let mut block = section(app, "Comments", Some(detail.comments.len()));
         for c in &detail.comments { block = block.child(comment(app, &c.author, &c.created_at, &c.body)); }
@@ -256,7 +257,7 @@ pub(super) fn detail(app: &App) -> El {
     }
     page = page.child(section(app, "Reply", None)
         .child(rune::text_input(&issues.body, app.ty.sans(13.0, 400.0)).key("git-issue-body").w_full().h(84.0 * s).padding(10.0 * s)
-            .radius(10.0 * s).fill(rgb(p.surface)).border(s, rgb(p.border)).color(rgb(p.fg)).placeholder("Write a comment", rgb(p.muted))
+            .radius(10.0 * s).fill(rgb(p.surface)).border(s, rgb(p.border)).color(rgb(p.fg)).placeholder("Comment", rgb(p.muted)).caret(rune::Color::TRANSPARENT, crate::ui::cursor::selection(app))
             .on_edit(|a: &mut App| &mut a.git_panel.issues.body)
             .on_input_key(|a: &mut App, e: &KeyEvent, _: &mut Tx| { if e.key == Key::Escape { a.git_panel.issues.body.focused = false; true } else { false } }))
         .child(row().child(action(app, "git-issue-comment", if busy { "Posting\u{2026}" } else { "Comment" }, true, !busy).on_press(|a: &mut App| a.git_issue_comment()))));

@@ -214,7 +214,7 @@ impl App {
         self.git_panel.selected = None;
         self.git_panel.diff_pending = None;
         self.git_panel.diff_dirty = false;
-        self.git_panel.review = Review { split: self.git_panel.review.split, hide_files: self.git_panel.review.hide_files, ..Review::default() };
+        self.git_panel.review = Review { split: self.git_panel.review.split, show_files: self.git_panel.review.show_files, no_wrap: self.git_panel.review.no_wrap, ..Review::default() };
         self.git_panel.pulls.open = None;
         self.git_panel.pulls.viewing = None;
         self.git_panel.issues.open = None;
@@ -280,7 +280,8 @@ impl App {
         if self.focus == Focus::Details && self.git_panel.open {
             match event.key {
                 Key::Escape if self.git_panel.branch_menu || self.git_panel.action_menu => { self.git_panel.branch_menu = false; self.git_panel.action_menu = false; }
-                Key::Escape => self.toggle_git_panel(),
+                // Escape hands the keyboard back; it never closes the panel.
+                Key::Escape => { self.focus = Focus::Content; self.git_panel.message.focused = false; }
                 Key::Up => self.git_panel.cursor = self.git_panel.cursor.saturating_sub(1),
                 Key::Down => self.git_panel.cursor = (self.git_panel.cursor + 1).min(self.git_panel.tree.len().saturating_sub(1)),
                 Key::Home => self.git_panel.cursor = 0,
@@ -307,7 +308,14 @@ impl App {
             return true;
         }
         if self.focus != Focus::Content || self.active_tab().kind != TabKind::GitDiff { return false; }
-        if event.key == Key::Escape { self.close_git_review(); return true; }
+        // Escape puts away what is open over the diff; the tab itself stays.
+        if event.key == Key::Escape {
+            let review = &mut self.git_panel.review;
+            (review.target, review.scope_menu, review.note) = (None, false, None);
+            self.git_panel.pulls.merge_menu = false;
+            self.git_panel.epoch = self.git_panel.epoch.wrapping_add(1);
+            return true;
+        }
         // Let window shortcuts run first; no review keystroke may reach the terminal below.
         let s = self.ty.scale();
         let delta = match event.key {
@@ -355,7 +363,6 @@ pub fn view(app: &App) -> El {
     let header = row().h(HEAD_H * s).w_full().pl(8.0 * s).pr(8.0 * s).center_y().border_sides([0.0, 0.0, 1.0, 0.0], rgb(p.border))
         .child(tab("Changes", Tab::Changes)).child(tab("Pull requests", Tab::Pulls)).child(tab("Issues", Tab::Issues))
         .child(el().grow(1.0))
-        .child(button(app, "↻").on_press(|a: &mut App| match a.git_panel.tab { Tab::Changes => a.refresh_git_panel(), Tab::Pulls => a.git_pulls_load(), Tab::Issues => a.git_issues_load() }))
         .child(button(app, "×").on_press(|a: &mut App| a.toggle_git_panel()));
     let card = col().w_full().h_full().fill(rgb(panel_bg(p))).border(s, rgb(p.border)).radius(14.0 * s).clip_rounded(14.0 * s).child(header);
     let card = match state.tab {
@@ -393,7 +400,7 @@ fn changes(app: &App, card: El) -> El {
     // The message, then the button that uses it.
     let input = rune::text_input(&state.message, app.ty.sans(13.0, 400.0).lh(18.0 * s)).key("git-commit-message")
         .w_full().h(MESSAGE_H * s).px(10.0 * s).py(8.0 * s).radius(9.0 * s).fill(rgb(p.surface)).border(s, rgb(p.border))
-        .color(rgb(p.fg)).placeholder("Message (empty writes one from the files)", rgb(p.muted))
+        .color(rgb(p.fg)).placeholder("Message", rgb(p.muted)).caret(rune::Color::TRANSPARENT, crate::ui::cursor::selection(app))
         .on_edit(|a: &mut App| { a.focus = Focus::Details; &mut a.git_panel.message })
         .on_input_key(|a: &mut App, e: &KeyEvent, tx: &mut Tx| {
             if crate::keys::shortcut(a, e, tx) { return true; }
@@ -418,12 +425,12 @@ fn changes(app: &App, card: El) -> El {
     let (note, ink) = match (&state.error, &state.notice, quick.hint) {
         (Some(error), _, _) => (Some(error.clone()), p.red),
         (None, Some(notice), _) if !busy => (Some(notice.clone()), p.green),
-        (None, _, Some(hint)) if !busy => (Some(hint.to_owned()), p.muted),
         _ => (None, p.muted),
     };
-    let mut compose = col().w_full().px(12.0 * s).pb(10.0 * s).gap(8.0 * s).child(input).child(split);
+    let mut compose = col().w_full().padding(12.0 * s).gap(8.0 * s).border_sides([1.0, 0.0, 0.0, 0.0], rgb(p.border));
     if let Some(note) = note { compose = compose.child(text(note).key("git-note").font(app.ty.sans(11.5, 400.0)).color(rgb(ink)).wrap().max_h(64.0 * s)); }
-    let mut top = col().w_full().child(branch).child(compose);
+    let compose = compose.child(input).child(split);
+    let mut top = col().w_full().child(branch);
     if let Some(pr) = &state.pr {
         let number = pr.number;
         let (word, color) = pulls::state_of(pr, p);
@@ -467,7 +474,7 @@ fn changes(app: &App, card: El) -> El {
             list.child(text(if !state.loaded { "Refresh to load changes" } else { "No uncommitted changes." }).font(app.ty.sans(12.0, 400.0)).color(rgb(p.muted)).padding(10.0 * s))
         };
     }
-    let mut card = card.child(top).child(heading).child(list);
+    let mut card = card.child(top).child(heading).child(list).child(compose);
     // Menus float over what is below the control that opened them.
     let menu = |key: &str, y: f32| col().key(key.to_owned()).absolute(10.0 * s, y * s).w((WIDTH - 32.0) * s).padding(4.0 * s).gap(s)
         .radius(10.0 * s).fill(rgb(p.bg)).border(s, rgb(p.border)).on_press(|_: &mut App| {});
@@ -475,7 +482,7 @@ fn changes(app: &App, card: El) -> El {
         let query = state.branch_query.text.trim().to_lowercase();
         let mut list = menu("git-branch-menu", HEAD_H + BRANCH_H - 2.0)
             .child(rune::text_input(&state.branch_query, app.ty.sans(12.5, 400.0)).key("git-branch-query").w_full().h(30.0 * s).px(8.0 * s).py(7.0 * s).single_line()
-                .radius(7.0 * s).fill(rgb(p.surface)).color(rgb(p.fg)).placeholder("Search or name a new branch", rgb(p.muted))
+                .radius(7.0 * s).fill(rgb(p.surface)).color(rgb(p.fg)).placeholder("Branch", rgb(p.muted)).caret(rune::Color::TRANSPARENT, crate::ui::cursor::selection(app))
                 .on_edit(|a: &mut App| &mut a.git_panel.branch_query)
                 .on_input_key(|a: &mut App, e: &KeyEvent, _: &mut Tx| match e.key {
                     Key::Escape => { a.git_panel.branch_menu = false; true }
@@ -509,7 +516,9 @@ fn changes(app: &App, card: El) -> El {
         card = card.child(list);
     }
     if state.action_menu {
-        let mut list = menu("git-action-menu", HEAD_H + BRANCH_H + MESSAGE_H + 8.0 + ACTION_H + 4.0);
+        // The button is at the foot of the panel, so its menu opens upward from it.
+        let mut list = col().key("git-action-menu").pin(Some(10.0 * s), None, Some(10.0 * s), Some((12.0 + ACTION_H + 6.0) * s)).padding(4.0 * s).gap(s)
+            .radius(10.0 * s).fill(rgb(p.bg)).border(s, rgb(p.border)).on_press(|_: &mut App| {});
         for (name, steps, why) in state.menu() {
             let on = !steps.is_empty() && !busy;
             let mut item = col().key(format!("git-action:{name}")).w_full().px(8.0 * s).py(6.0 * s).gap(s).radius(7.0 * s)
@@ -548,6 +557,19 @@ pub(super) fn skeleton_page(app: &App) -> El {
     page
 }
 
+/// Markdown from the host (a description, a comment) drawn as the chat draws it.
+pub(super) fn prose(app: &App, key: String, source: &str) -> El {
+    use rune_kit::markdown::Markdown;
+    let look = (app.pal as *const _ as usize, app.ty.size.to_bits(), app.ty.weight.to_bits());
+    rune::memo(key, (source, look), || {
+        Markdown::new(source.trim().to_owned())
+            .reveal(0.0).code_frame(crate::agent::timeline::code_frame(app)).selectable(true)
+            .on_link_tx(|a: &mut App, url: &str, _: &mut Tx| a.open_link(url))
+            .render(&crate::agent::timeline::markdown_style(app))
+    })
+}
+
+/// A small coloured state label.
 pub(super) fn pill(app: &App, label: &str, color: u32) -> El {
     let s = app.ty.scale();
     row().h(18.0 * s).px(7.0 * s).gap(5.0 * s).center_y().radius(9.0 * s).fill(rgb(color).alpha(0.14))
@@ -658,6 +680,30 @@ mod tests {
         rt.update(|a, tx| tx.scroll_to(review_key(a), 0.0, f32::MAX));
         for _ in 0..3 { rt.frame(1.0 / 120.0); }
         assert!(rt.elements().len() < 1000, "scrolling must keep a bounded row window");
+    }
+
+    #[test]
+    fn a_files_header_stays_at_the_top_while_its_lines_scroll() {
+        let mut app = App::new();
+        long_fixture(&mut app);
+        let mut rt = rune::Runtime::new(app, |a: &App, _: &mut rune::Cx<App>| {
+            row().w_full().h_full().child(review(a).grow(1.0).shrink()).child(view(a))
+        }, (1252.0, 674.0), rune::Env::new(true, 1.0));
+        for _ in 0..3 { rt.frame(1.0 / 120.0); }
+        let list = rt.state.git_panel.diff_scroll.clone();
+        let top = |rt: &rune::Runtime<App>| {
+            let key = review_key(&rt.state);
+            let list = rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key.as_str())).unwrap().rect[1];
+            // The nearest header to the top edge, among the mounted blocks' own.
+            rt.elements().into_iter().filter(|e| e.key.as_deref() == Some("git-diff-file:src/long.rs") && !e.exiting)
+                .filter(|e| e.opacity > 0.5).map(|e| e.rect[1] - list).fold(f32::MAX, |a, b| if b.abs() < a.abs() { b } else { a })
+        };
+        assert!(top(&rt).abs() < 1.0, "the header starts at the top of the diff");
+        // Deep into the file, in a later block of rows, a header is still at the top.
+        rt.update(|a, tx| tx.scroll_to(review_key(a), 0.0, 9_000.0));
+        for _ in 0..6 { rt.frame(1.0 / 120.0); }
+        assert!(list.get().0 > 8_000.0, "the diff scrolled: {:?}", list.get());
+        assert!(top(&rt).abs() < 1.5, "the header is held at the top, {} points from it", top(&rt));
     }
 
     #[test]

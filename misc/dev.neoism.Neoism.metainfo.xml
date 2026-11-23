@@ -52,11 +52,11 @@
   </categories>
 
   <releases>
-    <release version="0.7.165" date="2026-11-22">
+    <release version="0.7.166" date="2026-11-22">
       <description>
-        <p>Makes the Agent model picker scroll smoothly with a trackpad or touch, restores keyboard navigation in the skill picker opened by $, and keeps the Crafting indicator steady when folded steps finish.</p>
+        <p>Adds a Git panel for branch and working-tree changes, stacked and side-by-side diffs, GitHub pull request reviews, and issue conversations.</p>
       </description>
-      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.165</url>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.166</url>
     </release>
     <release version="0.7.159" date="2026-11-19">
       <description>

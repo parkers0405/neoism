@@ -2,6 +2,17 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.166] - 2026-11-22
+
+### Git changes, pull requests, and issues in one panel
+
+- Open the Git panel from the status bar's branch pill to switch or create branches, stage changes, commit, and sync.
+- Review all changed files in a single diff with a file tree, sticky file headers, stacked and side-by-side layouts, and optional wrapping. Send a line reference to the Agent composer from the diff.
+- Browse GitHub pull requests and issues through the daemon's `gh` integration. Review changes and conversations, resolve review threads, and start an Agent chat from an issue.
+- Agent tabs show the same live activity icons as the Conversations sidebar, even when the sidebar is hidden.
+
+Stable platform bundles and the daemon image use one immutable tagged source. Local and platform checks, publication, and independent download verification are reported separately.
+
 ## [0.7.165] - 2026-11-22
 
 ### Smoother Agent pickers and steadier activity

@@ -2,6 +2,16 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.168] - 2026-11-23
+
+### Steadier Agent activity, wallpaper controls, and workspace switching
+
+- Hidden tool calls no longer displace the latest visible thought in a focused conversation. Repeated provider retries show a warning under the activity line.
+- Settings > Backgrounds adds live pixelation and dithering controls alongside opacity and blur.
+- On macOS, changing the workspace directory can move the main integrated terminal with it. The workspace updates after the daemon confirms the new folder.
+
+Stable platform bundles and the daemon image use one immutable tagged source. Local and platform checks, publication, and independent download verification are reported separately.
+
 ## [0.7.167] - 2026-11-22
 
 ### Easier commit messages and smoother conversation scrolling

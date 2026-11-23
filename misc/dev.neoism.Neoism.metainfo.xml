@@ -52,11 +52,11 @@
   </categories>
 
   <releases>
-    <release version="0.7.167" date="2026-11-22">
+    <release version="0.7.168" date="2026-11-23">
       <description>
-        <p>Lets Git commit messages grow as you type, tightens collapsed diff headers, smooths the end of trackpad scrolling in Agent conversations on macOS, and preserves zsh history when terminal tabs close.</p>
+        <p>Keeps Agent activity steady during hidden tool calls, shows repeated provider retries, adds wallpaper pixelation and dithering, and improves workspace switching on macOS.</p>
       </description>
-      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.167</url>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.168</url>
     </release>
     <release version="0.7.159" date="2026-11-19">
       <description>

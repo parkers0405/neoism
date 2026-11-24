@@ -52,11 +52,11 @@
   </categories>
 
   <releases>
-    <release version="0.7.168" date="2026-11-23">
+    <release version="0.7.169" date="2026-11-23">
       <description>
-        <p>Keeps Agent activity steady during hidden tool calls, shows repeated provider retries, adds wallpaper pixelation and dithering, and improves workspace switching on macOS.</p>
+        <p>Adds a workspace Workflows panel, improves external-agent connections, and opens local images in read-only tabs.</p>
       </description>
-      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.168</url>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.169</url>
     </release>
     <release version="0.7.159" date="2026-11-19">
       <description>

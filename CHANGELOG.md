@@ -2,6 +2,17 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.169] - 2026-11-23
+
+### Workflows, external agents, and image previews
+
+- Open Workflows from the command palette to inspect workspace prompt workflows, view run history, and activate, pause, or run eligible definitions.
+- The model picker shows external-agent connections and lets you sign in when a connection needs it.
+- Open local images in read-only tabs and open supported files from Finder on macOS.
+- Linux release validation now checks folded Agent activity with a fixture that does not rely on platform-specific font widths.
+
+Stable platform bundles and the daemon image use one immutable tagged source. Local and platform checks, publication, and independent download verification are reported separately.
+
 ## [0.7.168] - 2026-11-23
 
 ### Steadier Agent activity, wallpaper controls, and workspace switching

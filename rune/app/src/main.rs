@@ -22,8 +22,11 @@ mod glass_selection;
 mod goal_celebration;
 mod connection_celebration;
 mod home;
+mod image_viewer;
 mod keys;
 mod mermaid;
+#[cfg(target_os = "macos")]
+mod open_documents;
 mod palette;
 mod replay;
 mod panes;
@@ -60,6 +63,7 @@ mod tabs;
 mod tree;
 mod ui;
 mod workspace;
+mod workflows;
 mod wordmark;
 
 #[cfg(test)]
@@ -93,10 +97,16 @@ fn setup(app: &mut App, waker: rune::Waker) {
         app.daemon = Some(daemon);
         app.inbox = Some(inbox);
     }
-    // Claim recovery before reading it: another live window must never be copied or overwritten.
-    app.recover_session(startup::fresh_window());
-    // `neoism file.rs`: the files named on the command line open in the first workspace.
-    for file in startup::files() { app.open_file(&file.to_string_lossy(), None); }
+    #[cfg(target_os = "macos")]
+    let documents = app.launch_documents.take();
+    #[cfg(target_os = "macos")]
+    let (fresh, files) = documents.as_deref().map(|files| (true, files))
+        .unwrap_or_else(|| (startup::fresh_window(), startup::files()));
+    #[cfg(not(target_os = "macos"))]
+    let (fresh, files) = (startup::fresh_window(), startup::files());
+    // An explicit open never restores an unrelated workspace over the requested one.
+    app.recover_session(fresh);
+    for file in files { app.open_file(&file.to_string_lossy(), None); }
 }
 
 /// `src/demo.rs` open with rust-analyzer attached and two diagnostics.
@@ -136,13 +146,14 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     let mut wakes: Vec<(&str, std::time::Duration)> = Vec::new();
     macro_rules! wake { ($name:expr, $d:expr) => {{ let d = $d; if *TRACE_POLL { wakes.push(($name, d)); } tx.wake_after(d); }} }
     // Terminal output is parsed as it arrives; blocks and grids are re-read once per frame.
-    let changed = drive::tick(app, clock, tx) | replay::tick(app, clock, tx) | app.poll_usage();
+    let changed = drive::tick(app, clock, tx) | replay::tick(app, clock, tx) | app.poll_usage() | app.poll_harness_status();
     app.git_review_tick(tx);
     app.git_issues_tick(tx);
     let changed = changed | glass_selection::poll(app, tx);
     let changed = changed | goal_celebration::poll(app, tx);
     let changed = changed | connection_celebration::poll(app, tx);
     let (inbound_changed, inbound_pending) = app.drain();
+    let changed = changed | app.poll_workflows();
     let (reconnect_wait, reconnect_changed) = app.connection.reconnect_notice(std::time::Instant::now());
     if let Some(wait) = reconnect_wait { wake!("reconnect-notice", wait); }
     let changed = changed | reconnect_changed;
@@ -310,13 +321,8 @@ fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     keys::on_key(app, event, tx)
 }
 
-fn main() {
-    startup::record_crashes();
-    // `neoism --version`, `neoism update` and the rest answer before any window or daemon.
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let launch = match cli::dispatch(&args) { Ok(launch) => launch, Err(code) => std::process::exit(code) };
-    startup::apply(&launch);
-    let spec = AppSpec::<App> {
+fn app_spec() -> AppSpec<App> {
+    AppSpec::<App> {
         fonts: FONTS,
         families: (ui::fonts::CHAT_SLOT, ui::fonts::MONO),
         setup: Some(setup),
@@ -384,6 +390,23 @@ fn main() {
             ("git-review-nowrap", |s| { git::fixture(s, true); s.git_panel.review.no_wrap = true; s.git_review_fixture_relayout(); }),
             ("git-review-split", |s| { git::fixture(s, true); s.git_panel.review.split = true; s.git_review_fixture_relayout(); }),
             ("agent-new", |s| { s.open_tab(tabs::TabKind::Agent { session: None }); }),
+            ("agent-external-work", |s| {
+                use neoism_protocol::agent::AgentServerMessage;
+                s.focused_view = true;
+                s.load_fixture("root", "External subagents", r#"[
+                    {"id":"prompt","kind":"User","role":"User","text":"Survey the frontend and backend."},
+                    {"id":"read","kind":"Tool","role":"Assistant","tool":"read","title":"README.md","status":"completed"},
+                    {"id":"claude","kind":"Tool","role":"Assistant","tool":"task","title":"Survey the frontend","agent_kind":"claude","status":"completed","detail":"task_id: frontend\nstatus: running"},
+                    {"id":"codex","kind":"Tool","role":"Assistant","tool":"task","title":"Survey the backend","agent_kind":"codex","status":"completed","detail":"task_id: backend\nstatus: running"}
+                ]"#);
+                s.apply_agent(AgentServerMessage::CatalogFamily { session_id: "root".into(), snapshot: serde_json::json!({
+                    "rootSessionId":"root", "familyRevision":1, "branches":[
+                        {"sessionId":"frontend","parentSessionId":"root","status":"outstanding"},
+                        {"sessionId":"backend","parentSessionId":"root","status":"outstanding"}
+                    ]
+                }) });
+                s.apply_agent(AgentServerMessage::StreamingState { session_id: "root".into(), state: neoism_protocol::agent::StreamingState::Working, label: None });
+            }),
             ("usage", |s| s.usage_fixture("accounts")),
             ("usage-loading", |s| s.usage_fixture("loading")),
             ("usage-empty", |s| s.usage_fixture("empty")),
@@ -445,6 +468,13 @@ fn main() {
                     s.attach.preview = Some(agent::attach::Preview { key: "history:".to_owned(), name: "diagram.png".into() });
                     let id = s.sessions.get("attach").and_then(|x| x.messages.last()).map(|m| m.id.clone()).unwrap_or_default();
                     if let Some(p) = &mut s.attach.preview { p.key = format!("history:{id}:0"); }
+                }
+            }),
+            ("image-viewer", |s| {
+                let path = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/splash/neoism-wordmark.png");
+                s.open_file(path, None);
+                if let tabs::TabKind::Image { path } = &s.active_tab().kind {
+                    if let Some(image) = s.viewer_file_image(s.active_tab().id, path) { let _ = image.wait(); }
                 }
             }),
             ("sidebar", |s| s.sidebar = Some(app::Sidebar::Conversations)),
@@ -642,6 +672,13 @@ fn main() {
                 s.apply_agent(neoism_protocol::agent::AgentServerMessage::CatalogFamily { session_id: "root".into(), snapshot: serde_json::json!({"rootSessionId":"root","familyRevision":1,"branches":[{"sessionId":"child","parentSessionId":"root","title":"Explore","status":"outstanding"}]}) });
                 s.apply_agent(neoism_protocol::agent::AgentServerMessage::ToolUseRequest { session_id:"child".into(), request_id:"p".into(), tool:"bash".into(), title:"Run cargo check?".into(), patterns:vec!["cargo check *".into()], args:serde_json::Value::Null, source_agent:Some("explore".into()) });
             }),
+            ("agent-child-permission", |s| {
+                use neoism_protocol::agent::AgentServerMessage;
+                s.load_fixture("root", "Subagent permission", "[]");
+                s.apply_agent(AgentServerMessage::CatalogFamily { session_id: "root".into(), snapshot: serde_json::json!({"rootSessionId":"root","familyRevision":1,"branches":[{"sessionId":"child","parentSessionId":"root","title":"Survey architecture","agent":"claude","status":"outstanding"}]}) });
+                s.open_child("root", "child");
+                s.apply_agent(AgentServerMessage::ToolUseRequest { session_id:"child".into(), request_id:"p".into(), tool:"read".into(), title:"Read AGENTS.md?".into(), patterns:vec!["AGENTS.md".into()], args:serde_json::Value::Null, source_agent:Some("claude".into()) });
+            }),
             ("agent-question", |s| {
                 s.load_fixture("root", "Model question", "[]");
                 s.apply_agent(neoism_protocol::agent::AgentServerMessage::QuestionAsked { session_id:"root".into(), request:serde_json::json!({"id":"q","questions":[{"question":"Which environment should I deploy to?","options":[{"label":"Staging","description":"Validate before release"},{"label":"Production","description":"Deploy to users"}]},{"question":"Any release notes?"}]}) });
@@ -693,6 +730,7 @@ fn main() {
                 s.open_project_menu();
             }),
             ("project-add", |s| { s.sidebar = Some(app::Sidebar::Conversations); s.open_project_add(); }),
+            ("workflows", workflows::scene),
             ("project-add-github", |s| {
                 s.sidebar = Some(app::Sidebar::Conversations);
                 s.cwd = "/work/neoism".into();
@@ -1072,16 +1110,16 @@ fn main() {
             ("timeline-tools", |s| s.load_fixture("fixture-tools", "Inspect Git History and GPU Sources; Edit Scratchpad", include_str!("../fixtures/tools-timeline.json"))),
         ],
         ..AppSpec::new("Neoism", (1252.0, 674.0), App::new, ui::chrome::root)
-    };
-    // A distinct id per instance lets several builds run side by side (and be found by class).
-    let app_id = std::env::var("NEOISM_RUNE_APP_ID").unwrap_or_else(|_| "ai.neoism.rune".into());
-    rune::set_app_id(Box::leak(app_id.into_boxed_str()));
+    }
+}
+
+fn window_app(init: impl FnOnce() -> App + 'static) -> rune::App<App> {
     // The app draws its own title band: macOS keeps its traffic lights in it and Windows its
     // caption buttons; on Linux the compositor's frame stays and there is no band.
     let fps_meter = std::rc::Rc::new(std::cell::RefCell::new(ui::fps::Meter::default()));
     let state_meter = fps_meter.clone();
-    let mut app = rune::App::new(spec).titlebar(rune::Titlebar::new(ui::chrome::TITLEBAR_H)).init(move || {
-        let mut state = App::new();
+    let mut app = rune::App::new(app_spec()).titlebar(rune::Titlebar::new(ui::chrome::TITLEBAR_H)).init(move || {
+        let mut state = init();
         state.fps_meter = state_meter;
         state
     })
@@ -1124,6 +1162,23 @@ fn main() {
                 frame.outcome(), frame.refresh_hz());
         }
     });
-    app.run();
+    app
+}
+
+fn main() {
+    startup::record_crashes();
+    // `neoism --version`, `neoism update` and the rest answer before any window or daemon.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let launch = match cli::dispatch(&args) { Ok(launch) => launch, Err(code) => std::process::exit(code) };
+    startup::apply(&launch);
+    // A distinct id per instance lets several builds run side by side (and be found by class).
+    let app_id = std::env::var("NEOISM_RUNE_APP_ID").unwrap_or_else(|_| "ai.neoism.rune".into());
+    rune::set_app_id(Box::leak(app_id.into_boxed_str()));
+    #[cfg(target_os = "macos")]
+    rune::set_open_documents_handler(open_documents::receive);
+    #[cfg(target_os = "macos")]
+    window_app(open_documents::initial_state).run();
+    #[cfg(not(target_os = "macos"))]
+    window_app(App::new).run();
     workspace::finish_window_cleanup();
 }

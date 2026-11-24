@@ -29,11 +29,11 @@ mod tests;
 
 fn width_of(text: &str, size: f32) -> f32 { text.chars().count() as f32 * size * ADVANCE }
 
-fn mono(size: f32, bold: bool) -> TextStyle { TextStyle::new(size, if bold { 700.0 } else { 400.0 }).mono() }
+pub(super) fn mono(size: f32, bold: bool) -> TextStyle { TextStyle::new(size, if bold { 700.0 } else { 400.0 }).mono() }
 
 /// The card's words: the proportional UI face. Footers, `esc` and activity logs stay mono
 /// (they are measured to right-align and wrap).
-fn sans(size: f32, weight: f32) -> TextStyle { TextStyle::new(size, weight) }
+pub(super) fn sans(size: f32, weight: f32) -> TextStyle { TextStyle::new(size, weight) }
 
 /// Greedy word wrap at `width` points.
 fn wrap(text: &str, width: f32, size: f32) -> Vec<String> {
@@ -96,6 +96,7 @@ pub fn picker_card(app: &App) -> El {
     if picker.kind == Kind::Context { return super::context::view(app, anchored); }
     if picker.kind == Kind::Goals { return super::goals::view(app, anchored); }
     if picker.kind == Kind::Model && picker.activity.is_none() { return model_card(app, picker, anchored); }
+    if picker.kind == Kind::AgentConnections { return super::agent_connections::view(app, picker, anchored); }
     // As many rows as fit between the agent pane's top (8 pt under its tab row, never over the
     // chrome) and 6 pt above the composer.
     let top = if modal { 24.0 } else { app.rects.get(&format!("agent-area:{}", app.active_tab().id)).map_or(0.0, |r| r[1]) + 8.0 * s };
@@ -433,7 +434,7 @@ fn model_card(app: &App, picker: &Picker, composer: [f32; 4]) -> El {
     el().key("prompt-picker-layer").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).child(scrim).child(card.absolute(cx, y))
 }
 
-fn model_mark(app: &App, provider: &str, name: &str, size: f32) -> El {
+pub(super) fn model_mark(app: &App, provider: &str, name: &str, size: f32) -> El {
     let size = size * app.ty.scale();
     match super::catalog::provider_logo(provider) {
         Some(index) => row_icon(app, Icon::Provider(index), size),
@@ -473,7 +474,7 @@ fn model_row(app: &App, index: usize, width: f32, favorites: &[String]) -> El {
 }
 
 /// The header's query row: the composer's own text for `/`, else this picker's field.
-fn query_row(app: &App, picker: &Picker, width: f32) -> El {
+pub(super) fn query_row(app: &App, picker: &Picker, width: f32) -> El {
     let p = app.pal;
     let s = app.ty.scale();
     if picker.mention.is_some() {

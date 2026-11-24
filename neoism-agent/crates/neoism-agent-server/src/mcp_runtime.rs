@@ -14,7 +14,8 @@ use crate::state::AppState;
 
 use super::mcp_oauth::bearer_token_for_url;
 use super::mcp_transport::{
-    HttpJsonRpcClient, McpNotification, NotificationHandler, StdioJsonRpcClient,
+    HttpJsonRpcClient, HttpMcpEvents, McpNotification, NotificationHandler,
+    StdioJsonRpcClient,
 };
 use super::mcp_wire::{parse_prompts, parse_resources, parse_tools};
 
@@ -234,6 +235,33 @@ impl McpRuntimeManager {
         }
         client.spawn_sse_listener();
         Ok(McpStatus::Connected)
+    }
+
+    /// Opt in independently of ordinary MCP connection and catalog loading. A modern-only
+    /// endpoint need not first succeed at `initialize`; existing legacy clients are untouched.
+    /// Use the returned client's `list_page` and `subscribe` to open a single attempt.
+    /// The subscriber owns its stream and cancels it by dropping it; it is not in the legacy registry.
+    #[allow(dead_code)] // No workflow or route consumer in this slice.
+    pub(crate) async fn connect_remote_events(
+        &self,
+        name: &str,
+        url: &str,
+        headers: Option<&BTreeMap<String, String>>,
+        auth_store: &McpAuthStore,
+        request_timeout: Duration,
+    ) -> anyhow::Result<Option<HttpMcpEvents>> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(anyhow!("MCP runtime is shut down"));
+        }
+        let token = bearer_token_for_url(name, url, auth_store).await?;
+        HttpMcpEvents::connect(url, headers, token, request_timeout).await
+    }
+
+    /// A separate, credential-free opt-in for unattended local workflows.
+    pub(crate) async fn connect_local_workflow_events(
+        url: &reqwest::Url,
+    ) -> anyhow::Result<Option<HttpMcpEvents>> {
+        HttpMcpEvents::connect_loopback(url, Duration::from_secs(5)).await
     }
 
     pub(super) fn connect_remote_status(

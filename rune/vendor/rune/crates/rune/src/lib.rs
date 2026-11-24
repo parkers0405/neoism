@@ -19,6 +19,8 @@ pub mod native_frame;
 mod input;
 mod latest;
 mod native_menu;
+#[cfg(target_os = "macos")]
+mod open_documents;
 mod open_url;
 mod overlay;
 mod pixels;
@@ -196,6 +198,8 @@ pub use native_menu::MenuItem;
 pub use native_surface::NativeSurface;
 pub use native_surface::SurfaceFit;
 pub use open_url::OpenUrlError;
+#[cfg(target_os = "macos")]
+pub use open_documents::set_open_documents_handler;
 pub use open_url::instance::single_instance;
 pub use overlay::Availability;
 pub use overlay::OverlayHandle;

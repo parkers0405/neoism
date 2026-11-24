@@ -226,6 +226,9 @@ pub(crate) async fn available_tools_for_snapshot(
             {
                 continue
             }
+            "workflow" if !crate::workflow::agent_tool_available(state, snapshot, execution) => {
+                continue
+            }
             _ => {}
         }
         tools.push(ToolListItem {

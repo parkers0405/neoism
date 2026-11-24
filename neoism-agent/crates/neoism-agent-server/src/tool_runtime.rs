@@ -318,6 +318,9 @@ async fn execute_stateful_tool_call(
     progress: Option<crate::tool_composition::ProgressSink>,
 ) -> Result<Option<tool::ToolExecutionResult>, String> {
     match tool_name {
+        "workflow" => crate::workflow::agent_tool(state, directory, permissions, input)
+            .await
+            .map(Some),
         "compose" => {
             let code = string_arg(&input, "code")
                 .ok_or_else(|| "compose requires code".to_string())?;
@@ -1283,6 +1286,20 @@ pub(crate) fn execute_tool_call_scoped<'a>(
         let unattended = session
             .as_ref()
             .is_some_and(|session| session.extra.contains_key("workflowRunID"));
+        if tool_name == "workflow"
+            && (unattended
+                || scope.child
+                || !session.as_ref().is_some_and(|session| {
+                    crate::caller::session_tenant(session) == "local"
+                        && crate::workflow::agent_tool_available(
+                            state,
+                            &snapshot,
+                            &crate::caller::session_execution_policy(state.services(), session),
+                        )
+                }))
+        {
+            return Err("workflow requires an interactive local session with Workflows enabled".into());
+        }
         let tenant_id = session
             .as_ref()
             .map(|session| crate::caller::session_tenant(session).to_string())

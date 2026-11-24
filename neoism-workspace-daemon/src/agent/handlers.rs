@@ -536,6 +536,7 @@ pub(crate) fn thread_summary_from_session(session: &Value) -> Option<ThreadSumma
                     Some("codex") => "codex-app-server",
                     Some("claude") => "claude-agent-sdk",
                     Some("opencode") => "opencode-server",
+                    Some("grok" | "kiro" | "antigravity" | "fx" | "cursor") => "acp",
                     _ => return false,
                 };
                 external["nested"] != true && external["nativeProjection"] != true
@@ -543,7 +544,6 @@ pub(crate) fn thread_summary_from_session(session: &Value) -> Option<ThreadSumma
                         .is_some_and(|value| value == "acp" || value == driver)
             })
             .and_then(|external| external.get("provider").and_then(Value::as_str))
-            .filter(|provider| matches!(*provider, "opencode" | "claude" | "codex"))
             .map(str::to_string)
     };
     let catalog_activity = session

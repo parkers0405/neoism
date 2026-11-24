@@ -2,8 +2,16 @@ use super::*;
 use neoism_agent_core::{CreateSessionRequest, ToolState};
 
 async fn fixture() -> (AppState, SessionInfo, Arc<NativeProjector>, PathBuf) {
+    fixture_with_skip_permissions(false).await
+}
+
+async fn fixture_with_skip_permissions(skip: bool) -> (AppState, SessionInfo, Arc<NativeProjector>, PathBuf) {
     let directory = std::env::temp_dir().join(format!("neoism-native-projection-{}", Id::ascending(IdKind::Event)));
     std::fs::create_dir_all(&directory).unwrap();
+    if skip {
+        std::fs::create_dir_all(directory.join(".agent")).unwrap();
+        std::fs::write(directory.join(".agent/agent.json"), r#"{"dangerouslySkipPermissions":true}"#).unwrap();
+    }
     let state = AppState::open_database(directory.join("agent.sqlite3")).await.unwrap();
     let mut session = crate::session_routes::create_session_in_directory(&state, directory.to_str().unwrap(),
         CreateSessionRequest { parent_id: None, title: Some("Native projection test".into()),
@@ -18,6 +26,24 @@ async fn fixture() -> (AppState, SessionInfo, Arc<NativeProjector>, PathBuf) {
     let projector = NativeProjector::new(&state, &session, ExternalRuntime::Codex, &step, Arc::new(AtomicBool::new(false)));
     assert_eq!(references, Arc::strong_count(&state.inner), "warm registry must not retain AppState");
     (state, session, projector, directory)
+}
+
+#[tokio::test]
+async fn external_native_skip_permissions_approves_asks_but_not_parent_denies() {
+    let (state, mut session, projector, directory) = fixture_with_skip_permissions(true).await;
+    session.permission = Some(vec![
+        PermissionRule { permission: "read".into(), pattern: "*".into(), action: PermissionAction::Ask },
+        PermissionRule { permission: "read".into(), pattern: "private.txt".into(), action: PermissionAction::Deny },
+    ]);
+    state.inner.store.update_session(&session).await.unwrap();
+    let scope = json!({"id":"nested-child","parentToolCallId":"spawn"});
+    projector.apply(&json!({"type":"child.updated","scope":scope,"status":"running"})).await.unwrap();
+    for (path, expected) in [("AGENTS.md", "allow_once"), ("private.txt", "deny")] {
+        let request = json!({"id":"approval","scope":scope,"toolName":"Read","input":{"path":path}});
+        let reply = tokio::time::timeout(Duration::from_secs(5), projector.interaction("permission.request", &request)).await.unwrap().unwrap();
+        assert_eq!(reply["decision"], expected);
+    }
+    let _ = std::fs::remove_dir_all(directory);
 }
 
 #[tokio::test]

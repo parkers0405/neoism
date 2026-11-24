@@ -420,7 +420,7 @@ async fn external_model_context_limit(
         let provider = match runtime {
             ExternalRuntime::Claude => "anthropic",
             ExternalRuntime::Codex => "openai",
-            ExternalRuntime::OpenCode => "",
+            _ => "",
         };
         (provider, selected)
     });
@@ -718,6 +718,8 @@ pub(super) async fn update_external_tool_part(
             .and_then(|metadata| metadata.get("acpDiffs"))
             .cloned()
     });
+    let antigravity_started_command = update["kind"] == "execute";
+    let antigravity_daemon = input["IsDaemon"] == true;
     let durable = update
         .get("sessionUpdate")
         .and_then(Value::as_str)
@@ -754,7 +756,13 @@ pub(super) async fn update_external_tool_part(
             enrich_nested_prompt(&ctx.state, nested_id, &input).await?;
         }
     }
-    let output = external_tool_output(&update);
+    let output = if ctx.runtime == ExternalRuntime::Antigravity {
+        antigravity_command_output(&update)
+            .map(str::to_owned)
+            .unwrap_or_else(|| external_tool_output(&update))
+    } else {
+        external_tool_output(&update)
+    };
     let output_path = acp_output_path(
         &ctx.child_id,
         &format!("{}:{tool_call_id}", ctx.assistant_id),
@@ -954,6 +962,16 @@ pub(super) async fn update_external_tool_part(
         ctx.state.publish(event);
     } else {
         ctx.state.publish_live(event);
+    }
+    if ctx.runtime == ExternalRuntime::Antigravity {
+        let mut collector = ctx.collector.lock().await;
+        if antigravity_daemon || matches!(status, "completed" | "failed" | "error") {
+            if collector.antigravity_active_commands.remove(&tool_call_id) {
+                collector.antigravity_command_settled.notify_one();
+            }
+        } else if antigravity_started_command {
+            collector.antigravity_active_commands.insert(tool_call_id.clone());
+        }
     }
     if let Some(nested_id) = nested_session_id.as_deref() {
         let output = external_tool_output(&update);
@@ -1522,6 +1540,13 @@ pub(super) fn acp_diff_content(update: &Value) -> Option<Value> {
         .take(32)
         .collect::<Vec<_>>();
     (!diffs.is_empty()).then(|| json!(diffs))
+}
+
+fn antigravity_command_output(update: &Value) -> Option<&str> {
+    let output = update.get("rawOutput")?;
+    ["combinedOutput", "combined_output", "aggregatedOutput"]
+        .into_iter()
+        .find_map(|key| output.get(key).and_then(Value::as_str))
 }
 
 fn external_tool_output(update: &Value) -> String {

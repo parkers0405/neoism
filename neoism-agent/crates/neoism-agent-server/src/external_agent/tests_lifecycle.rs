@@ -78,6 +78,7 @@ fn mock_adapter(
 ) -> (std::path::PathBuf, std::path::PathBuf) {
     let script = root.join(format!("adapter-{provider}"));
     let log = root.join(format!("requests-{provider}.log"));
+    let release = root.join("release-streaming-test");
     let init = json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{},"list":{}}}}}).to_string();
     let model_options = if provider == "codex" {
         vec![]
@@ -97,6 +98,8 @@ fn mock_adapter(
     let edit = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"tool_call","toolCallId":"edit-1","title":"Update README","kind":"edit","status":"in_progress","rawInput":{"path":"README.md"},"content":[{"type":"diff","path":"README.md","oldText":"old\n","newText":"new\n"}]}}}).to_string();
     let edit_done = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"tool_call_update","toolCallId":"edit-1","status":"completed"}}}).to_string();
     let tool_done = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"tool_call_update","toolCallId":"native-tool-1","status":"completed","rawOutput":{"text":"inspected"}}}}).to_string();
+    let agy_command = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"tool_call","toolCallId":"agy-command","title":"Run echo","kind":"execute","status":"in_progress","rawInput":{"CommandLine":"echo hello"},"rawOutput":{"combinedOutput":"hello\n"}}}}).to_string();
+    let agy_command_done = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"tool_call_update","toolCallId":"agy-command","status":"completed"}}}).to_string();
     let first = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"First "}}}}).to_string();
     let first_prefix = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Fir"}}}}).to_string();
     let first_suffix = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":format!("native-{provider}"),"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"st "}}}}).to_string();
@@ -131,8 +134,17 @@ while IFS= read -r line; do
     *'"method":"initialize"'*) printf '%s\n' '{init}' ;;
     *'"method":"session/new"'*) printf '%s\n' '{new}' '{commands}' ;;
     *'"method":"session/load"'*) printf '%s\n' '{replay}' '{load}' '{commands}' ;;
+    *'"method":"session/resume"'*) printf '%s\n' '{load}' '{commands}' ;;
     *'"method":"session/prompt"'*)
       case "$line" in
+        *'mock sign-in failure'*)
+          printf '%s\n' '{{"jsonrpc":"2.0","id":3,"error":{{"code":-32000,"message":"auth_required"}}}}'
+          ;;
+        *'hold streaming turn'*)
+          printf '%s\n' '{first_prefix}' '{first_suffix}' '{agy_command}' '{done}'
+          while test ! -f '{release}'; do sleep 0.01; done
+          printf '%s\n' '{second}' '{agy_command_done}'
+          ;;
         *'abort me'*)
           printf '%s\n' '{nested}' '{first}'
           # No prompt result: only a real abort can unblock Neoism.
@@ -156,6 +168,7 @@ while IFS= read -r line; do
   esac
 done
 "#,
+        release = release.display(),
         log = log.display(),
         init = init,
         new = new,
@@ -313,6 +326,106 @@ async fn live_codex_new_task_streams_tools_and_retains_stdout() {
     assert!(result.output.contains("ACP_LIVE_TEXT_END"), "{}", result.output);
     assert!(saved_output.contains("ACP_LIVE_TOOL_BEGIN"), "stdout missing: {saved_output}");
     assert!(saved_output.contains("ACP_LIVE_TOOL_END"), "stdout missing: {saved_output}");
+}
+
+#[tokio::test]
+async fn antigravity_task_links_to_child_and_streams_before_completion() {
+    let root = std::env::temp_dir().join(format!("neoism-agy-{}", Id::ascending(IdKind::Event)));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    let (script, log) = mock_adapter(&root, "antigravity");
+    let mut services = crate::standard_services();
+    services.executables = Arc::new(crate::executable::test_support::FakeExecutableService::with(
+        "agy", script,
+    ));
+    let state = AppState::open_database_with_services(root.join("agent.sqlite3"), services)
+        .await.unwrap();
+    let app = crate::app(state.clone());
+    let create_parent = || async {
+        json_response::<SessionInfo>(app.clone().oneshot(http(
+            Method::POST,
+            &format!("/v2/sessions?directory={}", root.display()),
+            Some(json!({"model":{"providerId":"orchestration-test","id":"none"}})),
+        )).await.unwrap()).await
+    };
+    let parent = create_parent().await;
+    let mut events = state.subscribe();
+    let result = orchestrate(&state, &parent, "antigravity", None, "hold streaming turn", true, None)
+        .await.unwrap();
+    let child_id = result.metadata.as_ref().unwrap()["sessionId"].as_str().unwrap();
+    assert!(result.output.starts_with(&format!("task_id: {child_id} ")));
+    let child: SessionInfo = json_response(app.clone().oneshot(http(
+        Method::GET, &format!("/v2/sessions/{child_id}"), None,
+    )).await.unwrap()).await;
+    assert_eq!(child.parent_id.as_ref(), Some(&parent.id));
+    assert_eq!(child.extra["externalAgent"]["provider"], "antigravity");
+
+    let live = tokio::time::timeout(Duration::from_secs(8), async {
+        let (mut saw_text, mut saw_tool) = (false, false);
+        while !(saw_text && saw_tool) {
+            let event = events.recv().await.unwrap();
+            if event.properties["sessionID"] == child_id {
+                saw_text |= event.kind == event_type::MESSAGE_PART_DELTA
+                    && event.properties["delta"] == "st ";
+            }
+            let part = &event.properties["part"];
+            saw_tool |= event.properties["sessionID"] == child_id
+                && part["state"]["status"] == "running"
+                && part["metadata"]["terminalOutput"] == "hello\n";
+        }
+    }).await;
+    let (_, baseline) = state.subscribe_with_messages();
+    std::fs::write(root.join("release-streaming-test"), "finish").unwrap();
+    live.expect("text and tool updates must reach the child before ACP prompt completion");
+    assert!(baseline.iter().any(|event| {
+        event.properties["sessionID"] == child_id && event.properties["part"]["text"] == "First "
+    }));
+    let settled = wait_for_messages(&app, &child.id, 2).await;
+    assert_eq!(text_of(settled.last().unwrap()), "First answer");
+    assert!(settled.last().unwrap().parts.iter().any(|part| matches!(part,
+        Part::Tool(tool) if matches!(&tool.state,
+            neoism_agent_core::ToolState::Completed { output, .. } if output == "hello\n"
+        )
+    )));
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if event.kind == event_type::SESSION_SUBTASK_COMPLETED
+                && event.properties["childSessionID"] == child_id
+            {
+                break;
+            }
+        }
+    }).await.expect("parent did not receive the Antigravity child completion");
+    let continued = orchestrate(&state, &parent, "antigravity", Some(child_id), "Continue review", false, None)
+        .await.unwrap();
+    assert!(continued.output.contains("Continued answer"));
+    assert!(std::fs::read_to_string(log).unwrap().contains("session/resume"));
+    let prompt = "mock sign-in failure";
+    let background_parent = create_parent().await;
+    let start = orchestrate(&state, &background_parent, "antigravity", None, prompt, true, None)
+        .await.unwrap();
+    let failed_child = start.metadata.as_ref().unwrap()["sessionId"].as_str().unwrap();
+    let background_error = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if event.kind == event_type::SESSION_SUBTASK_COMPLETED
+                && event.properties["childSessionID"] == failed_child
+            {
+                assert_eq!(event.properties["status"], "error");
+                assert_eq!(event.properties["parentSessionID"], background_parent.id.as_str());
+                break event.properties["result"].as_str().unwrap().to_owned();
+            }
+        }
+    }).await.expect("parent did not receive the Antigravity sign-in failure");
+    assert!(background_error.contains("Antigravity sign-in required"));
+    let foreground_parent = create_parent().await;
+    let foreground_error = orchestrate(&state, &foreground_parent, "antigravity", None, prompt, false, None)
+        .await.err().expect("foreground sign-in failure must reach the caller");
+    assert_eq!(foreground_error, background_error);
+    drop(app);
+    state.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]

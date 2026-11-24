@@ -115,6 +115,155 @@ fn exercise(kind: Kind) {
 fn connect_query_mounts_are_instant_and_navigation_springs() { exercise(Kind::Connect); }
 
 #[test]
+fn agent_connections_expand_and_return_to_the_composer() {
+    let mut app = App::new();
+    app.window = [900.0, 674.0];
+    app.ty.size = 14.0;
+    let tab = app.active_tab().id.clone();
+    app.rects.insert(format!("composer-card:{tab}"), [100.0, 600.0, 700.0, 60.0]);
+    app.open_agent_connections(Some("fx"));
+    let mut rt = Runtime::new(app, |a: &App, _: &mut Cx<App>| {
+        el().w_full().h_full().child(picker_card(a))
+    }, (900.0, 674.0), Env::new(true, 1.0));
+    for expanded in [false, true, false] {
+        settle(&mut rt);
+        let card = rt.elements().iter().find(|e| e.key.as_deref() == Some("prompt-picker") && !e.exiting).unwrap().rect;
+        if expanded {
+            assert!((card[1] + card[3] / 2.0 - 337.0).abs() < 1.0);
+        } else {
+            assert!((card[0] - 100.0).abs() < 1.0 && (card[2] - 700.0).abs() < 1.0);
+            assert!((card[1] + card[3] - (600.0 - 6.0 * rt.state.ty.scale())).abs() < 1.0);
+        }
+        assert!(rt.find("connect-agent:fx").is_some());
+        let (x, y) = rt.find("connect-agent-expand").unwrap();
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+    }
+}
+
+#[test]
+fn agent_connections_sign_in_launches_once_and_reports_a_missing_cli() {
+    use crate::app::Connection;
+    use crate::daemon::{Daemon, Family};
+    use neoism_protocol::pty::ServerMessage;
+
+    let mut app = App::new();
+    app.window = [900.0, 674.0];
+    app.ty.size = 14.0;
+    let original = app.active_tab().id;
+    app.rects.insert(format!("composer-card:{original}"), [100.0, 600.0, 700.0, 60.0]);
+    let (daemon, requests) = Daemon::capture_requests();
+    app.daemon = Some(daemon);
+    app.connection = Connection::Connected;
+    app.workspace_ready = true;
+    app.open_agent_connections(Some("antigravity"));
+    requests();
+    assert!(app.apply_harness_status(1, &serde_json::json!({"HarnessStatuses": {"statuses": [{"id": "antigravity", "installed": true, "auth": "unknown"}]}})));
+    let mut rt = Runtime::new(app, |a: &App, _: &mut Cx<App>| {
+        el().w_full().h_full().child(picker_card(a))
+    }, (900.0, 674.0), Env::new(true, 1.0));
+    settle(&mut rt);
+    let (x, y) = rt.find("connect-agent-sign-in").unwrap();
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    settle(&mut rt);
+    assert!(rt.state.composer.picker.is_none());
+    let sign_in = rt.state.active_tab().id;
+    assert_ne!(original, sign_in);
+    let messages = requests();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].0, Family::Pty);
+    let create = &messages[0].1["CreatePty"];
+    assert_eq!(create["shell"], "agy");
+    assert_eq!(create["shell_args"], serde_json::json!(["acp", "--login"]));
+
+    rt.update(|a, _| a.apply_pty(ServerMessage::Error { message: "failed to spawn pty: not found".into() }, false));
+    assert!(!rt.state.tabs.iter().any(|tab| tab.id == sign_in));
+    assert!(rt.state.modal.as_ref().unwrap().body.contains("`agy`"));
+    assert_eq!(requests(), vec![(Family::Pty, serde_json::json!({"GetHarnessStatus": {}}))], "recheck status without restarting login");
+}
+
+#[test]
+fn agent_connections_installs_on_click_and_rechecks_after_exit() {
+    use crate::app::Connection;
+    use crate::daemon::{Daemon, Family};
+    use neoism_protocol::pty::{Presentation, ServerMessage};
+    let mut app = App::new();
+    app.window = [900.0, 674.0];
+    app.ty.size = 14.0;
+    let tab = app.active_tab().id;
+    app.rects.insert(format!("composer-card:{tab}"), [100.0, 600.0, 700.0, 60.0]);
+    let (daemon, requests) = Daemon::capture_requests();
+    app.daemon = Some(daemon);
+    app.connection = Connection::Connected;
+    app.workspace_ready = true;
+    app.open_agent_connections(Some("antigravity"));
+    assert_eq!(requests(), vec![(Family::Pty, serde_json::json!({"GetHarnessStatus": {}}))]);
+    assert!(app.apply_harness_status(1, &serde_json::json!({"HarnessStatuses": {"host_os": "linux", "statuses": [{"id": "antigravity", "installed": false, "auth": "unknown"}]}})));
+    let mut rt = Runtime::new(app, |a: &App, _: &mut Cx<App>| {
+        el().w_full().h_full().child(picker_card(a))
+    }, (900.0, 674.0), Env::new(true, 1.0));
+    settle(&mut rt);
+    assert!(rt.find("connect-agent-refresh").is_none());
+    assert!(requests().is_empty(), "opening the picker must not start installation");
+    let (x, y) = rt.find("connect-agent-sign-in").unwrap();
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    settle(&mut rt);
+    assert!(requests().is_empty(), "sign-in is gated on installation");
+    let (x, y) = rt.find("connect-agent-install").unwrap();
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    settle(&mut rt);
+    let launch = requests();
+    assert_eq!(launch.len(), 1);
+    let args = launch[0].1["CreatePty"]["shell_args"].as_array().unwrap();
+    assert!(args.last().unwrap().as_str().unwrap().contains("https://antigravity.google/cli/install.sh"));
+    rt.update(|a, _| a.apply_pty(ServerMessage::PtyCreated {
+        session_id: "installer".into(), presentation: Some(Presentation::Grid), shell: None, workspace_root: None,
+    }, true));
+    requests();
+    rt.update(|a, _| a.apply_pty(ServerMessage::PtyClosed { session_id: "installer".into(), exit_code: Some(0) }, true));
+    assert_eq!(rt.state.active_tab().id, tab);
+    assert!(rt.state.composer.picker.is_some());
+    assert_eq!(requests(), vec![(Family::Pty, serde_json::json!({"GetHarnessStatus": {}}))]);
+}
+
+#[test]
+fn agent_connections_skips_install_and_sign_in_for_an_existing_login() {
+    use crate::app::Connection;
+    use crate::daemon::{Daemon, Family};
+    let mut app = App::new();
+    app.window = [900.0, 674.0];
+    app.ty.size = 14.0;
+    let tab = app.active_tab().id;
+    app.rects.insert(format!("composer-card:{tab}"), [100.0, 600.0, 700.0, 60.0]);
+    let (daemon, requests) = Daemon::capture_requests();
+    app.daemon = Some(daemon);
+    app.connection = Connection::Connected;
+    app.workspace_ready = true;
+    app.open_agent_connections(Some("codex"));
+    assert_eq!(requests(), vec![(Family::Pty, serde_json::json!({"GetHarnessStatus": {}}))]);
+    let reply = serde_json::json!({"HarnessStatuses": {"statuses": [{"id": "codex", "installed": true, "auth": "signed_in"}]}});
+    assert!(app.apply_harness_status(1, &reply));
+    let mut rt = Runtime::new(app, |a: &App, _: &mut Cx<App>| {
+        el().w_full().h_full().child(picker_card(a))
+    }, (900.0, 674.0), Env::new(true, 1.0));
+    settle(&mut rt);
+    assert!(rt.find("connect-agent-step-1-done").is_some());
+    assert!(rt.find("connect-agent-step-2-done").is_some());
+    for key in ["connect-agent-install", "connect-agent-sign-in"] {
+        let (x, y) = rt.find(key).unwrap();
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        settle(&mut rt);
+        assert_eq!(rt.state.active_tab().id, tab);
+        assert!(rt.state.composer.picker.is_some());
+    }
+    assert!(requests().is_empty());
+}
+
+#[test]
 fn model_card_scrolls_small_trackpad_and_touch_moves_inline_and_in_modal() {
     use rune::{GesturePhase, TouchPhase};
     for modal in [false, true] {

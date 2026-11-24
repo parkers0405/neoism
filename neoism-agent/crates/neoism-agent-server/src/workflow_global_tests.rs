@@ -39,9 +39,10 @@ async fn installation_workflow_uses_configured_root_and_scoped_lifecycle() {
         "agent-global-flow-{}",
         Id::ascending(IdKind::Event)
     ));
+    fs::create_dir_all(temp.join("unrelated-project")).unwrap();
+    let temp = crate::windows_process::canonicalize_path(&temp).unwrap();
     let global = temp.join("custom-installation");
     let project = temp.join("unrelated-project");
-    fs::create_dir_all(&project).unwrap();
     let mut services = crate::standard_services();
     services.config = Arc::new(StandardConfigSourceService::new(&global));
     let state = AppState::open_database_with_services_and_management(

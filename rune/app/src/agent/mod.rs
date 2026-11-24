@@ -60,7 +60,7 @@ use crate::app::App;
 use crate::daemon::Family;
 use crate::tabs::TabKind;
 use neoism_protocol::agent::{
-    AgentClientMessage, AgentServerMessage, HistoryMessage, HistoryMessageKind, PromptDelivery,
+    AgentClientMessage, AgentServerMessage, ContentKind, HistoryMessage, HistoryMessageKind, PromptDelivery,
     Role, StreamingState, ThreadSummary, TodoItem,
 };
 use serde_json::{Value, json};
@@ -366,14 +366,22 @@ impl Session {
 /// update and history page from then on. A child nothing has said anything about yet is left
 /// alone while its conversation's turn is live (the card arrives before the child is named).
 fn settle_task_card(families: &family::Families, message: &mut HistoryMessage, live_turn: bool) -> bool {
-    if message.tool != "task" || !matches!(message.status.as_str(), "" | "pending" | "running" | "streaming") { return false; }
+    if message.tool != "task" { return false; }
+    let launching = matches!(message.status.as_str(), "" | "pending" | "running" | "streaming");
+    // An external background launch can complete its tool call before the child finishes.
+    let acknowledged = message.status == "completed" && message.detail.lines().chain(message.text.lines())
+        .any(|line| line.trim() == "status: running");
+    if !launching && !acknowledged { return false; }
     let Some(child) = family::task_id(&message.detail, &message.text) else { return false };
-    let failed = match families.stopped(&child) {
-        Some(failed) => failed,
-        None if live_turn || families.working_now(&child) => return false,
-        None => false,
+    let status = match families.stopped(&child) {
+        Some(true) => "error",
+        Some(false) => "completed",
+        None if acknowledged && families.working_now(&child) => "running",
+        None if launching && !live_turn && !families.working_now(&child) => "completed",
+        None => return false,
     };
-    message.status = if failed { "error" } else { "completed" }.into();
+    if message.status == status { return false; }
+    message.status = status.into();
     true
 }
 
@@ -1130,13 +1138,16 @@ impl App {
                     message.text.push_str(&text);
                 } else {
                     session.structure += 1;
-                    let kind = match serde_json::to_value(&kind).ok().as_ref().and_then(Value::as_str) {
-                        Some("Thinking") | Some("Reasoning") => HistoryMessageKind::Reasoning,
-                        _ => HistoryMessageKind::Assistant,
+                    // A delta can beat its tool snapshot. Don't render tool output as prose
+                    // outside the collapsed work group while waiting for the snapshot.
+                    let (kind, tool) = match kind {
+                        ContentKind::Tool { name } => (HistoryMessageKind::Tool, name),
+                        ContentKind::Reasoning => (HistoryMessageKind::Reasoning, String::new()),
+                        _ => (HistoryMessageKind::Assistant, String::new()),
                     };
                     insert_new(&mut session.messages, HistoryMessage {
                         id: message_id, role: Role::Assistant, kind, author: None, title: String::new(), text,
-                        status: String::new(), tool: String::new(), agent_kind: None, tool_batch_id: None, mcp: None,
+                        status: String::new(), tool, agent_kind: None, tool_batch_id: None, mcp: None,
                         composition_children: Vec::new(), output_kind: None, lang: String::new(), line_offset: None,
                         detail: String::new(), todos: Vec::new(), usage: None, attachments: Vec::new(), created_at: 0,
                     });

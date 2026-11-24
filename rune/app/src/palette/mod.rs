@@ -421,6 +421,7 @@ impl App {
             Action::ToggleGitPanel => self.toggle_git_panel(),
             Action::OpenAgent => { self.open_tab(TabKind::Agent { session: None }); }
             Action::ToggleConversations => self.toggle_conversations(),
+            Action::Workflows => self.open_workflows(),
             Action::Quit => tx.quit(),
         }
     }

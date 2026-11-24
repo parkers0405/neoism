@@ -198,7 +198,7 @@ impl AcpClient {
         Ok((client, event_rx))
     }
 
-    pub(crate) async fn initialize(&self) -> Result<Value, AcpRpcError> {
+    pub(crate) async fn initialize(&self, client_managed_mutations: bool) -> Result<Value, AcpRpcError> {
         let result = self
             .request(
                 "initialize",
@@ -207,9 +207,9 @@ impl AcpClient {
                     "clientCapabilities": {
                         "fs": {
                             "readTextFile": true,
-                            "writeTextFile": true,
+                            "writeTextFile": client_managed_mutations,
                         },
-                        "terminal": true,
+                        "terminal": client_managed_mutations,
                         "_meta": {
                             "terminal_output": true,
                             "terminal_output_delta": true,

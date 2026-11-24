@@ -214,7 +214,7 @@ pub fn capture_workspace(name: &str, cwd: &str, tabs: &[Tab], active: usize, lay
                 pills: t.draft.pills().filter(|(_, id)| id.starts_with("paste:") || id.starts_with("skill:"))
                     .map(|(r, id)| SavedPill { start: r.start, end: r.end, id: id.into(), payload: t.pastes.get(id).cloned() }).collect(),
             },
-            TabKind::Editor { path } => SavedTab::Editor { path: path.clone() },
+            TabKind::Editor { path } | TabKind::Image { path } => SavedTab::Editor { path: path.clone() },
             TabKind::Database { path } => SavedTab::Database { path: path.clone() },
             TabKind::GitDiff => SavedTab::GitDiff,
         }

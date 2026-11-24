@@ -6,6 +6,7 @@ mod actions;
 mod blocks;
 mod composer;
 mod grid;
+mod harness_login;
 mod input;
 mod shell_events;
 mod splash;
@@ -42,6 +43,14 @@ pub struct SplashState {
 }
 
 impl App {
+    pub(crate) fn open_harness_setup(&mut self, provider: &'static str, installing: bool, command: (&'static str, &'static [&'static str])) {
+        let origin = self.active_tab().id;
+        let index = self.open_tab_with_terminal_command(TabKind::Terminal, Some(command));
+        if let Some(term) = self.terminals.get_mut(&self.tabs[index].id) {
+            term.harness_setup = Some((provider, installing, origin));
+        }
+    }
+
     /// The Home splash is showing in the active tab (not scrolled off, not replaced by a grid).
     pub fn splash_on_screen(&self) -> bool {
         !self.splash.hidden.contains(&self.active_tab().id) && self.active_terminal().is_none_or(|t| !t.raw())
@@ -82,11 +91,13 @@ impl App {
         }
     }
 
-    pub(crate) fn open_terminal(&mut self, tab_id: u64) {
+    pub(crate) fn open_terminal_with_command(&mut self, tab_id: u64, command: Option<(&'static str, &'static [&'static str])>) {
         let mut term = Terminal::new(self.cwd.clone(), self.terminal_colors());
         // A plain Terminal tab follows `terminal.block-ui`; Home is always blocks.
         term.grid = self.tabs.iter().any(|t| t.id == tab_id && t.kind == TabKind::Terminal)
             && crate::config::read()["terminal"]["block-ui"] == serde_json::Value::Bool(false);
+        if command.is_some() { term.grid = true; }
+        term.launch_command = command;
         self.terminals.insert(tab_id, term);
         self.create_pty(tab_id);
     }
@@ -108,6 +119,7 @@ impl App {
             let Some(term) = self.terminals.get(&tab_id) else { continue };
             match term.shell.session.clone() {
                 Some(session_id) => self.send_pty(PtyClient::AttachPty { session_id, cursor: term.shell.next_offset() }),
+                None if term.launch_command.is_some() => self.end_harness_login(tab_id, Some("The sign-in connection was interrupted. Open /connect-agent to try again.")),
                 None => self.create_pty(tab_id),
             }
         }
@@ -124,8 +136,11 @@ impl App {
         let cwd = term.shell.cwd.clone();
         let presentation = if term.grid { Presentation::Grid } else { Presentation::Blocks };
         // The composer's ghost text and history menu read the shell's history file.
-        let history = !std::mem::replace(&mut term.composer.history_requested, true);
-        self.send_pty(PtyClient::CreatePty { cwd: Some(cwd), cols, rows, shell: None, shell_args: None, presentation: Some(presentation) });
+        let history = term.launch_command.is_none() && !std::mem::replace(&mut term.composer.history_requested, true);
+        let (shell, shell_args) = term.launch_command.map_or((None, None), |(program, args)| {
+            (Some(program.to_owned()), Some(args.iter().map(|arg| (*arg).to_owned()).collect()))
+        });
+        self.send_pty(PtyClient::CreatePty { cwd: Some(cwd), cols, rows, shell, shell_args, presentation: Some(presentation) });
         self.pending_pty.push_back(tab_id);
         if let (true, Some(daemon)) = (history, &self.daemon) {
             daemon.send_scoped(Family::Files, json!({"ReadShellHistory": {"max_entries": 1000}}), &self.cwd);
@@ -376,17 +391,32 @@ impl App {
                 let known = self.terminals.values().find(|t| t.shell.session.as_deref() == Some(&session_id));
                 let size = match known {
                     Some(term) => Some(term.shell.size()),
-                    None => self.pending_pty.pop_front().and_then(|tab_id| self.terminals.get_mut(&tab_id)).map(|term| {
-                        term.shell.attach(session_id.clone());
-                        term.shell.size()
-                    }),
+                    None => match self.pending_pty.pop_front() {
+                        Some(tab_id) => match self.terminals.get_mut(&tab_id) {
+                            Some(term) => {
+                                term.shell.attach(session_id.clone());
+                                Some(term.shell.size())
+                            }
+                            // The user closed the tab while the daemon was still spawning it.
+                            None => { self.send_pty(PtyClient::ClosePty { session_id }); return; }
+                        },
+                        None => None,
+                    },
                 };
                 // The pane may have been measured (or resized) after the PTY was requested.
                 if let Some((cols, rows)) = size { self.send_pty(PtyClient::Resize { session_id, cols, rows }); }
             }
             PtyServer::PtyOutput { session_id, bytes, offset } => {
-                let replies = self.terminals.values_mut().find(|t| t.shell.session.as_deref() == Some(&session_id))
-                    .map(|term| term.shell.feed(&bytes, offset)).unwrap_or_default();
+                let Some(term) = self.terminals.values_mut().find(|t| t.shell.session.as_deref() == Some(&session_id)) else { return };
+                if live {
+                    if let Some(command) = term.launch_command {
+                        let skip = offset.zip(term.shell.next_offset()).map_or(0, |(start, next)| next.saturating_sub(start));
+                        if let Some(url) = term.browser_handoff.receive(command, &bytes[skip.min(bytes.len() as u64) as usize..]) {
+                            let _ = harness_login::open(url);
+                        }
+                    }
+                }
+                let replies = term.shell.feed(&bytes, offset);
                 if live { self.pty_input(&session_id, &replies); }
             }
             // The daemon restarted (or reaped the shell): a reattach finds nothing, so start over.
@@ -395,6 +425,10 @@ impl App {
             // the problem.
             PtyServer::Error { message } if message.starts_with("failed to spawn pty") => {
                 if let Some(tab_id) = self.pending_pty.pop_front() {
+                    if let Some((program, _)) = self.terminals.get(&tab_id).and_then(|term| term.launch_command) {
+                        self.end_harness_login(tab_id, Some(&format!("Could not start `{program}`. Check that it is installed and on the agent host's PATH.")));
+                        return;
+                    }
                     let root = self.cwd.clone();
                     let retry = self.terminals.get_mut(&tab_id).is_some_and(|term| {
                         let elsewhere = term.shell.cwd != root && crate::startup::absolute(&root);
@@ -409,6 +443,10 @@ impl App {
                     .find(|(_, t)| t.shell.session.as_ref().is_some_and(|id| message == format!("unknown session {id}") || message == format!("No such PTY: {id}")))
                     .map(|(id, _)| *id);
                 if let Some(tab_id) = tab {
+                    if self.terminals.get(&tab_id).is_some_and(|term| term.launch_command.is_some()) {
+                        self.end_harness_login(tab_id, Some("The sign-in session was lost. Open /connect-agent to try again."));
+                        return;
+                    }
                     if let Some(term) = self.terminals.get_mut(&tab_id) { term.shell.session = None; }
                     self.create_pty(tab_id);
                 }
@@ -434,6 +472,12 @@ impl App {
                 let tab = self.terminals.iter().find(|(_, t)| t.shell.session.as_deref() == Some(&session_id)).map(|(id, _)| *id);
                 if let Some(tab_id) = tab {
                     if let Some(term) = self.terminals.get_mut(&tab_id) { term.shell.session = None; }
+                    if self.terminals.get(&tab_id).is_some_and(|term| term.launch_command.is_some()) {
+                        let installing = self.terminals[&tab_id].harness_setup.is_some_and(|(_, installing, _)| installing);
+                        let error = (exit_code != Some(0)).then_some(if installing { "The vendor installer did not complete." } else { "The provider did not finish sign-in." });
+                        self.end_harness_login(tab_id, error);
+                        return;
+                    }
                     match self.tabs.iter().position(|t| t.id == tab_id).filter(|_| exit_code.is_some()) {
                         // The shell exited (`exit`, Ctrl+D): its tab closes, as its close button does.
                         Some(index) => self.close_tab_now(index),
@@ -445,6 +489,22 @@ impl App {
             PtyServer::TerminalDirectoryChanged { session_id, request_id, directory } => self.directory_changed(&session_id, &request_id, Ok(&directory)),
             PtyServer::TerminalDirectoryChangeFailed { session_id, request_id, message } => self.directory_changed(&session_id, &request_id, Err(&message)),
             _ => {}
+        }
+    }
+
+    fn end_harness_login(&mut self, tab_id: u64, error: Option<&str>) {
+        let setup = self.terminals.get(&tab_id).and_then(|term| term.harness_setup);
+        let was_active = self.active_tab().id == tab_id;
+        if let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) {
+            self.close_tab_now(index);
+        }
+        if was_active {
+            if let Some((provider, _, _)) = setup.filter(|(_, _, origin)| self.active_tab().id == *origin) {
+                self.open_agent_connections(Some(provider));
+            }
+        }
+        if let Some(error) = error {
+            self.modal = Some(crate::ui::modal::Modal::notice(if setup.is_some_and(|(_, installing, _)| installing) { "Harness install" } else { "Harness sign-in" }, error));
         }
     }
 

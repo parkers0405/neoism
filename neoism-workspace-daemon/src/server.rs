@@ -338,6 +338,14 @@ pub fn router(state: AppState) -> Router {
             any(agent_workspace_proxy_root),
         )
         .route(
+            "/agent/workspaces/:workspace_id/v2/plugins/dev.neoism.workflows/local-catalog",
+            any(local_workflow_catalog_proxy).layer(axum::extract::DefaultBodyLimit::max(0)),
+        )
+        .route(
+            "/agent/workspaces/:workspace_id/v2/plugins/dev.neoism.workflows/local-prompt",
+            any(local_workflow_catalog_proxy).layer(axum::extract::DefaultBodyLimit::max(8192)),
+        )
+        .route(
             "/agent/workspaces/:workspace_id/*path",
             any(agent_workspace_proxy)
                 .layer(axum::extract::DefaultBodyLimit::max(25 * 1024 * 1024)),
@@ -519,6 +527,75 @@ async fn agent_workspace_proxy(
         body,
     )
     .await
+}
+
+async fn local_workflow_catalog_proxy(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+    peer: Option<axum::Extension<ConnectInfo<std::net::SocketAddr>>>,
+    method: axum::http::Method,
+    headers: HeaderMap,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
+    body: axum::body::Bytes,
+) -> Response {
+    use neoism_agent_service_api::daemon_credential::{DaemonCredentialClaims, LOCAL_WORKFLOW_CATALOG_PATH, LOCAL_PROMPT_WORKFLOW_PATH};
+    let management = uri.path().ends_with(LOCAL_PROMPT_WORKFLOW_PATH);
+    if query.is_some() || if management { method != axum::http::Method::POST || body.is_empty() }
+        else { method != axum::http::Method::GET || !body.is_empty() }
+    {
+        return (StatusCode::BAD_REQUEST, "Invalid local workflow method, query or body").into_response();
+    }
+    if !peer.is_some_and(|axum::Extension(ConnectInfo(peer))| peer.ip().is_loopback())
+        || headers.contains_key(header::ORIGIN)
+        || cloud_auth::provision_token_configured()
+        || std::env::var_os(crate::standalone::HOSTED_READINESS_NONCE_ENV).is_some()
+        || std::env::var_os(crate::standalone::FAST_READINESS_NONCE_ENV).is_some()
+        || std::env::var("NEOISM_FAST_SERVER").as_deref() == Ok("1")
+    {
+        return (StatusCode::FORBIDDEN, "Local desktop workflow catalog only").into_response();
+    }
+    if let Err(response) = require_system_master(&headers) { return response; }
+    let Some(root) = agent_workspace_root(&state.workspaces, &workspace_id) else {
+        return (StatusCode::NOT_FOUND, "unknown workspace").into_response();
+    };
+    let Ok(base) = reqwest::Url::parse(&agent_handler::configured_agent_server()) else { return StatusCode::BAD_GATEWAY.into_response() };
+    if !matches!(base.host_str(), Some("127.0.0.1" | "[::1]" | "localhost"))
+        || !matches!(base.scheme(), "http" | "https") || base.query().is_some() || base.fragment().is_some()
+        || !base.username().is_empty() || base.password().is_some()
+    {
+        return (StatusCode::FORBIDDEN, "Local Agent required for workflow catalog").into_response();
+    }
+    let base = base.as_str().trim_end_matches('/');
+    crate::agent::ensure_agent_server_started(state.workspaces.clone());
+    let Ok(client) = agent_handler::agent_http_client(base) else { return StatusCode::INTERNAL_SERVER_ERROR.into_response() };
+    if let Err(error) = agent_handler::wait_for_configured_local_agent(client, base).await {
+        return (StatusCode::SERVICE_UNAVAILABLE, error).into_response();
+    }
+    let Some(root) = root.to_str() else { return StatusCode::BAD_REQUEST.into_response() };
+    let root_header = match axum::http::HeaderValue::from_bytes(root.as_bytes()) {
+        Ok(value) => value,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let issue = if management { DaemonCredentialClaims::local_prompt_workflow } else { DaemonCredentialClaims::local_workflow_catalog };
+    let Ok(claims) = issue(&workspace_id, root.to_owned(), time::OffsetDateTime::now_utc().unix_timestamp(), AGENT_CREDENTIAL_LIFETIME_SECS) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let token = match sign_agent_credential(&claims) { Ok(token) => token, Err(response) => return response };
+    let upstream = if management { client.post(format!("{base}{LOCAL_PROMPT_WORKFLOW_PATH}")).header(header::CONTENT_TYPE, "application/json").body(body) }
+        else { client.get(format!("{base}{LOCAL_WORKFLOW_CATALOG_PATH}")) };
+    let reply = match upstream.bearer_auth(token)
+        .header("x-neoism-directory", root_header).header("x-neoism-workspace-id", workspace_id)
+        .header(header::ACCEPT, "application/json").send().await {
+        Ok(reply) => reply,
+        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+    };
+    let status = reply.status();
+    let content_type = reply.headers().get(header::CONTENT_TYPE).cloned();
+    let mut response = (status, axum::body::Body::from_stream(reply.bytes_stream())).into_response();
+    if let Some(value) = content_type { response.headers_mut().insert(header::CONTENT_TYPE, value); }
+    response.headers_mut().insert(header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+    response
 }
 
 async fn agent_proxy_inner(

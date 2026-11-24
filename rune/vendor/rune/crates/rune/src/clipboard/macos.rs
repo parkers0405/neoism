@@ -1,9 +1,9 @@
 //! The macOS pasteboard's rich forms. Every form is written after one `clearContents`, so the
 //! change count moves once; RTF from apps that offer nothing richer (TextEdit, Notes, Pages)
 //! is converted to HTML. Runs on the clipboard worker: AppKit's RTF reader and HTML writer
-//! don't need the main thread (its HTML *reader* does, and isn't used). A TIFF image (what
-//! most Mac apps copy) is converted to PNG there too, by `NSBitmapImageRep`, and a copied PNG
-//! to TIFF.
+//! don't need the main thread (its HTML *reader* does, and isn't used). Non-PNG clipboard
+//! images are converted to PNG there too, by `NSBitmapImageRep`, and a copied PNG to TIFF.
+use std::ffi::c_void;
 use std::path::PathBuf;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::{AnyObject, ProtocolObject};
@@ -60,7 +60,7 @@ pub(super) fn write(pb: &NSPasteboard, content: &ClipboardContent) -> Result<(),
 }
 
 /// Plain text, HTML and RTF, with HTML made from the RTF when the pasteboard has no HTML, and
-/// with `all`, the pasteboard's PNG (or its TIFF as PNG) and its file URLs too.
+/// with `all`, the pasteboard's image as PNG and its file URLs too.
 pub(super) fn read(pb: &NSPasteboard, all: bool) -> Option<ClipboardContent> {
     autoreleasepool(|_| unsafe {
         let text = pb.stringForType(NSPasteboardTypeString).map(|s| Zeroizing::new(s.to_string()));
@@ -93,17 +93,57 @@ fn png_to_tiff(png: &[u8]) -> Option<Retained<NSData>> {
 
 const MAX_TIFF_BYTES: usize = 8 * MAX_IMAGE_BYTES;
 
-/// The pasteboard's PNG as is, else its TIFF converted.
+/// Prefer the original PNG, then any convertible image representation. Screenshot settings
+/// and screenshot utilities can put JPEG or HEIC on the board without a PNG or TIFF flavor.
 fn read_image(pb: &NSPasteboard) -> Option<ClipboardImage> {
     let fits = |d: &Retained<NSData>| !d.is_empty() && d.len() <= MAX_IMAGE_BYTES;
     unsafe {
         if let Some(png) = pb.dataForType(NSPasteboardTypePNG).filter(fits).and_then(|d| ClipboardImage::from_png(d.bytes())) {
             return Some(png);
         }
-        // TIFF is uncompressed more often than not: allow it more room than the PNG it becomes.
-        let tiff = pb.dataForType(NSPasteboardTypeTIFF).filter(|d| !d.is_empty() && d.len() <= MAX_TIFF_BYTES)?;
-        tiff_to_png(tiff.bytes())
+        // Read explicit compressed formats before asking AppKit for TIFF, which it can
+        // synthesize (and potentially expand considerably) from another representation.
+        let compressed = pb.pasteboardItems().and_then(|items| items.iter().find_map(|item| {
+            ["public.jpeg", "public.heic", "public.heif"].into_iter().find_map(|kind| {
+                let data = item.dataForType(&NSString::from_str(kind)).filter(fits)?;
+                if !header_size_ok(&data) { return None; }
+                bitmap_to_png(&data)
+            })
+        }));
+        if let Some(image) = compressed {
+            return Some(image);
+        }
+        // TIFF is often uncompressed: allow it more room than the PNG it becomes.
+        pb.dataForType(NSPasteboardTypeTIFF).filter(|d| d.len() <= MAX_TIFF_BYTES).and_then(|d| tiff_to_png(d.bytes()))
     }
+}
+
+#[link(name = "ImageIO", kind = "framework")]
+unsafe extern "C" {
+    fn CGImageSourceCreateWithData(data: *const c_void, options: *const c_void) -> *const c_void;
+    fn CGImageSourceCopyPropertiesAtIndex(source: *const c_void, index: usize, options: *const c_void) -> *mut NSDictionary<NSString, NSNumber>;
+    static kCGImagePropertyPixelWidth: &'static NSString;
+    static kCGImagePropertyPixelHeight: &'static NSString;
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" { fn CFRelease(object: *const c_void); }
+
+/// Inspect metadata before decoding, so a small compressed paste can't request a giant bitmap.
+fn header_size_ok(data: &NSData) -> bool {
+    // SAFETY: NSData and NSDictionary bridge to their CF types. The source and properties are
+    // owned Create/Copy results, and ImageIO documents both dimension properties as CFNumbers.
+    let size = || unsafe {
+        let source = CGImageSourceCreateWithData((data as *const NSData).cast(), std::ptr::null());
+        if source.is_null() { return None; }
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, std::ptr::null());
+        CFRelease(source);
+        let properties = Retained::from_raw(properties)?;
+        let w = properties.objectForKey(kCGImagePropertyPixelWidth)?.unsignedLongLongValue();
+        let h = properties.objectForKey(kCGImagePropertyPixelHeight)?.unsignedLongLongValue();
+        u32::try_from(w).ok().zip(u32::try_from(h).ok())
+    };
+    size().is_some_and(|(w, h)| super::valid_image_size(w, h))
 }
 
 /// PNG for TIFF bytes (the first image of a multi-page TIFF), through `NSBitmapImageRep`.
@@ -111,8 +151,12 @@ pub(crate) fn tiff_to_png(tiff: &[u8]) -> Option<ClipboardImage> {
     if tiff.is_empty() || tiff.len() > MAX_TIFF_BYTES || !tiff_dimensions_ok(tiff) {
         return None;
     }
-    autoreleasepool(|_| unsafe {
-        let rep = NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(tiff))?;
+    autoreleasepool(|_| bitmap_to_png(&NSData::with_bytes(tiff)))
+}
+
+fn bitmap_to_png(data: &NSData) -> Option<ClipboardImage> {
+    unsafe {
+        let rep = NSBitmapImageRep::imageRepWithData(data)?;
         let (w, h) = (rep.pixelsWide(), rep.pixelsHigh());
         if w <= 0 || h <= 0 || !super::valid_image_size(w as u32, h as u32) {
             return None;
@@ -120,7 +164,7 @@ pub(crate) fn tiff_to_png(tiff: &[u8]) -> Option<ClipboardImage> {
         let png = rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new())?;
         if png.len() > MAX_IMAGE_BYTES { return None; }
         ClipboardImage::from_png(png.bytes())
-    })
+    }
 }
 
 /// Checks the first TIFF IFD's `ImageWidth` (256) and `ImageLength` (257) before handing the
@@ -285,6 +329,26 @@ mod tests {
     fn png_2x3() -> Vec<u8> {
         let rgba: Vec<u8> = (0..6u8).flat_map(|i| [i * 40, 255 - i * 40, 128, 255]).collect();
         crate::drag_out::encode_png(2, 3, &rgba).unwrap()
+    }
+
+    #[test]
+    fn jpeg_only_screenshot_pastes_as_png() {
+        autoreleasepool(|_| unsafe {
+            let pb: Option<Retained<NSPasteboard>> = objc2::msg_send_id![NSPasteboard::class(), pasteboardWithUniqueName];
+            let Some(pb) = pb else { return eprintln!("no pasteboard server; skipped") };
+            let rep = NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(&png_2x3())).unwrap();
+            let jpeg = rep.representationUsingType_properties(NSBitmapImageFileType::JPEG, &NSDictionary::new()).unwrap();
+            let item = NSPasteboardItem::new();
+            assert!(item.setData_forType(&jpeg, &NSString::from_str("public.jpeg")));
+            pb.clearContents();
+            assert!(pb.writeObjects(&NSArray::from_vec(vec![ProtocolObject::from_retained(item)])));
+            assert!(header_size_ok(&jpeg));
+            let content = read(&pb, true).expect("pasteboard image");
+            let image = content.image().expect("image attachment");
+            assert_eq!(image.size(), (2, 3));
+            assert!(image.png().starts_with(b"\x89PNG"));
+            let _: () = objc2::msg_send![&pb, releaseGlobally];
+        });
     }
 
     fn tiff_of(png: &[u8]) -> Vec<u8> { png_to_tiff(png).unwrap().bytes().to_vec() }

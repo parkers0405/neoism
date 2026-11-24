@@ -13,6 +13,7 @@ pub enum TabKind {
     Agent { session: Option<String> },
     /// A file in the code editor (workspace-relative path).
     Editor { path: String },
+    Image { path: String },
     Database { path: String },
     GitDiff,
 }
@@ -69,6 +70,10 @@ pub struct Tab {
 
 impl App {
     pub fn open_tab(&mut self, kind: TabKind) -> usize {
+        self.open_tab_with_terminal_command(kind, None)
+    }
+
+    pub(crate) fn open_tab_with_terminal_command(&mut self, kind: TabKind, command: Option<(&'static str, &'static [&'static str])>) -> usize {
         let id = self.next_tab;
         self.next_tab += 1;
         let terminal = matches!(kind, TabKind::Home | TabKind::Terminal);
@@ -79,7 +84,7 @@ impl App {
         self.tabs[self.active].draft.focused = true;
         self.layout.open(id);
         self.restore_composer_selection();
-        if terminal { self.open_terminal(id); }
+        if terminal { self.open_terminal_with_command(id, command); }
         self.active
     }
 
@@ -107,6 +112,7 @@ impl App {
         if index >= self.tabs.len() { return; }
         let removed = self.tabs.remove(index);
         self.attach.pending.remove(&removed.id);
+        if matches!(removed.kind, TabKind::Image { .. }) { self.forget_image_viewer(removed.id); }
         if removed.kind == TabKind::GitDiff { self.clear_git_review(); }
         self.close_terminal(removed.id);
         self.forget_table_state(removed.id);
@@ -151,6 +157,7 @@ impl App {
             },
             TabKind::Database { path } if path.is_empty() => "Database".into(),
             TabKind::Database { path } | TabKind::Editor { path } => path.rsplit('/').next().unwrap_or(path).to_owned(),
+            TabKind::Image { path } => crate::image_viewer::title(path).to_owned(),
             TabKind::Agent { session: None } => "Neoism".into(),
             TabKind::Agent { session: Some(id) } => self.threads.iter().find(|t| &t.session_id == id)
                 .map(|t| t.title.clone())
@@ -185,7 +192,7 @@ impl App {
                 self.submit_prompt(&session_id, text)
             }
             TabKind::Agent { session: None } => self.create_thread(index, text),
-            TabKind::Editor { .. } | TabKind::Database { .. } | TabKind::GitDiff => {}
+            TabKind::Editor { .. } | TabKind::Image { .. } | TabKind::Database { .. } | TabKind::GitDiff => {}
         }
     }
 

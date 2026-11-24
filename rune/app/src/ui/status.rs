@@ -112,6 +112,7 @@ impl App {
             TabKind::Agent { .. } => ("AGENT", p.red),
             TabKind::Database { .. } => ("DATABASE", p.blue),
             TabKind::GitDiff => ("DIFF", p.blue),
+            TabKind::Image { .. } => ("IMAGE", p.cyan),
             TabKind::Terminal => ("TERMINAL", p.green),
             TabKind::Editor { .. } if self.active_buffer().is_some_and(|b| b.prompt.is_some()) => ("COMMAND", p.green),
             TabKind::Editor { .. } => match self.editor_mode() {

@@ -10,6 +10,7 @@ async fn fake_acp_child_streams_interleaved_transcript_before_completion() {
         ExternalRuntime::Codex,
         ExternalRuntime::Claude,
         ExternalRuntime::OpenCode,
+        ExternalRuntime::Kiro,
     ] {
         let root = std::env::temp_dir().join(format!(
             "neoism-acp-transcript-{}",
@@ -57,10 +58,10 @@ done
         let mut services = crate::standard_services();
         services.executables = Arc::new(
             crate::executable::test_support::FakeExecutableService::with(
-                if matches!(runtime, ExternalRuntime::OpenCode) {
-                    "opencode"
-                } else {
-                    "npx"
+                match runtime {
+                    ExternalRuntime::OpenCode => "opencode",
+                    ExternalRuntime::Kiro => "kiro-cli",
+                    _ => "npx",
                 },
                 script,
             ),
@@ -96,8 +97,10 @@ done
         )
         .await
         .unwrap();
-        child.extra.get_mut("externalAgent").unwrap()["runtime"] = json!("acp");
-        state.inner.store.update_session(&child).await.unwrap();
+        if !runtime.acp_only() {
+            child.extra.get_mut("externalAgent").unwrap()["runtime"] = json!("acp");
+            state.inner.store.update_session(&child).await.unwrap();
+        }
         let model = external_model(runtime);
         let user_id = Id::ascending(IdKind::Message);
         append_external_user_message(

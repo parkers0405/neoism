@@ -16,6 +16,15 @@ use std::sync::{
 };
 use tokio::sync::{Mutex, Semaphore};
 
+#[path = "tool_composition_unattended.rs"]
+#[allow(dead_code)] // Internal prerequisite; no unattended caller is wired yet.
+pub(crate) mod unattended;
+
+#[path = "tool_composition_mcp_admission.rs"]
+mod mcp_admission;
+#[path = "tool_composition_metadata.rs"]
+pub(crate) mod metadata;
+
 pub(crate) const DESCRIPTION: &str = "Compose multiple tools with bounded JavaScript. Prefer small Promise.all batches for independent known native/MCP tool calls, not serial awaits: return await Promise.all([tools.neoism.read({filePath: 'a.rs'}), tools.neoism.read({filePath: 'b.rs'})]); Discover unknown signatures synchronously with search({query: 'read', namespace: 'neoism', limit: 10, offset: 0}) (fields optional); skip discovery for known signatures. Then call tools.neoism.read({...}) for native tools or tools.github.list_issues({...}) for MCP. Await dependencies before follow-up calls; never parallelize conflicting mutations. Reuse results; avoid redundant reads or polling. Native file tools first still applies; do not replace them with shell/script file operations. Return only the selected value; console.log emits bounded logs. Supported bounded JavaScript subset: no template literals, destructuring, spread, new, or imports; throw a string rather than new Error(...). No ambient filesystem, process or network. Each call returns {title,output,metadata,isError}; output is formatted text, NOT JSON data. Only actual MCP metadata.mcp.result.structuredContent is also exposed as structuredContent/data. Tool errors are catchable; effects/media remain recorded even if the script fails. Excluded: compose, execute, task, task_result, stop_task, question, plan_enter, plan_exit, complete_goal, move_chat, background_task, background_task_result. These remain available as direct tools.";
 const EXCLUDED: &[&str] = &[
     "compose",
@@ -30,6 +39,7 @@ const EXCLUDED: &[&str] = &[
     "move_chat",
     "background_task",
     "background_task_result",
+    "workflow",
 ];
 
 #[derive(Clone, Default)]
@@ -427,7 +437,7 @@ impl std::io::Write for CountWriter {
         Ok(())
     }
 }
-fn serialized_size(value: &impl serde::Serialize, limit: usize) -> Result<usize, String> {
+pub(crate) fn serialized_size(value: &impl serde::Serialize, limit: usize) -> Result<usize, String> {
     let mut writer = CountWriter { bytes: 0, limit };
     serde_json::to_writer(&mut writer, value)
         .map_err(|_| "composition JSON size limit exceeded".to_string())?;

@@ -49,7 +49,9 @@ impl NativeProjector {
                 let rules = current_permissions(&state, session_id.as_str()).await?;
                 let actions = targets.iter().map(|target| permission::evaluate(&permission_name, target, &rules).action).collect::<Vec<_>>();
                 if actions.contains(&PermissionAction::Deny) { return Ok(json!({"decision":"deny"})); }
-                if actions.iter().all(|action| *action == PermissionAction::Allow) {
+                if actions.iter().all(|action| *action == PermissionAction::Allow)
+                    || super::super::requests::skip_external_prompt(&state, session_id.as_str(), &permission_name).await
+                {
                     return Ok(json!({"decision":"allow_once"}));
                 }
                 let call = params["toolCallId"].as_str().or_else(|| params["id"].as_str())

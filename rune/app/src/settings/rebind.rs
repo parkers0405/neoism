@@ -68,9 +68,13 @@ pub fn hint(values: &Value, name: &str) -> String {
     let (mods, key) = binding(values, def);
     if key.is_empty() { String::new() } else { super::keybinds::format_combo(mods, key) }
 }
-fn chord(event: &KeyEvent) -> Option<(String, String)> {
+fn chord(event: &KeyEvent, base: Option<char>) -> Option<(String, String)> {
+    // macOS Option can type a symbol instead of the letter named by the binding.
+    let base = base.filter(|_| cfg!(target_os = "macos") && event.mods.alt);
     let key = match &event.key {
-        Key::Command(c) => c.to_lowercase().to_string(),
+        Key::Command(c) => base.unwrap_or(*c).to_lowercase().to_string(),
+        Key::Text(_) if base == Some(' ') => "space".into(),
+        Key::Text(_) if let Some(c) = base => c.to_lowercase().to_string(),
         Key::Text(t) if t == " " => "space".into(),
         Key::Text(t) => t.to_lowercase(),
         Key::Tab => "tab".into(),
@@ -145,7 +149,7 @@ impl App {
         list.retain(|v| v["action"].as_str() != Some(def.action));
         self.write_setting("keybinds.keys", json!(list));
     }
-    pub fn capture_binding(&mut self, event: &KeyEvent) -> bool {
+    pub fn capture_binding(&mut self, event: &KeyEvent, tx: &Tx) -> bool {
         let Some(index) = self.settings.as_ref().and_then(|s| s.rebinding) else {
             return false;
         };
@@ -156,7 +160,7 @@ impl App {
             }
             return true;
         }
-        let Some((mods, key)) = chord(event) else {
+        let Some((mods, key)) = chord(event, tx.key_base()) else {
             return true;
         };
         let def = &KEYBINDS[index];
@@ -187,7 +191,7 @@ impl App {
         true
     }
     pub fn bound_shortcut(&mut self, event: &KeyEvent, tx: &mut Tx) -> bool {
-        let Some((mods, key)) = chord(event) else {
+        let Some((mods, key)) = chord(event, tx.key_base()) else {
             return false;
         };
         let chosen = KEYBINDS
@@ -245,6 +249,19 @@ mod tests {
     use super::*;
     #[cfg(target_os = "macos")]
     use crate::app::Sidebar;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn option_s_symbol_matches_search_files_binding() {
+        let event = KeyEvent {
+            key: Key::Text("\u{df}".into()),
+            mods: rune::Mods { alt: true, ..Default::default() },
+        };
+        let (mods, key) = chord(&event, Some('s')).unwrap();
+        let def = KEYBINDS.iter().find(|d| d.action == "searchfiles").unwrap();
+        assert!(same(default(def), (&mods, &key)));
+    }
+
     #[test]
     fn modifier_order_and_overrides() {
         assert!(same(("control | shift", "T"), ("shift|control", "t")));

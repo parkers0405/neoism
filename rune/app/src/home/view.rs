@@ -32,7 +32,22 @@ pub fn view(app: &App) -> El {
         .on_layout(move |a: &mut App, [_, _, w, h]: [f32; 4]| {
             if let Some(term) = a.terminals.get_mut(&tab_id) { term.area = [w, h]; }
         });
-    if term.raw() { return pane.child(super::grid::view(app, term)); }
+    if term.raw() {
+        let mut pane = pane.child(super::grid::view(app, term));
+        if let Some(url) = &term.browser_handoff.url {
+            let url = url.clone();
+            let s = app.ty.scale();
+            pane = pane.child(el().key("harness-sign-in-browser").px(10.0 * s).py(6.0 * s).radius(6.0 * s)
+                .fill(rgb(p.surface)).hover(rgb(p.blue).alpha(0.35))
+                .child(text("Open sign-in page").font(ink(app, 0.85, Some(550.0))).color(rgb(p.blue)))
+                .on_press(move |a: &mut App| {
+                    if super::harness_login::open(&url).is_err() {
+                        a.modal = Some(crate::ui::modal::Modal::notice("Could not open browser", "Open the provider's authorization link shown in the sign-in tab."));
+                    }
+                }).pin(None, Some(8.0 * s), Some(12.0 * s), None));
+        }
+        return pane;
+    }
     let composer_h = composer_height(app);
     let mut pane = pane.child(history(app, term, composer_h));
     let input = !(term.shell.busy() && term.long_running());

@@ -83,6 +83,20 @@ pub struct Daemon {
 }
 
 impl Daemon {
+    #[cfg(test)]
+    pub(crate) fn capture_requests() -> (Self, impl Fn() -> Vec<(Family, Value)>) {
+        let (outbound, requests) = channel();
+        let daemon = Self { outbound, sequence: Arc::new(1.into()), target: Default::default(), _lifetime: Arc::new(()) };
+        (daemon, move || requests.try_iter().filter_map(|message| match message {
+            Outbound::Request(_, family, value, _) => Some((family, value)),
+            Outbound::Close(..) => None,
+        }).collect())
+    }
+
+    /// Snapshot the same destination this workspace's WebSocket uses; discovery does disk I/O
+    /// and must be resolved by the HTTP worker, not by the UI callback.
+    pub(crate) fn http_target(&self) -> Option<Target> { self.target.lock().unwrap().clone() }
+
     /// Start a connection to the local daemon. `wake` asks the UI thread to drain `inbox`.
     pub fn start(wake: impl Fn() + Send + Sync + 'static) -> (Daemon, Inbox) { Daemon::start_to(None, wake) }
 
@@ -231,6 +245,25 @@ fn discover(target: Option<&Target>) -> Result<Endpoint, String> {
         format!("ws://{address}/session")
     };
     Ok(Endpoint { url: with_token(&base, token.as_deref()), pairing_token: None })
+}
+
+/// The workspace-scoped Agent proxy used by the desktop SDK. The daemon, not the caller,
+/// resolves the workspace root and attaches the upstream credential and directory header.
+pub(crate) fn agent_http_endpoint(target: Option<&Target>, workspace: &str) -> Result<(url::Url, Option<String>), String> {
+    let endpoint = discover(target)?;
+    let mut url = url::Url::parse(&endpoint.url).map_err(|_| "Invalid daemon address")?;
+    let scheme = match url.scheme() { "ws" => "http", "wss" => "https", _ => return Err("Unsupported daemon address".into()) };
+    url.set_scheme(scheme).map_err(|_| "Invalid daemon address")?;
+    let token = endpoint.pairing_token.filter(|s| !s.is_empty()).or_else(|| {
+        url.query_pairs().find(|(key, value)| key == "token" && !value.is_empty()).map(|(_, token)| token.into_owned())
+    });
+    url.set_query(None);
+    url.set_fragment(None);
+    let base = url.path().trim_end_matches('/');
+    let base = base.strip_suffix("/session").unwrap_or(base).to_owned();
+    url.set_path(&base);
+    url.path_segments_mut().map_err(|_| "Invalid daemon address")?.pop_if_empty().extend(["agent", "workspaces", workspace]);
+    Ok((url, token))
 }
 
 type Socket = WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>;

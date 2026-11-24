@@ -190,6 +190,43 @@ pub(crate) struct SessionStore {
     _event_retention: Option<Arc<event_retention::RetentionWorker>>,
 }
 
+pub(crate) struct WorkflowEventCheckpoint {
+    activation_id: String,
+    stream_key: String,
+    name: String,
+    epoch: i64,
+    sequence: i64,
+    pub(crate) cursor: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum WorkflowEventAdmission {
+    Admitted(String),
+    Duplicate,
+    /// Stop reading this stream. This covers stale activation/checkpoint or capacity.
+    Blocked,
+}
+
+pub(crate) struct PendingWorkflowEvent {
+    pub(crate) run: crate::workflow::WorkflowRun,
+    pub(crate) data: serde_json::Value,
+    epoch: i64,
+    stream_key: String,
+}
+
+fn workflow_event_stream_key(
+    projection: &crate::workflow::WorkflowProjection,
+    server: &str,
+    name: &str,
+    binding_digest: &[u8; 32],
+) -> anyhow::Result<String> {
+    use sha2::{Digest, Sha256};
+    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(&(
+        &projection.workspace_root, &projection.source_path, &projection.source_hash,
+        server, name, binding_digest,
+    ))?)))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TenantQueryScope<'a> {
     Tenant(&'a str),
@@ -2645,6 +2682,8 @@ impl SessionStore {
             ("next_attempt_at", "INTEGER"),
             ("lease_owner", "TEXT"),
             ("lease_expires_at", "INTEGER"),
+            ("shell_result_json", "TEXT"),
+            ("compose_result_json", "TEXT"),
         ] {
             if !self.table_has_column("workflow_runs", column).await? {
                 self.db
@@ -2667,6 +2706,35 @@ impl SessionStore {
             "INSERT OR IGNORE INTO schema_migrations (version, name, applied_at) VALUES (5, 'workflow-run-administration', ?)",
             vec![int(store_i64(crate::now_millis()))],
         ).await?;
+        if !self.table_has_column("workflows", "event_epoch").await? {
+            self.db.execute(
+                "ALTER TABLE workflows ADD COLUMN event_epoch INTEGER NOT NULL DEFAULT 0",
+                Vec::new(),
+            ).await?;
+        }
+        if !self.table_has_column("workflows", "scheduled_action_approval").await? {
+            self.db.execute(
+                "ALTER TABLE workflows ADD COLUMN scheduled_action_approval TEXT",
+                Vec::new(),
+            ).await?;
+        }
+        if !self.table_has_column("workflows", "rune_prompt_origin").await? {
+            self.db.execute("ALTER TABLE workflows ADD COLUMN rune_prompt_origin TEXT", Vec::new()).await?;
+        }
+        self.db.execute_transaction(vec![
+            (r#"CREATE TABLE IF NOT EXISTS workflow_event_checkpoints (
+                activation_id TEXT NOT NULL, stream_key TEXT NOT NULL,
+                sequence INTEGER NOT NULL, cursor TEXT,
+                PRIMARY KEY (activation_id, stream_key)
+            )"#.into(), Vec::new()),
+            (r#"CREATE TABLE IF NOT EXISTS workflow_event_deliveries (
+                activation_id TEXT NOT NULL, stream_key TEXT NOT NULL,
+                event_id TEXT NOT NULL, run_id TEXT NOT NULL UNIQUE,
+                admission_epoch INTEGER NOT NULL, event_name TEXT NOT NULL,
+                event_timestamp TEXT NOT NULL, data_json TEXT NOT NULL,
+                PRIMARY KEY (activation_id, stream_key, event_id)
+            )"#.into(), Vec::new()),
+        ]).await?;
         self.db
             .execute(
                 r#"
@@ -3899,18 +3967,64 @@ impl SessionStore {
         &self,
         projection: &crate::workflow::WorkflowProjection,
     ) -> anyhow::Result<()> {
-        self.db
+        self.write_workflow_projection(projection, None, None).await
+    }
+
+    pub(crate) async fn activate_scheduled_workflow_action(
+        &self,
+        projection: &crate::workflow::WorkflowProjection,
+        identity: &str,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(projection.active && projection.definition.action.is_some());
+        self.write_workflow_projection(projection, Some(identity), None).await
+    }
+
+    pub(crate) async fn pin_rune_prompt(&self, projection: &crate::workflow::WorkflowProjection, origin: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(projection.active && projection.definition.action.is_none());
+        self.write_workflow_projection(projection, None, Some(origin)).await
+    }
+
+    /// The marker survives pause and invalidation, so ordinary source discovery cannot
+    /// reactivate a changed source from its frontmatter. Epochs fence in-flight claims.
+    pub(crate) async fn rune_prompt_pin(&self, activation: &str) -> anyhow::Result<Option<(i64, String)>> {
+        self.db.fetch_optional("SELECT event_epoch, rune_prompt_origin FROM workflows WHERE activation_id = ? AND rune_prompt_origin IS NOT NULL", vec![text(activation)]).await?
+            .map(|row| Ok((row.get_i64("event_epoch")?, row.get_str("rune_prompt_origin")?))).transpose()
+    }
+
+    pub(crate) async fn invalidate_rune_prompt(&self, activation: &str, epoch: i64) -> anyhow::Result<bool> {
+        Ok(self.db.execute("UPDATE workflows SET active = 0, event_epoch = event_epoch + 1, updated = ? WHERE activation_id = ? AND active = 1 AND event_epoch = ? AND rune_prompt_origin IS NOT NULL",
+            vec![int(store_i64(crate::now_millis())), text(activation), int(epoch)]).await? > 0)
+    }
+
+    async fn write_workflow_projection(
+        &self,
+        projection: &crate::workflow::WorkflowProjection,
+        scheduled_action_approval: Option<&str>,
+        rune_prompt_origin: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let changed = self.db
             .execute(
                 r#"INSERT INTO workflows
                 (activation_id, workflow_id, workspace_root, source_path, source_hash,
-                 definition_json, active, activated_at, last_scheduled_at, updated)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 definition_json, active, activated_at, last_scheduled_at, updated, scheduled_action_approval, rune_prompt_origin)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(activation_id) DO UPDATE SET
+                  event_epoch = workflows.event_epoch + CASE WHEN
+                    workflows.active <> excluded.active OR workflows.source_hash <> excluded.source_hash
+                    OR workflows.source_path <> excluded.source_path
+                     OR workflows.definition_json <> excluded.definition_json
+                      OR excluded.scheduled_action_approval IS NOT NULL OR excluded.rune_prompt_origin IS NOT NULL THEN 1 ELSE 0 END,
                   source_path = excluded.source_path,
                   source_hash = excluded.source_hash,
                   definition_json = excluded.definition_json,
                   active = excluded.active,
-                  updated = excluded.updated"#,
+                   scheduled_action_approval = excluded.scheduled_action_approval,
+                   rune_prompt_origin = excluded.rune_prompt_origin,
+                   last_scheduled_at = CASE WHEN excluded.rune_prompt_origin IS NOT NULL THEN NULL ELSE workflows.last_scheduled_at END,
+                   activated_at = CASE WHEN excluded.scheduled_action_approval IS NOT NULL OR excluded.rune_prompt_origin IS NOT NULL
+                     THEN excluded.activated_at ELSE workflows.activated_at END,
+                   updated = excluded.updated
+                 WHERE workflows.rune_prompt_origin IS NULL OR excluded.rune_prompt_origin IS NOT NULL"#,
                 vec![
                     text(&projection.activation_id),
                     text(&projection.workflow_id),
@@ -3925,9 +4039,12 @@ impl SessionStore {
                         .map(|value| int(store_i64(value)))
                         .unwrap_or(SqlValue::Null),
                     int(store_i64(projection.updated)),
+                    scheduled_action_approval.map(text).unwrap_or(SqlValue::Null),
+                    rune_prompt_origin.map(text).unwrap_or(SqlValue::Null),
                 ],
             )
             .await?;
+        anyhow::ensure!(changed > 0, "A Rune-pinned workflow requires explicit reactivation in Rune");
         Ok(())
     }
 
@@ -3940,15 +4057,28 @@ impl SessionStore {
         Ok(self
             .db
             .execute(
-                "UPDATE workflows SET active = ?, updated = ? WHERE activation_id = ?",
+                "UPDATE workflows SET event_epoch = event_epoch + CASE WHEN active <> ? OR scheduled_action_approval IS NOT NULL THEN 1 ELSE 0 END, active = ?, updated = ?, scheduled_action_approval = NULL WHERE activation_id = ? AND (rune_prompt_origin IS NULL OR ? = 0)",
                 vec![
+                    int(i64::from(active)),
                     int(i64::from(active)),
                     int(store_i64(updated)),
                     text(activation_id),
+                    int(i64::from(active)),
                 ],
             )
             .await?
             > 0)
+    }
+
+    pub(crate) async fn scheduled_workflow_action_grant(
+        &self,
+        projection: &crate::workflow::WorkflowProjection,
+    ) -> anyhow::Result<Option<(i64, String)>> {
+        let row = self.db.fetch_optional(
+            "SELECT event_epoch, scheduled_action_approval FROM workflows WHERE activation_id = ? AND active = 1 AND source_path = ? AND source_hash = ? AND scheduled_action_approval IS NOT NULL",
+            vec![text(&projection.activation_id), text(&projection.source_path), text(&projection.source_hash)],
+        ).await?;
+        row.map(|row| Ok((row.get_i64("event_epoch")?, row.get_str("scheduled_action_approval")?))).transpose()
     }
 
     pub(crate) async fn get_workflow(
@@ -4020,6 +4150,183 @@ impl SessionStore {
             ).await? > 0)
     }
 
+    /// Internal-only checkpoint. The caller must first authenticate and validate the
+    /// configured HTTP endpoint and discover this push event on that connection.
+    #[allow(dead_code)]
+    pub(crate) async fn workflow_event_checkpoint(
+        &self,
+        projection: &crate::workflow::WorkflowProjection,
+        server: &str,
+        event: &crate::mcp_events::EventType,
+        binding_digest: &[u8; 32],
+    ) -> anyhow::Result<Option<WorkflowEventCheckpoint>> {
+        anyhow::ensure!(projection.definition.action.is_none(), "MCP events require a prompt workflow");
+        anyhow::ensure!(event.supports_push() && !event.name.trim().is_empty()
+            && event.name.len() <= 512, "invalid workflow push event type");
+        anyhow::ensure!(!server.is_empty() && server.len() <= 128 && server.trim() == server,
+            "invalid configured event server name");
+        let stream_key = workflow_event_stream_key(projection, server, &event.name, binding_digest)?;
+        let row = self.db.fetch_optional(
+            r#"SELECT w.event_epoch, COALESCE(c.sequence, 0) AS sequence, c.cursor
+               FROM workflows w LEFT JOIN workflow_event_checkpoints c
+                 ON c.activation_id = w.activation_id AND c.stream_key = ?
+               WHERE w.activation_id = ? AND w.workspace_root = ? AND w.source_path = ?
+                 AND w.source_hash = ? AND w.definition_json = ? AND w.active = 1"#,
+            vec![text(&stream_key), text(&projection.activation_id), text(&projection.workspace_root),
+                text(&projection.source_path), text(&projection.source_hash),
+                text(serde_json::to_string(&projection.definition)?)],
+        ).await?;
+        row.map(|row| Ok(WorkflowEventCheckpoint {
+            activation_id: projection.activation_id.clone(), stream_key,
+            name: event.name.clone(), epoch: row.get_i64("event_epoch")?,
+            sequence: row.get_i64("sequence")?, cursor: row.get_opt_str("cursor")?,
+        })).transpose()
+    }
+
+    /// Admit a single delivery. No write is made on a stale lease, duplicate, or
+    /// capacity denial. The caller must not read ahead after a capacity denial.
+    /// `event_pending` is consumed only by the explicitly bound dispatcher.
+    #[allow(dead_code)]
+    pub(crate) async fn admit_workflow_event(
+        &self,
+        checkpoint: &mut WorkflowEventCheckpoint,
+        event: &crate::mcp_events::Event,
+    ) -> anyhow::Result<WorkflowEventAdmission> {
+        anyhow::ensure!(event.name == checkpoint.name, "unrelated workflow event");
+        anyhow::ensure!(!event.event_id.is_empty() && event.event_id.len() <= 4096,
+            "invalid workflow event identity");
+        anyhow::ensure!(event.cursor.as_ref().is_none_or(|cursor| cursor.len() <= 4096),
+            "invalid workflow replay cursor");
+        anyhow::ensure!(event.timestamp.len() <= 128, "invalid workflow event timestamp");
+        let payload = serde_json::to_string(&event.data)?;
+        anyhow::ensure!(payload.len() <= 16 * 1024, "workflow event payload exceeds 16 KiB");
+        let now = store_i64(crate::now_millis());
+        let id = format!("wfr_event_{now}_{}", crate::slug());
+        let sequence = checkpoint.sequence.checked_add(1).context("workflow event checkpoint exhausted")?;
+        // Missing/null event cursors mean no replay position was supplied. Keep the
+        // last committed non-null cursor, and still advance the commit sequence.
+        let cursor = event.cursor.clone().or_else(|| checkpoint.cursor.clone());
+        let activation = &checkpoint.activation_id;
+        let stream = &checkpoint.stream_key;
+        let results = self.db.execute_transaction_with_results(vec![
+            (r#"INSERT INTO workflow_runs
+                (id, activation_id, workflow_id, scheduled_at, status, trigger, created, root_run_id)
+                SELECT ?, w.activation_id, w.workflow_id,
+                    MAX(?, COALESCE((SELECT MAX(r.scheduled_at) + 1 FROM workflow_runs r
+                        WHERE r.activation_id = w.activation_id), 0)),
+                    'event_pending', 'mcpEvent', ?, ?
+                FROM workflows w WHERE w.activation_id = ? AND w.active = 1 AND w.event_epoch = ?
+                  AND COALESCE((SELECT c.sequence FROM workflow_event_checkpoints c
+                    WHERE c.activation_id = w.activation_id AND c.stream_key = ?), 0) = ?
+                  AND NOT EXISTS (SELECT 1 FROM workflow_event_deliveries d
+                    WHERE d.activation_id = w.activation_id AND d.stream_key = ? AND d.event_id = ?)
+                  AND NOT EXISTS (SELECT 1 FROM workflow_runs r WHERE r.activation_id = w.activation_id
+                    AND r.status IN ('queued', 'running'))
+                  AND NOT EXISTS (SELECT 1 FROM workflow_runs r JOIN workflow_event_deliveries prior ON prior.run_id = r.id
+                    WHERE r.activation_id = w.activation_id AND r.status = 'event_pending'
+                      AND prior.admission_epoch = w.event_epoch AND prior.stream_key = ?)
+                  AND NOT EXISTS (SELECT 1 FROM workflow_event_deliveries d
+                    WHERE d.activation_id = w.activation_id LIMIT 1 OFFSET 1024)"#.into(),
+                vec![text(&id), int(now), int(now), text(&id), text(activation), int(checkpoint.epoch),
+                    text(stream), int(checkpoint.sequence), text(stream), text(&event.event_id), text(stream)]),
+            (r#"INSERT INTO workflow_event_deliveries
+                (activation_id, stream_key, event_id, run_id, admission_epoch, event_name, event_timestamp, data_json)
+                SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1"#.into(),
+                vec![text(activation), text(stream), text(&event.event_id), text(&id),
+                    int(checkpoint.epoch), text(&event.name), text(&event.timestamp), text(payload)]),
+            (r#"INSERT INTO workflow_event_checkpoints (activation_id, stream_key, sequence, cursor)
+                SELECT ?, ?, ?, ? WHERE changes() = 1
+                ON CONFLICT(activation_id, stream_key) DO UPDATE SET sequence = excluded.sequence, cursor = excluded.cursor"#.into(),
+                vec![text(activation), text(stream), int(sequence), opt_text(cursor.clone())]),
+        ]).await?;
+        if results.first() == Some(&1) {
+            checkpoint.sequence = sequence;
+            checkpoint.cursor = cursor;
+            return Ok(WorkflowEventAdmission::Admitted(id));
+        }
+        // Distinguish replay duplicates from backpressure without ever checkpointing a
+        // repeated event. A stale reader must stop even if this delivery is a duplicate.
+        let duplicate = self.db.fetch_optional(
+            r#"SELECT 1 AS found FROM workflow_event_deliveries d
+                JOIN workflows w ON w.activation_id = d.activation_id
+                JOIN workflow_event_checkpoints c ON c.activation_id = d.activation_id AND c.stream_key = d.stream_key
+               WHERE d.activation_id = ? AND d.stream_key = ? AND d.event_id = ?
+                 AND w.active = 1 AND w.event_epoch = ? AND c.sequence = ?"#,
+            vec![text(activation), text(stream), text(&event.event_id), int(checkpoint.epoch), int(checkpoint.sequence)],
+        ).await?.is_some();
+        Ok(if duplicate { WorkflowEventAdmission::Duplicate } else { WorkflowEventAdmission::Blocked })
+    }
+
+    pub(crate) async fn pending_workflow_event(
+        &self,
+        projection: &crate::workflow::WorkflowProjection,
+        server: &str,
+        name: &str,
+        digest: &[u8; 32],
+    ) -> anyhow::Result<Option<PendingWorkflowEvent>> {
+        let stream_key = workflow_event_stream_key(projection, server, name, digest)?;
+        let row = self.db.fetch_optional(
+            r#"SELECT r.*, d.data_json, d.admission_epoch FROM workflow_event_deliveries d
+               JOIN workflow_runs r ON r.id = d.run_id JOIN workflows w ON w.activation_id = d.activation_id
+               WHERE w.activation_id = ? AND w.source_hash = ? AND w.active = 1
+                 AND d.stream_key = ? AND d.admission_epoch = w.event_epoch
+                 AND r.status = 'event_pending' AND r.trigger = 'mcpEvent' LIMIT 1"#,
+            vec![text(&projection.activation_id), text(&projection.source_hash), text(&stream_key)],
+        ).await?;
+        row.map(|row| {
+            let data = serde_json::from_str(&row.get_str("data_json")?)?;
+            let epoch = row.get_i64("admission_epoch")?;
+            Ok(PendingWorkflowEvent { run: decode_workflow_run(row)?, data, epoch, stream_key })
+        }).transpose()
+    }
+
+    /// Commit the only provider submission authorization with its stable session
+    /// and user message. A crash after commit is ambiguous and is never retried.
+    pub(crate) async fn submit_workflow_event(
+        &self,
+        pending: &PendingWorkflowEvent,
+        session: &SessionInfo,
+        message: &MessageWithParts,
+    ) -> anyhow::Result<bool> {
+        let sid = session.id.as_str();
+        let mid = message_id(message);
+        let results = self.db.execute_transaction_with_results(vec![
+            (r#"UPDATE workflow_runs SET status = 'running', session_id = ?, started_at = ?
+                WHERE id = ? AND trigger = 'mcpEvent' AND status = 'event_pending'
+                  AND EXISTS (SELECT 1 FROM workflows w JOIN workflow_event_deliveries d
+                        ON d.activation_id = w.activation_id WHERE d.run_id = workflow_runs.id
+                        AND w.active = 1 AND w.event_epoch = ? AND d.admission_epoch = w.event_epoch AND d.stream_key = ?)
+                  AND NOT EXISTS (SELECT 1 FROM workflow_runs other WHERE other.activation_id = workflow_runs.activation_id
+                        AND other.status IN ('queued', 'running'))"#.into(),
+                vec![text(sid), int(store_i64(crate::now_millis())), text(&pending.run.id), int(pending.epoch), text(&pending.stream_key)]),
+            ("INSERT INTO sessions (id, tenant_id, info_json, updated) SELECT ?, 'local', ?, ? WHERE changes() = 1".into(),
+                vec![text(sid), text(serde_json::to_string(session)?), int(store_i64(session.time.updated))]),
+            ("INSERT INTO messages (id, tenant_id, session_id, message_json, created, position) SELECT ?, 'local', ?, ?, ?, 0 WHERE changes() = 1".into(),
+                vec![text(&mid), text(sid), text(serde_json::to_string(message)?), int(store_i64(message_created(message)))]),
+        ]).await?;
+        Ok(results.first() == Some(&1))
+    }
+
+    pub(crate) async fn finish_workflow_event(
+        &self,
+        run: &crate::workflow::WorkflowRun,
+        session_id: &str,
+        reply: Option<&MessageWithParts>,
+    ) -> anyhow::Result<bool> {
+        let (status, error) = if reply.is_some() { ("completed", None) } else {
+            ("failed", Some("restricted event prompt did not complete".into()))
+        };
+        let mut statements = vec![("UPDATE workflow_runs SET status = ?, finished_at = ?, error = ? WHERE id = ? AND session_id = ? AND trigger = 'mcpEvent' AND status = 'running'".into(),
+            vec![text(status), int(store_i64(crate::now_millis())), opt_text(error), text(&run.id), text(session_id)])];
+        if let Some(reply) = reply {
+            let mid = message_id(reply);
+            statements.push(("INSERT INTO messages (id, tenant_id, session_id, message_json, created, position) SELECT ?, 'local', ?, ?, ?, (SELECT COALESCE(MAX(position), -1) + 1 FROM messages WHERE session_id = ?) WHERE changes() = 1".into(),
+                vec![text(mid), text(session_id), text(serde_json::to_string(reply)?), int(store_i64(message_created(reply))), text(session_id)]));
+        }
+        let results = self.db.execute_transaction_with_results(statements).await?;
+        Ok(results.first() == Some(&1))
+    }
+
     /// Atomically records a scheduled occurrence and advances its durable
     /// cursor. A restart can therefore observe both writes or neither, never a
     /// queued occurrence with a stale cursor. The cursor advances even when an
@@ -4029,10 +4336,39 @@ impl SessionStore {
         run: &crate::workflow::WorkflowRun,
         concurrency: &crate::workflow::WorkflowConcurrencyPolicy,
     ) -> anyhow::Result<bool> {
-        let insert = if concurrency.mode
+        self.claim_scheduled_workflow_run_inner(run, concurrency, None, false).await
+    }
+
+    pub(crate) async fn claim_scheduled_workflow_action(
+        &self,
+        run: &crate::workflow::WorkflowRun,
+        concurrency: &crate::workflow::WorkflowConcurrencyPolicy,
+        epoch: i64,
+    ) -> anyhow::Result<bool> {
+        anyhow::ensure!(concurrency.mode == crate::workflow::WorkflowConcurrencyMode::Forbid);
+        self.claim_scheduled_workflow_run_inner(run, concurrency, Some(epoch), false).await
+    }
+
+    pub(crate) async fn claim_scheduled_rune_prompt(&self, run: &crate::workflow::WorkflowRun, concurrency: &crate::workflow::WorkflowConcurrencyPolicy, epoch: i64) -> anyhow::Result<bool> {
+        anyhow::ensure!(concurrency.mode == crate::workflow::WorkflowConcurrencyMode::Forbid);
+        self.claim_scheduled_workflow_run_inner(run, concurrency, Some(epoch), true).await
+    }
+
+    async fn claim_scheduled_workflow_run_inner(
+        &self,
+        run: &crate::workflow::WorkflowRun,
+        concurrency: &crate::workflow::WorkflowConcurrencyPolicy,
+        action_epoch: Option<i64>,
+        rune: bool,
+    ) -> anyhow::Result<bool> {
+        let mut insert = if concurrency.mode
             == crate::workflow::WorkflowConcurrencyMode::Replace
         {
-            workflow_run_insert_sql(None)
+            r#"INSERT OR IGNORE INTO workflow_runs
+                (id, activation_id, workflow_id, scheduled_at, started_at, finished_at,
+                 session_id, status, trigger, error, created, attempt, root_run_id, retry_of,
+                 next_attempt_at, lease_owner, lease_expires_at)
+                SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"#.to_owned()
         } else {
             r#"INSERT OR IGNORE INTO workflow_runs
                 (id, activation_id, workflow_id, scheduled_at, started_at, finished_at,
@@ -4041,24 +4377,38 @@ impl SessionStore {
                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 WHERE NOT EXISTS (SELECT 1 FROM workflow_runs WHERE activation_id = ? AND status IN ('queued', 'running') LIMIT 1 OFFSET ?)"#.to_string()
         };
-        let mut statements = vec![(
-            insert,
-            workflow_run_insert_params(
-                run,
-                (concurrency.mode != crate::workflow::WorkflowConcurrencyMode::Replace)
-                    .then_some(concurrency.max_running),
-            ),
-        )];
+        let mut insert_params = workflow_run_insert_params(
+            run,
+            (concurrency.mode != crate::workflow::WorkflowConcurrencyMode::Replace)
+                .then_some(concurrency.max_running),
+        );
+        let mut advance = r#"UPDATE workflows
+                SET last_scheduled_at = CASE WHEN last_scheduled_at IS NULL OR last_scheduled_at < ? THEN ? ELSE last_scheduled_at END,
+                    updated = ? WHERE activation_id = ?"#.to_string();
+        let slot = int(store_i64(run.scheduled_at));
+        let mut advance_params = vec![slot.clone(), slot.clone(), int(store_i64(crate::now_millis())), text(&run.activation_id)];
+        if let Some(epoch) = action_epoch {
+            let grant = if rune { " AND active = 1 AND event_epoch = ? AND rune_prompt_origin IS NOT NULL" } else {
+                " AND active = 1 AND event_epoch = ? AND scheduled_action_approval IS NOT NULL AND rune_prompt_origin IS NULL"
+            };
+            insert.push_str(" AND EXISTS (SELECT 1 FROM workflows WHERE activation_id = ?");
+            insert.push_str(grant);
+            insert.push_str(" AND (last_scheduled_at IS NULL OR last_scheduled_at < ?))");
+            insert_params.extend([text(&run.activation_id), int(epoch), slot]);
+            advance.push_str(grant);
+            advance_params.push(int(epoch));
+        } else {
+            insert.push_str(if concurrency.mode == crate::workflow::WorkflowConcurrencyMode::Replace { " WHERE" } else { " AND" });
+            insert.push_str(" EXISTS (SELECT 1 FROM workflows WHERE activation_id = ? AND rune_prompt_origin IS NULL)");
+            insert_params.push(text(&run.activation_id));
+            advance.push_str(" AND rune_prompt_origin IS NULL");
+        }
+        let mut statements = vec![(insert, insert_params)];
         let result_index = 0;
         if concurrency.mode == crate::workflow::WorkflowConcurrencyMode::Replace {
             statements.push(("UPDATE workflow_runs SET status = 'replaced', finished_at = ?, lease_owner = NULL, lease_expires_at = NULL WHERE activation_id = ? AND id <> ? AND status IN ('queued', 'running') AND changes() > 0".to_string(), vec![int(store_i64(crate::now_millis())), text(&run.activation_id), text(&run.id)]));
         }
-        statements.push((
-            r#"UPDATE workflows
-                SET last_scheduled_at = CASE WHEN last_scheduled_at IS NULL OR last_scheduled_at < ? THEN ? ELSE last_scheduled_at END,
-                    updated = ? WHERE activation_id = ?"#.to_string(),
-            vec![int(store_i64(run.scheduled_at)), int(store_i64(run.scheduled_at)), int(store_i64(crate::now_millis())), text(&run.activation_id)],
-        ));
+        statements.push((advance, advance_params));
         let results = self.db.execute_transaction_with_results(statements).await?;
         Ok(results.get(result_index).copied().unwrap_or_default() > 0)
     }
@@ -4088,6 +4438,41 @@ impl SessionStore {
             )
             .await?;
         Ok(updated > 0)
+    }
+
+    pub(crate) async fn start_workflow_shell_run(
+        &self,
+        run: &crate::workflow::WorkflowRun,
+    ) -> anyhow::Result<bool> {
+        let Some(owner) = run.lease_owner.as_deref() else {
+            return Ok(false);
+        };
+        let now = int(store_i64(crate::now_millis()));
+        Ok(self.db.execute(
+            "UPDATE workflow_runs SET status = 'running', started_at = ? WHERE id = ? AND status = 'queued' AND trigger = ? AND trigger IN ('manual', 'scheduledShell', 'manualCompose', 'scheduledCompose') AND lease_owner = ? AND lease_expires_at > ?",
+            vec![now.clone(), text(&run.id), text(&run.trigger), text(owner), now],
+        ).await? > 0)
+    }
+
+    pub(crate) async fn finish_workflow_shell_run(
+        &self,
+        run: &crate::workflow::WorkflowRun,
+    ) -> anyhow::Result<bool> {
+        let Some(owner) = run.lease_owner.as_deref() else {
+            return Ok(false);
+        };
+        let result = run
+            .shell_result
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        let compose = run.compose_result.as_ref().map(serde_json::to_string).transpose()?;
+        Ok(self.db.execute(
+            "UPDATE workflow_runs SET status = ?, finished_at = ?, error = ?, shell_result_json = ?, compose_result_json = ?, lease_owner = NULL, lease_expires_at = NULL WHERE id = ? AND status = 'running' AND lease_owner = ?",
+            vec![text(&run.status), int(store_i64(run.finished_at.unwrap_or_else(crate::now_millis))),
+                run.error.as_deref().map(text).unwrap_or(SqlValue::Null),
+                result.as_deref().map(text).unwrap_or(SqlValue::Null), compose.as_deref().map(text).unwrap_or(SqlValue::Null), text(&run.id), text(owner)],
+        ).await? > 0)
     }
 
     pub(crate) async fn list_workflow_runs(
@@ -4141,14 +4526,14 @@ impl SessionStore {
         now: u64,
     ) -> anyhow::Result<Vec<crate::workflow::WorkflowRun>> {
         self.db.fetch_all(
-            "SELECT r.* FROM workflow_runs r JOIN workflows w ON w.activation_id = r.activation_id WHERE w.active = 1 AND r.status = 'retry_waiting' AND r.next_attempt_at <= ? ORDER BY r.next_attempt_at, r.created",
+            "SELECT r.* FROM workflow_runs r JOIN workflows w ON w.activation_id = r.activation_id WHERE w.active = 1 AND w.rune_prompt_origin IS NULL AND r.status = 'retry_waiting' AND r.next_attempt_at <= ? ORDER BY r.next_attempt_at, r.created",
             vec![int(store_i64(now))],
         ).await?.into_iter().map(decode_workflow_run).collect()
     }
 
     pub(crate) async fn next_workflow_retry_at(&self) -> anyhow::Result<Option<u64>> {
         Ok(self.db.fetch_optional(
-            "SELECT MIN(r.next_attempt_at) AS next_attempt_at FROM workflow_runs r JOIN workflows w ON w.activation_id = r.activation_id WHERE w.active = 1 AND r.status = 'retry_waiting' AND r.next_attempt_at IS NOT NULL",
+            "SELECT MIN(r.next_attempt_at) AS next_attempt_at FROM workflow_runs r JOIN workflows w ON w.activation_id = r.activation_id WHERE w.active = 1 AND w.rune_prompt_origin IS NULL AND r.status = 'retry_waiting' AND r.next_attempt_at IS NOT NULL",
             Vec::new(),
         ).await?.and_then(|row| row.get_opt_i64("next_attempt_at").ok().flatten()).map(|value| value.max(0) as u64))
     }
@@ -6665,6 +7050,12 @@ fn decode_workflow_run(row: DbRow) -> anyhow::Result<crate::workflow::WorkflowRu
         lease_expires_at: row
             .get_opt_i64("lease_expires_at")?
             .map(|value| value.max(0) as u64),
+        shell_result: row
+            .get_opt_str("shell_result_json")?
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?,
+        compose_result: row.get_opt_str("compose_result_json")?.as_deref().map(serde_json::from_str).transpose()?,
     })
 }
 

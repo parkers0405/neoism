@@ -174,6 +174,7 @@ impl App {
     pub fn open_file(&mut self, path: &str, line: Option<u32>) {
         if crate::database::is_path(path) { self.open_database(path); return; }
         let relative = std::path::Path::new(path).strip_prefix(&self.cwd).map(|p| p.display().to_string()).unwrap_or_else(|_| path.to_owned());
+        if crate::image_viewer::is_path(&relative) { self.open_image_file(relative); return; }
         if let Some(index) = self.tabs.iter().position(|t| t.kind == TabKind::Editor { path: relative.clone() }) {
             self.select_tab(self.tabs[index].id);
             if let Some(buffer) = self.buffers.get_mut(&relative) {

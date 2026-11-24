@@ -95,7 +95,7 @@ fn header(app: &App, settings: &Settings, compact: bool, s: f32) -> El {
 }
 
 fn keys(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
-    if app.capture_binding(event) { return true; }
+    if app.capture_binding(event, tx) { return true; }
     // Left/Right edit the query while there is one; otherwise they change category.
     if matches!(event.key, Key::Left | Key::Right) && app.settings.as_ref().is_some_and(|s| !s.searching() && s.editing.is_none()) {
         return app.settings_key(event);

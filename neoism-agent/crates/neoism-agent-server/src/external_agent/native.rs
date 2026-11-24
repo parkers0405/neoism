@@ -323,7 +323,7 @@ fn native_policy(rules: &[PermissionRule]) -> Value {
         "deniedRules":rules.iter().filter(|rule| rule.action == PermissionAction::Deny).collect::<Vec<_>>()})
 }
 
-async fn current_permissions(state: &AppState, session_id: &str) -> Result<Vec<PermissionRule>, String> {
+pub(super) async fn current_permissions(state: &AppState, session_id: &str) -> Result<Vec<PermissionRule>, String> {
     let mut rules = Vec::new();
     let mut id = Some(session_id.to_string());
     let mut seen = BTreeSet::new();

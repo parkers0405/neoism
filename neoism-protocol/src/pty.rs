@@ -8,6 +8,8 @@ pub enum Presentation { #[default] Blocks, Grid }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ClientMessage {
+    /// Read-only readiness of the fixed set of external harnesses on this host.
+    GetHarnessStatus {},
     /// Host completion; cursor is a UTF-8 byte offset, not a character index.
     /// Requires an existing attachment and PTY execution authorization.
     CompleteTerminal { session_id: String, line: String, cursor: u32 },
@@ -70,6 +72,11 @@ pub enum ClientMessage {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ServerMessage {
+    HarnessStatuses {
+        statuses: Vec<HarnessStatus>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host_os: Option<String>,
+    },
     TerminalCompletions {
         session_id: String,
         line: String,
@@ -139,6 +146,17 @@ pub enum ServerMessage {
         message: String,
     },
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HarnessStatus {
+    pub id: String,
+    pub installed: bool,
+    pub auth: HarnessAuth,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessAuth { SignedIn, SignedOut, Unknown }
 
 /// `value` replaces the FULL input line (including its preserved suffix).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

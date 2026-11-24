@@ -418,10 +418,11 @@ pub fn conversations(app: &App) -> El {
             "failed" => ("stopped", Some(p.red)),
             _ => ("done", Some(p.green)),
         };
-        let mark = match app.tools.icons.agent(m.agent.as_deref()) {
+        let agent = m.agent.as_deref().unwrap_or("Sub-agent");
+        let mark = super::slash::harness_mark(app, agent, 13.0 * s).unwrap_or_else(|| match app.tools.icons.agent(m.agent.as_deref()) {
             Some(image) => el().key(format!("child-mark:{}", m.id)).w(13.0 * s).h(13.0 * s).pixels(image.pixels()),
             None => crate::ui::neoism_mark(app, 13.0 * s, &format!("child-mark:{}", m.id)),
-        };
+        });
         let (title_key, title_w) = (format!("child:{}", m.id), crate::ui::marquee::natural(&m.title, title_font) * 0.86);
         let status = match dot {
             None => loader(app, p.fg),
@@ -433,7 +434,7 @@ pub fn conversations(app: &App) -> El {
             .hover(if viewed { rgb(p.surface).alpha(0.45) } else { rgb(p.hover).alpha(0.7) })
             .children(lines)
             .child(row().w_full().center_y().gap(6.0 * s)
-                .child(text(m.agent.clone().unwrap_or_else(|| "Sub-agent".into())).font(meta).color(rgb(p.muted)).grow(1.0).truncate().shrink())
+                .child(text(super::slash::harness_name(agent).unwrap_or(agent).to_owned()).font(meta).color(rgb(p.muted)).grow(1.0).truncate().shrink())
                 .child(text(label).font(meta).color(rgb(p.muted)))
                 .child(status))
             .child(row().w_full().center_y().gap(8.0 * s)
@@ -828,6 +829,27 @@ mod family_tests {
         app.apply_agent(M::CatalogReset { directory: None });
         assert_eq!(app.activity_of(&app.threads[0]), "idle");
         assert!(!app.families.working_now("a"));
+    }
+
+    #[test]
+    fn an_external_background_task_stays_outside_the_work_fold_until_the_child_stops() {
+        use crate::agent::timeline::RowItem;
+        let mut app = App::new();
+        app.load_fixture("root", "Root", r#"[{"id":"prompt","kind":"User","role":"User","text":"Survey"}]"#);
+        let message = serde_json::from_value(serde_json::json!({
+            "id": "launch", "role": "Assistant", "kind": "Tool", "tool": "task", "title": "Claude survey",
+            "agent_kind": "claude", "status": "completed", "detail": "task_id: b\nstatus: running"
+        })).unwrap();
+        app.apply_agent(M::MessageUpdated { session_id: "root".into(), message, parent_message_id: None });
+        let visible = |app: &App| {
+            let session = &app.sessions["root"];
+            session.row_items((session.structure, session.messages.len(), usize::MAX, false, true)).contains(&RowItem::Message(1))
+        };
+        assert!(!visible(&app), "a launch receipt alone does not prove the child is running");
+        app.apply_agent(family(1, ["outstanding"; 4]));
+        assert!(visible(&app), "the child stays visible even after its parent goes idle");
+        app.apply_agent(family(2, ["outstanding", "outstanding", "completed", "outstanding"]));
+        assert!(!visible(&app), "the finished card folds back into Work");
     }
 
     /// The order a real background sub-agent's events arrive in (traced against the daemon):

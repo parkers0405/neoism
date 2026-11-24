@@ -11,6 +11,7 @@ mod context;
 mod goals;
 mod panel;
 mod catalog;
+mod agent_connections;
 mod lifecycle;
 pub mod effects;
 mod logos;
@@ -21,6 +22,7 @@ mod view;
 pub use picker::{Kind, Picker};
 pub(crate) use goals::{Goal, GoalNotice};
 pub use view::{effect_layer, picker_card, provider_mark, provider_mark_for};
+pub(crate) use agent_connections::{harness_mark, harness_name};
 
 use catalog::{AuthMethod, ConnectProvider};
 use neoism_protocol::agent::{AgentInfo, ProviderConnectionInfo, ProviderInfo};
@@ -58,6 +60,7 @@ struct ConnectFlow {
 pub struct Composer {
     pub prompts: super::prompts::Prompts,
     pub picker: Option<Picker>,
+    harness_status: agent_connections::Readiness,
     pub selection: Selection,
     pub defaults: Selection,
     pub selection_owner: Option<(u64, Option<String>)>,

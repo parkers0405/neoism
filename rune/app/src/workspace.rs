@@ -493,6 +493,7 @@ impl App {
         if index == self.workspace_active || index >= self.workspaces.len() {
             return;
         }
+        self.workflows = None;
         let old = self.workspace_active;
         self.workspaces[old].title = self.workspace_name.clone();
         let mut incoming = self.workspaces[index]

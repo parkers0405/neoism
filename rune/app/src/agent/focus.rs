@@ -31,12 +31,7 @@ use std::collections::HashSet;
 /// sub-agent still at work (t3code keeps live sub-agent cards out of its fold too,
 /// `liveSubagentCardEntryIds`); a finished one folds with the rest.
 fn kept(message: &HistoryMessage) -> bool {
-    let running = matches!(message.status.trim().to_ascii_lowercase().as_str(), "pending" | "running" | "streaming");
-    match message.kind {
-        Kind::Subtask => running,
-        Kind::Tool => tools::is_todos(message) || message.tool == "user_shell" || (message.tool == "task" && running),
-        _ => false,
-    }
+    tools::live_subagent(message) || (message.kind == Kind::Tool && (tools::is_todos(message) || message.tool == "user_shell"))
 }
 
 /// A call the agent made: what the work row counts.

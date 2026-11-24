@@ -345,6 +345,7 @@ impl SessionRegistry {
         subscription: Option<&SessionOutputSubscription>,
     ) -> Vec<ServerMessage> {
         match msg {
+            ClientMessage::GetHarnessStatus {} => vec![ServerMessage::Error { message: "Harness status requires the service request route".into() }],
             ClientMessage::CompleteTerminal { .. } => vec![ServerMessage::Error { message: "Completion requires the asynchronous attached request route".into() }],
             ClientMessage::CreatePty {
                 cwd,
@@ -1170,7 +1171,7 @@ fn server_message_session_id(message: &ServerMessage) -> Option<&str> {
         | ServerMessage::TerminalDirectoryChangeFailed { session_id, .. }
         | ServerMessage::SessionCwd { session_id, .. } => Some(session_id),
         ServerMessage::SessionProgram { session_id, .. } => Some(session_id),
-        ServerMessage::Ack | ServerMessage::Error { .. } => None,
+        ServerMessage::Ack | ServerMessage::Error { .. } | ServerMessage::HarnessStatuses { .. } => None,
     }
 }
 

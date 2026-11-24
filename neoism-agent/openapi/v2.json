@@ -862,7 +862,12 @@
             "enum": [
               "opencode",
               "claude",
-              "codex"
+              "codex",
+              "grok",
+              "kiro",
+              "antigravity",
+              "fx",
+              "cursor"
             ],
             "type": "string"
           },
@@ -7731,6 +7736,49 @@
         ],
         "type": "object"
       },
+      "WorkflowComposeAction": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "kind": {
+            "const": "compose",
+            "type": "string"
+          },
+          "toolIds": {
+            "items": {
+              "description": "Use docs or the exact provider_metadata tool ID of an operator-approved metadata adapter.",
+              "pattern": "^(docs|mcp__[a-z0-9]+(?:_[a-z0-9]+)*__provider_metadata)$",
+              "type": "string"
+            },
+            "maxItems": 1,
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "code",
+          "toolIds"
+        ],
+        "type": "object"
+      },
+      "WorkflowComposeResult": {
+        "additionalProperties": false,
+        "properties": {
+          "truncated": {
+            "type": "boolean"
+          },
+          "value": {}
+        },
+        "required": [
+          "value",
+          "truncated"
+        ],
+        "type": "object"
+      },
       "WorkflowConcurrencyPolicy": {
         "additionalProperties": false,
         "properties": {
@@ -7754,6 +7802,16 @@
       "WorkflowDefinition": {
         "additionalProperties": false,
         "properties": {
+          "action": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WorkflowShellAction"
+              },
+              {
+                "$ref": "#/components/schemas/WorkflowComposeAction"
+              }
+            ]
+          },
           "active": {
             "type": "boolean"
           },
@@ -8026,6 +8084,9 @@
             "minimum": 1,
             "type": "integer"
           },
+          "composeResult": {
+            "$ref": "#/components/schemas/WorkflowComposeResult"
+          },
           "created": {
             "type": "integer"
           },
@@ -8080,6 +8141,9 @@
               "null"
             ]
           },
+          "shellResult": {
+            "$ref": "#/components/schemas/WorkflowShellResult"
+          },
           "startedAt": {
             "type": [
               "integer",
@@ -8115,6 +8179,11 @@
           "at": {
             "type": "string"
           },
+          "cron": {
+            "description": "Five-field cron expression (minute hour day-of-month month day-of-week). Required for frequency cron; use interval 1 and an IANA timezone (UTC by default), without other timing fields.",
+            "maxLength": 256,
+            "type": "string"
+          },
           "date": {
             "type": "string"
           },
@@ -8148,6 +8217,48 @@
           "frequency",
           "interval",
           "timezone"
+        ],
+        "type": "object"
+      },
+      "WorkflowShellAction": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "kind": {
+            "const": "shell",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "command"
+        ],
+        "type": "object"
+      },
+      "WorkflowShellResult": {
+        "additionalProperties": false,
+        "properties": {
+          "exitCode": {
+            "type": "integer"
+          },
+          "stderr": {
+            "type": "string"
+          },
+          "stdout": {
+            "type": "string"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "exitCode",
+          "stdout",
+          "stderr",
+          "truncated"
         ],
         "type": "object"
       },
@@ -9613,7 +9724,12 @@
               "enum": [
                 "opencode",
                 "claude",
-                "codex"
+                "codex",
+                "grok",
+                "kiro",
+                "antigravity",
+                "fx",
+                "cursor"
               ],
               "type": "string"
             }
@@ -9670,7 +9786,12 @@
                       "enum": [
                         "opencode",
                         "claude",
-                        "codex"
+                        "codex",
+                        "grok",
+                        "kiro",
+                        "antigravity",
+                        "fx",
+                        "cursor"
                       ],
                       "type": "string"
                     },
@@ -9741,7 +9862,12 @@
               "enum": [
                 "opencode",
                 "claude",
-                "codex"
+                "codex",
+                "grok",
+                "kiro",
+                "antigravity",
+                "fx",
+                "cursor"
               ],
               "type": "string"
             }
@@ -9820,7 +9946,12 @@
                       "enum": [
                         "opencode",
                         "claude",
-                        "codex"
+                        "codex",
+                        "grok",
+                        "kiro",
+                        "antigravity",
+                        "fx",
+                        "cursor"
                       ],
                       "type": "string"
                     },
@@ -17513,6 +17644,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "description": "Exact sha256 source revision; required for direct action workflows.",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -17778,6 +17918,15 @@
             "name": "X-Neoism-Directory",
             "required": false,
             "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "description": "Exact sha256 source revision; required for direct action workflows.",
               "type": "string"
             }
           }

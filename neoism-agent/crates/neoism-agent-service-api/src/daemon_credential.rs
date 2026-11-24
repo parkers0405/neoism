@@ -67,6 +67,10 @@ fn signing_key_from_sources(
 
 pub const SYSTEM_WORKFLOW_VERSION: u32 = 1;
 pub const SYSTEM_WORKFLOW_SUBJECT: &str = "daemon:system-workflow";
+pub const LOCAL_WORKFLOW_CATALOG_SUBJECT: &str = "daemon:local-workflow-catalog";
+pub const LOCAL_WORKFLOW_CATALOG_PATH: &str = "/v2/plugins/dev.neoism.workflows/local-catalog";
+pub const LOCAL_PROMPT_WORKFLOW_PATH: &str = "/v2/plugins/dev.neoism.workflows/local-prompt";
+pub const LOCAL_PROMPT_WORKFLOW_SUBJECT: &str = "daemon:local-prompt-workflow";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -74,6 +78,8 @@ pub enum DaemonCredentialKind {
     #[default]
     Workspace,
     SystemWorkflow,
+    LocalWorkflowCatalog,
+    LocalPromptWorkflow,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -94,6 +100,19 @@ pub struct DaemonCredentialClaims {
 }
 
 impl DaemonCredentialClaims {
+    pub fn local_prompt_workflow(workspace_id: &str, root: String, now: i64, lifetime_secs: i64) -> Result<Self, &'static str> {
+        let mut claims = Self::new(LOCAL_PROMPT_WORKFLOW_SUBJECT, workspace_id, "local", vec![root], false, now, lifetime_secs)?;
+        claims.kind = DaemonCredentialKind::LocalPromptWorkflow;
+        validate_shape(&claims)?;
+        Ok(claims)
+    }
+    pub fn local_workflow_catalog(workspace_id: &str, root: String, now: i64, lifetime_secs: i64) -> Result<Self, &'static str> {
+        let mut claims = Self::new(LOCAL_WORKFLOW_CATALOG_SUBJECT, workspace_id, "local", vec![root], false, now, lifetime_secs)?;
+        claims.kind = DaemonCredentialKind::LocalWorkflowCatalog;
+        validate_shape(&claims)?;
+        Ok(claims)
+    }
+
     /// Machine workflow access is intentionally not a workspace or hosted identity.
     pub fn system_workflow(now: i64, lifetime_secs: i64) -> Result<Self, &'static str> {
         let mut claims = Self::new(
@@ -212,7 +231,7 @@ fn validate_shape(claims: &DaemonCredentialClaims) -> Result<(), &'static str> {
                 .workspace_id
                 .as_deref()
                 .is_none_or(|id| id.trim().is_empty())
-                || claims.subject == SYSTEM_WORKFLOW_SUBJECT
+                || matches!(claims.subject.as_str(), SYSTEM_WORKFLOW_SUBJECT | LOCAL_WORKFLOW_CATALOG_SUBJECT | LOCAL_PROMPT_WORKFLOW_SUBJECT)
             {
                 return Err("invalid workspace credential scope");
             }
@@ -225,6 +244,17 @@ fn validate_shape(claims: &DaemonCredentialClaims) -> Result<(), &'static str> {
                 || claims.subject != SYSTEM_WORKFLOW_SUBJECT
             {
                 return Err("invalid system workflow credential scope");
+            }
+        }
+        DaemonCredentialKind::LocalWorkflowCatalog | DaemonCredentialKind::LocalPromptWorkflow => {
+            let subject = if claims.kind == DaemonCredentialKind::LocalWorkflowCatalog { LOCAL_WORKFLOW_CATALOG_SUBJECT } else { LOCAL_PROMPT_WORKFLOW_SUBJECT };
+            if claims.workspace_id.as_deref().is_none_or(|id| id.trim().is_empty())
+                || claims.hosted || claims.tenant_id != "local"
+                || claims.subject != subject
+                || claims.directory_prefixes.len() != 1
+                || !std::path::Path::new(&claims.directory_prefixes[0]).is_absolute()
+            {
+                return Err("invalid local workflow catalog credential scope");
             }
         }
     }

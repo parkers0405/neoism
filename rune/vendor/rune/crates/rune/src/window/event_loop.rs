@@ -76,6 +76,11 @@ fn run_configured(factory: Factory, args: Args, accessory: bool) -> Result<(), S
     #[cfg(target_os = "macos")]
     crate::platform::app_icon::launched();
     let proxy = event_loop.create_proxy();
+    #[cfg(target_os = "macos")]
+    {
+        let proxy = proxy.clone();
+        crate::open_documents::install(move || { let _ = proxy.send_event(WakeEvent::Turn); });
+    }
     let turn = proxy.clone();
     crate::popup_menu::start(std::sync::Arc::new(move || { let _ = turn.send_event(WakeEvent::Turn); }));
     let mut windows = Windows { factory: Some(factory), args, proxy, hosts: Vec::new(), gpu: Rc::default() };

@@ -8,6 +8,7 @@ use serde_json::Value;
 pub struct Config {
     /// `presence.display-name`.
     pub display_name: Option<String>,
+    pub gold_avatar: bool,
     pub theme: String,
     pub font_size: f32,
     pub font_weight: f32,
@@ -52,7 +53,8 @@ pub fn load() -> Config {
     let model = value["agent"]["model"].as_str().map(str::to_owned);
     let variant = value["agent"]["variant"].as_str().map(str::to_owned);
     let display_name = value["presence"]["display-name"].as_str().map(str::to_owned);
-    Config { display_name, theme, font_size, font_weight, font_families: crate::ui::fonts::configured(&value), wordmark_fire: wordmark_fire(&value), focused_view: focused_view(&value), turn_at_top: turn_at_top(&value), liquid_glass_cursor: liquid_glass_cursor(&value), liquid_glass_selection: liquid_glass_selection(&value), markdown_spellcheck: markdown_spellcheck(&value), model, variant }
+    let gold_avatar = value["presence"]["avatar-palette"].as_str() == Some("obsidian-gold");
+    Config { display_name, gold_avatar, theme, font_size, font_weight, font_families: crate::ui::fonts::configured(&value), wordmark_fire: wordmark_fire(&value), focused_view: focused_view(&value), turn_at_top: turn_at_top(&value), liquid_glass_cursor: liquid_glass_cursor(&value), liquid_glass_selection: liquid_glass_selection(&value), markdown_spellcheck: markdown_spellcheck(&value), model, variant }
 }
 
 /// A sent message slides to the top of the view only when asked to (`agent/turn.rs`).

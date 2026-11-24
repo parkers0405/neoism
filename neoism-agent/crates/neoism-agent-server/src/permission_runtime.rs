@@ -115,6 +115,46 @@ pub(crate) async fn ask_permission_for_tool(
     .await
 }
 
+struct PermissionCleanup<'a> {
+    state: &'a AppState,
+    session_id: &'a str,
+    id: &'a str,
+    armed: bool,
+}
+
+impl Drop for PermissionCleanup<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Closing the harness can drop the handler before its cancellation branch runs.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let state = self.state.clone();
+            let session_id = self.session_id.to_owned();
+            let id = self.id.to_owned();
+            runtime.spawn(async move { cancel_permission(&state, &session_id, &id).await });
+        }
+    }
+}
+
+async fn cancel_permission(state: &AppState, session_id: &str, id: &str) {
+    state.inner.permission_waiters.write().await.remove(id);
+    state.inner.permissions.write().await.remove(id);
+    // Do not let a slow store prevent publishing the removal to live clients.
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        state
+            .inner
+            .store
+            .resolve_interaction(id, "cancelled", json!({"cancelled": true})),
+    )
+    .await;
+    state.publish(EventPayload::new(
+        event_type::PERMISSION_REPLIED,
+        json!({"sessionID": session_id, "requestID": id, "reply": "reject"}),
+    ));
+}
+
 pub(crate) async fn ask_permission_for_tool_cancellable(
     state: &AppState,
     session_id: &Id,
@@ -133,7 +173,6 @@ pub(crate) async fn ask_permission_for_tool_cancellable(
     } else {
         json!({"tool":tool_name,"input":input,"error":error})
     };
-    let (sender, receiver) = tokio::sync::oneshot::channel();
     let request = PermissionRequestInfo {
         id: Id::ascending(IdKind::Permission).to_string(),
         session_id: session_id.to_string(),
@@ -155,6 +194,13 @@ pub(crate) async fn ask_permission_for_tool_cancellable(
         .save_permission_request(&request)
         .await
         .map_err(|error| error.to_string())?;
+    let mut cleanup = PermissionCleanup {
+        state,
+        session_id: session_id.as_str(),
+        id: &request.id,
+        armed: true,
+    };
+    let (sender, receiver) = tokio::sync::oneshot::channel();
     state.inner.permission_waiters.write().await.insert(
         request.id.clone(),
         PermissionPending {
@@ -169,54 +215,26 @@ pub(crate) async fn ask_permission_for_tool_cancellable(
         .write()
         .await
         .insert(request.id.clone(), request.clone());
-    // Abort-on-drop leaf supervision may drop this future before its select
-    // branch runs. Synchronous best-effort map cleanup leaves no live waiter;
-    // pending.cancel independently prevents late approval side effects.
-    struct WaiterCleanup<'a> {
-        state: &'a AppState,
-        id: &'a str,
-    }
-    impl Drop for WaiterCleanup<'_> {
-        fn drop(&mut self) {
-            if let Ok(mut waiters) = self.state.inner.permission_waiters.try_write() {
-                waiters.remove(self.id);
-            }
-            if let Ok(mut permissions) = self.state.inner.permissions.try_write() {
-                permissions.remove(self.id);
-            }
-        }
-    }
-    let _waiter_cleanup = WaiterCleanup {
-        state,
-        id: &request.id,
-    };
     state.publish(EventPayload::new(
         event_type::PERMISSION_ASKED,
         json!(request),
     ));
-    if let Some(cancel) = cancel {
+    let result = if let Some(cancel) = cancel {
         tokio::select! {
             biased;
             _ = crate::session_loop::wait_for_cancellation(cancel) => {
-                // Pending entries carry the cancellation flag, so late replies
-                // cannot grant permissions even while durable cleanup is pending.
-                state.inner.permission_waiters.write().await.remove(&request.id);
-                state.inner.permissions.write().await.remove(&request.id);
-                // Map cleanup must not depend on durable-store responsiveness.
-                let _ = tokio::time::timeout(std::time::Duration::from_millis(100),
-                    state.inner.store.resolve_interaction(&request.id, "cancelled",
-                        json!({"cancelled": true}))).await;
-                state.publish(EventPayload::new(event_type::PERMISSION_REPLIED,
-                    json!({"sessionID": session_id, "requestID": request.id, "reply": "reject"})));
-                Err("permission request aborted".into())
+                cancel_permission(state, session_id.as_str(), &request.id).await;
+                cleanup.armed = false;
+                return Err("permission request aborted".into());
             }
-            result = receiver => result.map_err(|_| "permission request was closed".to_string())?,
+            result = receiver => result,
         }
     } else {
-        receiver
-            .await
-            .map_err(|_| "permission request was closed".to_string())?
-    }
+        receiver.await
+    };
+    let reply = result.map_err(|_| "permission request was closed".to_string())?;
+    cleanup.armed = false;
+    reply
 }
 
 pub(crate) async fn permission_request_payload(

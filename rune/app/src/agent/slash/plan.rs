@@ -8,6 +8,7 @@ pub enum SlashAction {
     ApplyModel(String),
     OpenModelPicker,
     OpenConnectPicker,
+    OpenAgentConnections(Option<String>),
     OpenUsagePicker,
     OpenTasksPicker,
     OpenGoalsPicker,
@@ -61,6 +62,8 @@ pub fn plan(text: &str) -> SlashAction {
     match raw {
         "/help" => ShowHelp,
         "/model" | "/models" => first().map_or(OpenModelPicker, ApplyModel),
+        "/connect" if args.first().is_some_and(|arg| arg == "agents") => OpenAgentConnections(args.get(1).cloned()),
+        "/connect-agent" | "/connect-agents" => OpenAgentConnections(first()),
         "/connect" => OpenConnectPicker,
         "/usage" => OpenUsagePicker,
         "/tasks" => OpenTasksPicker,
@@ -127,6 +130,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("/help", "Show available commands", "docs"),
     cmd("/model", "Switch model", "modal"),
     cmd("/connect", "Connect a provider (OAuth or API key)", "modal"),
+    cmd("/connect-agent", "Set up an external agent harness", "modal"),
     cmd("/usage", "View Codex account usage and reset times", "modal"),
     cmd("/tasks", "View this conversation's task list", "modal"),
     cmd("/goals", "View the current goal and elapsed time", "modal"),
@@ -169,6 +173,8 @@ mod tests {
     #[test]
     fn aliases_and_arguments() {
         assert_eq!(plan("/models"), SlashAction::OpenModelPicker);
+        assert_eq!(plan("/connect"), SlashAction::OpenConnectPicker);
+        assert_eq!(plan("/connect agents antigravity"), SlashAction::OpenAgentConnections(Some("antigravity".into())));
         assert_eq!(plan("/model openai/gpt-5"), SlashAction::ApplyModel("openai/gpt-5".into()));
         assert_eq!(plan("/reasoning high"), SlashAction::ApplyThinking("high".into()));
         assert_eq!(plan("/cd"), SlashAction::OpenDirectoryPicker);
@@ -190,6 +196,6 @@ mod tests {
         for row in COMMANDS {
             assert!(!matches!(plan(row.title), SlashAction::RunServerCommand { .. } | SlashAction::Noop), "{}", row.title);
         }
-        assert_eq!(COMMANDS.len(), 35);
+        assert_eq!(COMMANDS.len(), 36);
     }
 }

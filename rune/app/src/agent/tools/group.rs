@@ -20,11 +20,17 @@ pub fn visible(message: &HistoryMessage, index: usize, live_from: usize) -> bool
     if is_todos(message) {
         return !message.todos.is_empty();
     }
+    if live_subagent(message) { return true; }
     match message.kind {
         HistoryMessageKind::Compaction | HistoryMessageKind::User | HistoryMessageKind::Assistant => true,
         HistoryMessageKind::System => tool == "location_notice" || message.title == "Goal Started",
         HistoryMessageKind::Reasoning | HistoryMessageKind::Tool | HistoryMessageKind::Subtask => index >= live_from,
     }
+}
+
+pub(crate) fn live_subagent(message: &HistoryMessage) -> bool {
+    (message.kind == HistoryMessageKind::Subtask || (message.kind == HistoryMessageKind::Tool && message.tool == "task"))
+        && matches!(message.status.as_str(), "pending" | "running" | "streaming")
 }
 
 pub fn is_todos(message: &HistoryMessage) -> bool {

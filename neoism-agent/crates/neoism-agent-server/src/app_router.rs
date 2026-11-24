@@ -1002,6 +1002,8 @@ async fn authenticate_request(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
+    use neoism_agent_service_api::daemon_credential::{LOCAL_WORKFLOW_CATALOG_PATH, LOCAL_PROMPT_WORKFLOW_PATH};
+    let management = request.uri().path() == LOCAL_PROMPT_WORKFLOW_PATH;
     let signed_daemon = request
         .headers()
         .get(header::AUTHORIZATION)
@@ -1012,7 +1014,7 @@ async fn authenticate_request(
                 neoism_agent_service_api::daemon_credential::PREFIX
             ))
         });
-    if !signed_daemon
+    if !signed_daemon && !management && request.uri().path() != LOCAL_WORKFLOW_CATALOG_PATH
         && (request.method() == Method::OPTIONS
             || request.uri().path() == "/v2/health"
             || is_ticketed_pty_connect(&request)
@@ -1040,6 +1042,23 @@ async fn authenticate_request(
             return auth_error(StatusCode::UNAUTHORIZED, "auth.invalid_token", &message)
         }
     };
+    if request.uri().path() == LOCAL_WORKFLOW_CATALOG_PATH || management
+        || claims.as_ref().is_some_and(|claims| claims.is_local_workflow_catalog() || claims.is_local_prompt_workflow())
+    {
+        let Some(root) = local_workflow_catalog_root(claims.as_ref().filter(|_| signed_daemon), &request, state.services().hosted || state.services().workspace_worker.is_some()) else {
+            return auth_error(StatusCode::FORBIDDEN, "auth.local_workflow_catalog_forbidden", "Local workflow catalog requires its dedicated workspace credential");
+        };
+        if management {
+            return crate::local_prompt_workflow::handle(&state, root, request.into_body()).await;
+        }
+        if !to_bytes(request.into_body(), 0).await.is_ok_and(|bytes| bytes.is_empty()) {
+            return auth_error(StatusCode::BAD_REQUEST, "auth.local_workflow_catalog_body", "Workflow catalog accepts no request body");
+        }
+        return match crate::workflow::local_workspace_catalog(&state, root).await {
+            Ok(value) => axum::Json(value).into_response(),
+            Err(error) => error.into_response(),
+        };
+    }
     let system_metadata = claims.as_ref().is_some_and(|c| c.is_system_workflow())
         && system_metadata_path(request.uri().path());
     let mut request_guard = None;
@@ -1785,6 +1804,27 @@ enum OperationClass {
     HostedUnsupported,
     ManagementRead,
     ManagementMutation,
+}
+
+fn local_workflow_catalog_root(
+    claims: Option<&crate::caller::CallerClaims>,
+    request: &Request<Body>,
+    hosted: bool,
+) -> Option<std::path::PathBuf> {
+    use neoism_agent_service_api::daemon_credential::{LOCAL_WORKFLOW_CATALOG_PATH, LOCAL_PROMPT_WORKFLOW_PATH};
+    let claims = claims?;
+    let allowed = (request.method() == Method::GET && request.uri().path() == LOCAL_WORKFLOW_CATALOG_PATH && claims.is_local_workflow_catalog())
+        || (request.method() == Method::POST && request.uri().path() == LOCAL_PROMPT_WORKFLOW_PATH && claims.is_local_prompt_workflow());
+    if hosted || !allowed || request.uri().query().is_some() {
+        return None;
+    }
+    let [root] = claims.directory_prefixes.as_slice() else { return None };
+    let mut directories = request.headers().get_all("x-neoism-directory").iter();
+    if directories.next()?.as_bytes() != root.as_bytes() || directories.next().is_some() { return None; }
+    let mut ids = request.headers().get_all("x-neoism-workspace-id").iter();
+    if Some(ids.next()?.to_str().ok()?) != claims.workspace_id.as_deref() || ids.next().is_some() { return None; }
+    let canonical = std::fs::canonicalize(root).ok()?;
+    (canonical.to_str()? == root && canonical.is_dir()).then_some(canonical)
 }
 
 fn operation_class(request: &Request<Body>) -> OperationClass {

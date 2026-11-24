@@ -5,6 +5,11 @@ pub(crate) enum ExternalRuntime {
     OpenCode,
     Codex,
     Claude,
+    Grok,
+    Kiro,
+    Antigravity,
+    Fx,
+    Cursor,
 }
 
 impl ExternalRuntime {
@@ -13,7 +18,16 @@ impl ExternalRuntime {
             Self::Codex => "codex-app-server",
             Self::Claude => "claude-agent-sdk",
             Self::OpenCode => "opencode-server",
+            Self::Grok | Self::Kiro | Self::Antigravity | Self::Fx | Self::Cursor => "acp",
         }
+    }
+
+    pub(crate) fn acp_only(self) -> bool {
+        self.native_driver_id() == "acp"
+    }
+
+    pub(crate) fn from_provider_id(name: &str) -> Option<Self> {
+        Self::resolve(name).filter(|runtime| runtime.provider_id() == name)
     }
 
     /// Ownership is explicit. Observed provider children are never resumable tasks.
@@ -36,16 +50,17 @@ impl ExternalRuntime {
             "opencode" | "open-code" => Some(Self::OpenCode),
             "codex" | "openai-codex" => Some(Self::Codex),
             "claude" | "claude-code" | "claude-agent" => Some(Self::Claude),
+            "grok" | "grok-build" => Some(Self::Grok),
+            "kiro" | "kiro-cli" => Some(Self::Kiro),
+            "antigravity" | "agy" => Some(Self::Antigravity),
+            "fx" => Some(Self::Fx),
+            "cursor" | "cursor-agent" => Some(Self::Cursor),
             _ => None,
         }
     }
 
     pub(crate) fn agent_name(self) -> &'static str {
-        match self {
-            Self::OpenCode => "opencode",
-            Self::Codex => "codex",
-            Self::Claude => "claude",
-        }
+        self.provider_id()
     }
 
     pub(crate) fn display_name(self) -> &'static str {
@@ -53,7 +68,38 @@ impl ExternalRuntime {
             Self::OpenCode => "OpenCode",
             Self::Codex => "Codex",
             Self::Claude => "Claude Code",
+            Self::Grok => "Grok Build",
+            Self::Kiro => "Kiro",
+            Self::Antigravity => "Antigravity",
+            Self::Fx => "fx",
+            Self::Cursor => "Cursor",
         }
+    }
+
+    pub(super) fn is_sign_in_error(self, message: &str) -> bool {
+        let message = message.to_ascii_lowercase();
+        [
+            "auth_required", "authrequired", "authentication_required", "authentication required",
+            "not authenticated", "not logged in", "login required", "log in required",
+            "please log in", "please login", "sign in required", "sign-in required",
+            "please sign in", "run /login",
+        ]
+        .iter()
+        .any(|marker| message.contains(marker))
+            || (self == Self::Claude && message.contains("claude code authentication_failed"))
+    }
+
+    pub(super) fn task_failure_message(self, error: String) -> String {
+        if !self.is_sign_in_error(&error) {
+            return error;
+        }
+        let provider = self.display_name();
+        let login = match self {
+            Self::Claude => "Sign in using `claude auth login`",
+            Self::Codex => "Sign in with ChatGPT using `codex login`",
+            _ => "Sign in using the provider's CLI",
+        };
+        format!("{provider} sign-in required: Neoism cannot run this {provider} task yet. {login} on the host running the agent, then retry the task. This is separate from Neoism's /connect.")
     }
 
     pub(crate) fn provider_id(self) -> &'static str {
@@ -61,6 +107,28 @@ impl ExternalRuntime {
             Self::OpenCode => "opencode",
             Self::Codex => "codex",
             Self::Claude => "claude",
+            Self::Grok => "grok",
+            Self::Kiro => "kiro",
+            Self::Antigravity => "antigravity",
+            Self::Fx => "fx",
+            Self::Cursor => "cursor",
+        }
+    }
+
+    fn installed_acp_command(self) -> Option<(&'static str, &'static [&'static str])> {
+        match self {
+            Self::Grok => Some((
+                "grok",
+                &["--permission-mode", "default", "agent", "stdio"],
+            )),
+            Self::Kiro => Some((
+                "kiro-cli",
+                &["acp", "--agent-engine=v3", "--auth-method=cli"],
+            )),
+            Self::Antigravity => Some(("agy", &["acp"])),
+            Self::Fx => Some(("fx", &["acp"])),
+            Self::Cursor => Some(("cursor-agent", &["acp"])),
+            _ => None,
         }
     }
 
@@ -108,6 +176,18 @@ impl ExternalRuntime {
                     }
                 }
                 config
+            }
+            installed => {
+                let (command, args) = installed
+                    .installed_acp_command()
+                    .ok_or_else(|| "Missing installed ACP command".to_string())?;
+                AcpServerConfig::new(
+                    installed.provider_id(),
+                    installed.display_name(),
+                    resolve_runtime(services, command)?,
+                    PathBuf::from(cwd),
+                )
+                .args(args.iter().copied())
             }
         })
     }
@@ -180,18 +260,55 @@ pub(crate) fn root_runtime(session: &SessionInfo) -> Option<ExternalRuntime> {
         return None;
     }
     let extra = session.extra.get("externalAgent")?;
-    let runtime = match extra.get("provider")?.as_str()? {
-        "opencode" => Some(ExternalRuntime::OpenCode),
-        "claude" => Some(ExternalRuntime::Claude),
-        "codex" => Some(ExternalRuntime::Codex),
-        _ => None,
-    }?;
+    let runtime = ExternalRuntime::from_provider_id(extra.get("provider")?.as_str()?)?;
     runtime.owns_session(session).then_some(runtime)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_sign_in_errors_name_the_harness_and_keep_other_failures_distinct() {
+        let claude = ExternalRuntime::Claude.task_failure_message(
+            "adapter turn failed: Claude Code authentication_failed; authentication remains native-owned".into(),
+        );
+        assert!(claude.contains("Claude Code sign-in required"));
+        assert!(claude.contains("claude auth login"));
+        assert!(!claude.contains("native-owned"));
+        let codex = ExternalRuntime::Codex.task_failure_message("Not logged in".into());
+        assert!(codex.contains("ChatGPT using `codex login`"));
+        for error in ["Claude Code billing_error", "Permission denied", "Session aborted"] {
+            assert_eq!(ExternalRuntime::Claude.task_failure_message(error.into()), error);
+        }
+    }
+
+    #[test]
+    fn installed_harnesses_launch_directly_via_host_resolver() {
+        for (provider, executable, args) in [
+            ("grok", "grok", &["--permission-mode", "default", "agent", "stdio"][..]),
+            ("kiro", "kiro-cli", &["acp", "--agent-engine=v3", "--auth-method=cli"][..]),
+            ("antigravity", "agy", &["acp"][..]),
+            ("fx", "fx", &["acp"][..]),
+            ("cursor", "cursor-agent", &["acp"][..]),
+        ] {
+            let mut services = crate::standard_services();
+            let resolved = if cfg!(windows) {
+                r"C:\agents\harness.exe"
+            } else {
+                "/agents/harness"
+            };
+            services.executables = Arc::new(
+                crate::executable::test_support::FakeExecutableService::with(executable, resolved),
+            );
+            let config = ExternalRuntime::from_provider_id(provider)
+                .unwrap()
+                .acp_config(".", &services)
+                .unwrap();
+            assert_eq!(config.command, resolved, "{provider}");
+            assert!(config.args.iter().map(String::as_str).eq(args.iter().copied()), "{provider}: {:?}", config.args);
+        }
+    }
 
     #[test]
     fn codex_adapter_prefers_host_cli_without_overriding_explicit_path() {

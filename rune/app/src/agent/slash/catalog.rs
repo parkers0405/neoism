@@ -21,6 +21,8 @@ pub fn provider_logo(provider: &str) -> Option<usize> {
     Some(match provider.trim().to_lowercase().as_str() {
         "openrouter" => 0,
         "anthropic" | "claude" | "claude-code" => 1,
+        "antigravity" => super::logos::ANTIGRAVITY,
+        "cursor" => super::logos::CURSOR,
         "openai" | "chatgpt" | "codex" => 2,
         "google" | "google-vertex" | "vertex-ai" => 3,
         "github-copilot" | "copilot" => 4,

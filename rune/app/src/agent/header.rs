@@ -29,6 +29,12 @@ pub fn view(app: &App, viewed: &str) -> Option<El> {
     let back = if nav.previous_is_main { "\u{2190} Back" } else { "\u{2190} Prev" };
     let mut header = row().key("family-header").w_full().h(28.0 * s).pt(3.0 * s).justify_between()
         .child(link(Step::Previous, back, previous));
+    if let Some((name, mark)) = app.families.member(viewed).and_then(|member| member.agent.as_deref()).and_then(|id| {
+        Some((super::slash::harness_name(id)?, super::slash::harness_mark(app, id, 13.0 * s)?))
+    }) {
+        header = header.child(row().key("family-harness").gap(6.0 * s).h(22.0 * s).center_y()
+            .child(mark).child(text(name).font(app.ty.sized(12.0)).color(rgb(app.pal.muted))));
+    }
     if let Some(next) = nav.next {
         header = header.child(link(Step::Next, "Next \u{2192}", next));
     }

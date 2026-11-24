@@ -37,7 +37,7 @@ impl App {
     pub(crate) fn active_session(&self) -> Option<String> {
         match &self.active_tab().kind {
             TabKind::Agent { session } => session.clone(),
-            TabKind::Home | TabKind::Terminal | TabKind::Editor { .. } | TabKind::Database { .. } | TabKind::GitDiff => None,
+            TabKind::Home | TabKind::Terminal | TabKind::Editor { .. } | TabKind::Image { .. } | TabKind::Database { .. } | TabKind::GitDiff => None,
         }
     }
 
@@ -199,6 +199,7 @@ impl App {
                 self.set_thinking(thinking);
             }
             SlashAction::OpenConnectPicker => self.open_connect(),
+            SlashAction::OpenAgentConnections(provider) => self.open_agent_connections(provider.as_deref()),
             SlashAction::ShowMcp => self.open_mcp(),
             SlashAction::OpenSessionsPicker => {
                 let rows = self.session_rows();
@@ -609,6 +610,7 @@ impl App {
             Kind::Mcp => self.open_mcp_actions(&row.value),
             Kind::McpActions => self.run_mcp_action(&row.value),
             Kind::Connect => self.choose_connect_provider(&row.value),
+            Kind::AgentConnections => super::agent_connections::start_sign_in(self, &row.value),
             Kind::ConnectAccount => self.choose_account(&row.value),
             Kind::ConnectAccountActions => self.run_account_action(&row.value),
             Kind::ConnectAuth => self.choose_auth_method(&row.value),

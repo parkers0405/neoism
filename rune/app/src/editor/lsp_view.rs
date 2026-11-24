@@ -235,6 +235,7 @@ fn popup(app: &App) -> Option<(&super::Buffer, [f32; 4])> {
     if app.focus != crate::app::Focus::Content
         || app.settings.is_some()
         || app.picker.is_some()
+        || app.workflows.is_some()
         || app.finder.is_some()
         || app.modal.is_some()
     {

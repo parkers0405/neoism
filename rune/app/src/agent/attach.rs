@@ -188,6 +188,20 @@ impl App {
         image
     }
 
+    pub(crate) fn viewer_file_image(&self, tab: u64, path: &str) -> Option<rune::Image> {
+        let cache = self.images.as_ref()?;
+        let key = format!("viewer:{tab}");
+        if let Some(image) = self.attach.images.borrow().get(&key) { return image.clone(); }
+        let image = cache.file(std::path::Path::new(&self.cwd).join(path), 1024.0, 2.0);
+        self.attach.inline_pending.borrow_mut().push(image.clone());
+        self.attach.images.borrow_mut().insert(key, Some(image.clone()));
+        Some(image)
+    }
+
+    pub(crate) fn forget_image_viewer(&mut self, tab: u64) {
+        self.attach.images.get_mut().remove(&format!("viewer:{tab}"));
+    }
+
     pub fn preview_inline_image(&mut self, src: &str, name: &str) {
         let Some(path) = inline_path(src, &self.cwd).or_else(|| src.starts_with("data:image/").then(|| src.to_owned())) else { return };
         self.attach.preview_gallery.clear();

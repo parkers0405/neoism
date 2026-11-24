@@ -16,6 +16,11 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tokio_stream::StreamExt;
 
+use crate::mcp_events::{
+    self, EventCapability, EventStreamError, EventType, HttpMcpEventStream, ListPage,
+    ListParams, StreamParams,
+};
+
 const MAX_MCP_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 
 pub(crate) type NotificationHandler = Arc<dyn Fn(McpNotification) + Send + Sync>;
@@ -200,7 +205,22 @@ impl HttpJsonRpcClient {
         request_timeout: Duration,
         notifications: Option<NotificationHandler>,
     ) -> anyhow::Result<Self> {
-        let mut builder = reqwest::Client::builder().timeout(request_timeout);
+        Self::with_builder(
+            url,
+            configured_headers,
+            bearer_token,
+            notifications,
+            reqwest::Client::builder().timeout(request_timeout),
+        )
+    }
+
+    fn with_builder(
+        url: &str,
+        configured_headers: Option<&BTreeMap<String, String>>,
+        bearer_token: Option<String>,
+        notifications: Option<NotificationHandler>,
+        mut builder: reqwest::ClientBuilder,
+    ) -> anyhow::Result<Self> {
         if std::env::var("NEOISM_AGENT_HOSTED_GATEWAY_URLS")
             .ok()
             .is_some_and(|urls| urls.split(',').any(|allowed| allowed == url))
@@ -515,6 +535,217 @@ impl HttpJsonRpcClient {
     }
 }
 
+/// Explicitly negotiated, stateless HTTP Events connection. No legacy session ID,
+/// background SSE listener, or notification handler participates in these requests.
+#[allow(dead_code)] // Internal opt-in entry point; not enabled by ordinary MCP connect.
+pub(crate) struct HttpMcpEvents {
+    http: HttpJsonRpcClient,
+    pub(crate) capability: EventCapability,
+    request_timeout: Duration,
+}
+
+#[allow(dead_code)]
+impl HttpMcpEvents {
+    pub(crate) async fn connect(
+        url: &str,
+        headers: Option<&BTreeMap<String, String>>,
+        bearer_token: Option<String>,
+        timeout: Duration,
+    ) -> anyhow::Result<Option<Self>> {
+        Self::connect_with_builder(url, headers, bearer_token, timeout, reqwest::Client::builder()).await
+    }
+
+    pub(crate) async fn connect_loopback(url: &reqwest::Url, timeout: Duration) -> anyhow::Result<Option<Self>> {
+        anyhow::ensure!(url.scheme() == "http"
+            && matches!(url.host_str(), Some("127.0.0.1" | "[::1]"))
+            && url.username().is_empty() && url.password().is_none()
+            && url.query().is_none() && url.fragment().is_none(),
+            "workflow MCP Events endpoint must be a credential-free literal loopback HTTP URL");
+        Self::connect_with_builder(url.as_str(), None, None, timeout, reqwest::Client::builder().no_proxy()).await
+    }
+
+    async fn connect_with_builder(
+        url: &str,
+        headers: Option<&BTreeMap<String, String>>,
+        bearer_token: Option<String>,
+        timeout: Duration,
+        builder: reqwest::ClientBuilder,
+    ) -> anyhow::Result<Option<Self>> {
+        // The negotiated client has no global body timeout. Finite operations use their
+        // own deadlines; push switches from the opening deadline to the heartbeat grant.
+        let http = HttpJsonRpcClient::with_builder(
+            url,
+            headers,
+            bearer_token,
+            None,
+            builder.redirect(reqwest::redirect::Policy::none()),
+        )?;
+        let (id, reply) = tokio::time::timeout(
+            timeout,
+            Self::exchange(&http, mcp_events::DISCOVER_METHOD, json!({})),
+        )
+        .await
+        .context("MCP Events discovery timed out")??;
+        let capability = mcp_events::decode_discovery(id, &reply)
+            .context("MCP Events negotiation failed")?;
+        Ok(capability.map(|capability| Self {
+            http,
+            capability,
+            request_timeout: timeout,
+        }))
+    }
+
+    pub(crate) async fn list_page(
+        &self,
+        after: Option<&str>,
+    ) -> anyhow::Result<ListPage> {
+        let params = serde_json::to_value(ListParams::new(after)?)?;
+        let (id, reply) = tokio::time::timeout(
+            self.request_timeout,
+            Self::exchange(&self.http, mcp_events::LIST_METHOD, params),
+        )
+        .await
+        .context("MCP Events list timed out")??;
+        ListPage::decode_response(id, &reply)
+            .context("invalid MCP Events catalog response")
+    }
+
+    /// Open a single push attempt from a type discovered on this connection. No cursor
+    /// means start from now; a supplied cursor defaults replay to the last hour unless
+    /// `max_age_ms` is set. After transient failure, reopen with the last committed cursor
+    /// and the same event/arguments. Do not checkpoint a heartbeat or active cursor ahead
+    /// of unprocessed events. The caller owns deduplication and handling `truncated`.
+    pub(crate) async fn subscribe(
+        &self,
+        event: &EventType,
+        arguments: Option<&serde_json::Map<String, Value>>,
+        after: Option<&str>,
+        max_age_ms: Option<u64>,
+    ) -> anyhow::Result<HttpMcpEventStream> {
+        let params = serde_json::to_value(StreamParams::for_http(
+            event, arguments, after, max_age_ms,
+        )?)?;
+        let (id, request) =
+            Self::build_request(&self.http, mcp_events::STREAM_METHOD, params).await?;
+        // OpenCode uses 30 seconds before a heartbeat grant. A caller's shorter
+        // request timeout remains authoritative for the entire opening exchange.
+        let deadline = self.request_timeout.min(Duration::from_secs(30));
+        Ok(HttpMcpEventStream::open(request, id, event.name.clone(), deadline).await?)
+    }
+
+    /// Exactly one guarded attempt after an interrupted stream. The consumer supplies
+    /// the checkpoint; transport never retries a denial, clean completion, protocol
+    /// error, or server termination. Any longer retry/backoff policy belongs to the caller.
+    pub(crate) async fn reconnect(
+        &self,
+        failure: &EventStreamError,
+        event: &EventType,
+        arguments: Option<&serde_json::Map<String, Value>>,
+        committed_cursor: &str,
+        max_age_ms: Option<u64>,
+    ) -> anyhow::Result<HttpMcpEventStream> {
+        if !failure.can_reconnect() {
+            return Err(EventStreamError::ReconnectNotAllowed.into());
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        self.subscribe(event, arguments, Some(committed_cursor), max_age_ms)
+            .await
+    }
+
+    async fn build_request(
+        http: &HttpJsonRpcClient,
+        method: &'static str,
+        mut params: Value,
+    ) -> anyhow::Result<(u64, reqwest::RequestBuilder)> {
+        let id = {
+            let mut next_id = http.next_id.lock().await;
+            let id = *next_id;
+            if id > mcp_events::MAX_SAFE_INTEGER {
+                return Err(anyhow!("MCP Events request IDs exhausted"));
+            }
+            *next_id += 1;
+            id
+        };
+        params["_meta"] = mcp_events::request_meta();
+        let request =
+            json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        let mut headers = http.headers.clone();
+        headers.remove("mcp-session-id");
+        headers.remove("mcp-name");
+        headers.insert(
+            "mcp-protocol-version",
+            HeaderValue::from_static(mcp_events::PROTOCOL_REVISION),
+        );
+        headers.insert("mcp-method", HeaderValue::from_static(method));
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/json, text/event-stream"),
+        );
+        let body = serde_json::to_vec(&request)?;
+        if body.len() > mcp_events::MAX_JSON_BYTES {
+            return Err(mcp_events::InvalidWire::TooLarge.into());
+        }
+        Ok((id, http.client.post(&http.url).headers(headers).body(body)))
+    }
+
+    async fn exchange(
+        http: &HttpJsonRpcClient,
+        method: &'static str,
+        params: Value,
+    ) -> anyhow::Result<(u64, Vec<u8>)> {
+        let (id, request) = Self::build_request(http, method, params).await?;
+        let response = request
+            .send()
+            .await
+            .with_context(|| format!("failed to send MCP Events {method}"))?;
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "MCP Events {method} returned HTTP {}",
+                response.status()
+            ));
+        }
+        let sse = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/event-stream"));
+        let limit = mcp_events::MAX_JSON_BYTES;
+        if response
+            .content_length()
+            .is_some_and(|size| size > limit as u64)
+        {
+            return Err(mcp_events::InvalidWire::TooLarge.into());
+        }
+        let mut body = Vec::new();
+        let mut chunks = response.bytes_stream();
+        while let Some(chunk) = chunks.next().await {
+            let chunk =
+                chunk.with_context(|| format!("failed to read MCP Events {method}"))?;
+            if chunk.len() > limit - body.len() {
+                return Err(mcp_events::InvalidWire::TooLarge.into());
+            }
+            body.extend_from_slice(&chunk);
+        }
+        if sse {
+            // These methods have one finite response, not a subscription. Never dispatch
+            // incidental SSE messages to legacy listeners or select a response by position.
+            let body =
+                std::str::from_utf8(&body).context("invalid MCP Events SSE encoding")?;
+            let mut frames = sse_data_payloads(body)
+                .into_iter()
+                .filter(|frame| !frame.trim().is_empty());
+            let frame = frames.next().context("missing MCP Events SSE response")?;
+            if frames.next().is_some() {
+                return Err(anyhow!("expected one MCP Events SSE response"));
+            }
+            return Ok((id, frame.into_bytes()));
+        }
+        Ok((id, body))
+    }
+}
+
 #[cfg(test)]
 pub(super) fn parse_http_rpc_response(
     method: &str,
@@ -680,6 +911,10 @@ fn notification_from_value(value: &Value) -> Option<McpNotification> {
         params: value.get("params").cloned().unwrap_or(Value::Null),
     })
 }
+
+#[cfg(test)]
+#[path = "mcp_events_http_tests.rs"]
+mod mcp_events_http_tests;
 
 #[cfg(test)]
 mod tests {

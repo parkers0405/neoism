@@ -7,9 +7,25 @@ use crate::app::App;
 use rune::{TextEdit, Tx};
 
 impl App {
+    pub(crate) fn accepts_chat_image_paste(&self) -> bool {
+        self.focus == crate::app::Focus::Content
+            && matches!(self.active_tab().kind, crate::tabs::TabKind::Agent { .. })
+            && !self.has_prompt()
+    }
+
+    pub(crate) fn paste_window_content(&mut self, content: &rune::ClipboardContent) {
+        // Clicking the chat transcript can leave the composer without field focus.
+        if self.accepts_chat_image_paste() && self.paste_image(content) {
+            self.composer_changed();
+        } else if !content.text().is_empty() {
+            self.paste_content(content.text());
+        }
+    }
+
     /// The text field that holds the keyboard, if any: an overlay's query first, then the
     /// active tab's composer.
     pub fn focused_field_mut(&mut self) -> Option<&mut TextEdit> {
+        if self.workflows.is_some() { return self.workflows.as_mut().map(|panel| &mut panel.query); }
         if self.git_panel.open && self.focus == crate::app::Focus::Details && self.git_panel.message.focused {
             return Some(&mut self.git_panel.message);
         }
@@ -41,13 +57,14 @@ impl App {
             let field = a.focused_field_mut().map(|f| f as *const TextEdit);
             let composing = a.tabs.get(a.active).is_some_and(|t| field == Some(&t.draft as *const TextEdit));
             if composing && a.paste_composer(&content) { return; }
-            let text = content.text().to_owned();
-            if text.is_empty() { return; }
             match a.focused_field_mut() {
-                Some(field) => { field.paste(&text); }
-                None => a.paste_content(&text),
+                Some(field) => {
+                    if content.text().is_empty() { return; }
+                    field.paste(content.text());
+                    if composing { a.composer_changed(); }
+                }
+                None => a.paste_window_content(content),
             }
-            if composing { a.composer_changed(); }
         });
     }
 
@@ -66,5 +83,32 @@ impl App {
         if text.is_empty() { return; }
         field.paste("");
         tx.copy(text);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tabs::TabKind;
+
+    #[test]
+    fn pasting_a_chat_image_without_composer_focus_attaches_it_to_the_draft() {
+        let mut app = App::new();
+        app.open_tab(TabKind::Agent { session: None });
+        app.tabs[app.active].draft.focused = false;
+        let tab = app.active_tab().id;
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(2, 3, image::Rgba([0, 0, 0, 255]))
+            .write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let image = rune::ClipboardImage::from_png(png.into_inner()).unwrap();
+        let content = rune::ClipboardContent::default().with_image(image.clone());
+        let mut rt = rune::Runtime::new(app, crate::ui::chrome::root, (900.0, 600.0), rune::Env::new(true, 1.0));
+        rt.frame(0.0);
+        assert!(!rt.has_focus());
+        rt.paste_content(content);
+        rt.frame(0.0);
+        let attachment = &rt.state.attach.pending[&tab][0];
+        assert_eq!(attachment.mime, "image/png");
+        assert_eq!(attachment.bytes.as_ref(), image.png());
     }
 }

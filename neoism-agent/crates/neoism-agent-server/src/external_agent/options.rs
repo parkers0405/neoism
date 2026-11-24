@@ -223,16 +223,8 @@ async fn preview_inner(
     claims: Option<Extension<crate::caller::CallerClaims>>,
     choices: BTreeMap<String, String>,
 ) -> Result<Json<ExternalOptionsResponse>, ApiError> {
-    let runtime = match query.provider.as_str() {
-        "opencode" => ExternalRuntime::OpenCode,
-        "claude" => ExternalRuntime::Claude,
-        "codex" => ExternalRuntime::Codex,
-        _ => {
-            return Err(ApiError::bad_request(
-                "provider must be opencode, claude or codex",
-            ))
-        }
-    };
+    let runtime = ExternalRuntime::from_provider_id(&query.provider)
+        .ok_or_else(|| ApiError::bad_request("Unknown external provider"))?;
     let cwd = admitted_request_directory(
         &state,
         claims.as_ref().map(|Extension(claims)| claims),
@@ -241,6 +233,9 @@ async fn preview_inner(
     )?;
     if choices.len() > 256 {
         return Err(ApiError::bad_request("Too many ACP options"));
+    }
+    if runtime.acp_only() {
+        return Ok(Json(ephemeral(&state, runtime, &cwd, choices).await?));
     }
     Ok(Json(cache::preview(&state, runtime, &cwd, choices).await?))
 }

@@ -73,6 +73,9 @@ pub(crate) async fn execute_external_task_with_options(
     }
     let runtime = ExternalRuntime::resolve(agent_name)
         .ok_or_else(|| format!("Unknown external agent type: {agent_name}"))?;
+    if external_options.as_ref().is_some_and(|choices| choices.len() > 256) {
+        return Err("Too many external_options".into());
+    }
     let continuing = task_id.is_some();
     let mut child = match task_id.as_deref() {
         Some(task_id) => {
@@ -106,14 +109,14 @@ pub(crate) async fn execute_external_task_with_options(
     }
 
     if let Some(choices) = external_options {
-        if runtime.is_legacy_session(&child) {
+        if runtime.is_legacy_session(&child) && !runtime.acp_only() {
             return Err("external_options targets native tasks only; legacy ACP selection must use its original options interface".into());
         }
-        if choices.len() > 256 { return Err("Too many external_options".into()); }
         let metadata = child.extra.get_mut("externalAgent").expect("owned child metadata");
-        let mut requested = metadata["nativeOptions"].as_object().cloned().unwrap_or_default();
+        let key = if runtime.acp_only() { "selectedOptions" } else { "nativeOptions" };
+        let mut requested = metadata[key].as_object().cloned().unwrap_or_default();
         for (key, value) in choices { requested.insert(key, json!(value)); }
-        metadata["nativeOptions"] = json!(requested);
+        metadata[key] = json!(requested);
         state.inner.store.update_session(&child).await.map_err(|error| error.to_string())?;
     }
 
@@ -602,7 +605,7 @@ async fn run_external_subtask_prompt_with_cancel(
                 Ok(message)
             }
             Err(error) => {
-                let message = error.to_string();
+                let message = runtime.task_failure_message(error);
                 finish_provider_stream_with_error(
                     state,
                     &child.id,

@@ -33,6 +33,9 @@ pub struct Terminal {
     pub screen: Option<Screen>,
     /// A grid-presentation shell (`terminal.block-ui: false`): always Ghostty's grid.
     pub grid: bool,
+    pub(super) launch_command: Option<(&'static str, &'static [&'static str])>,
+    pub(super) harness_setup: Option<(&'static str, bool, u64)>,
+    pub(super) browser_handoff: super::harness_login::BrowserHandoff,
     /// The block whose actions menu is open (`moreId`).
     pub more: Option<u64>,
     /// The block whose output is being filtered, and the filter query (`filterId`, `filter`).
@@ -94,6 +97,9 @@ impl Terminal {
             selected: None,
             screen: None,
             grid: false,
+            launch_command: None,
+            harness_setup: None,
+            browser_handoff: Default::default(),
             more: None,
             filter: None,
             collapsed: Default::default(),

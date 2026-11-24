@@ -12,6 +12,7 @@ use chrono::{
     DateTime, Datelike, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc,
 };
 use chrono_tz::Tz;
+use croner::{errors::CronError, Cron};
 use neoism_agent_core::{
     event_type, CreateSessionRequest, EventPayload, Id, IdKind, ModelRef,
     PermissionAction, PermissionRule, PromptPart, PromptRequest,
@@ -23,11 +24,22 @@ use sha2::{Digest, Sha256};
 
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::workflow_action::{self, DirectAction, ValidatedDirectAction};
 use crate::{now_millis, resolve_directory};
 
 const PREVIEW_COUNT: usize = 10;
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(150);
 const CLOCK_SAFETY_WAKE: Duration = Duration::from_secs(60 * 60);
+const SCHEDULED_SHELL: &str = "scheduledShell";
+const SCHEDULED_COMPOSE: &str = "scheduledCompose";
+const MANUAL_COMPOSE: &str = "manualCompose";
+
+fn scheduled_direct_trigger(trigger: &str) -> bool {
+    matches!(trigger, SCHEDULED_SHELL | SCHEDULED_COMPOSE)
+}
+
+#[path = "workflow_mcp_events.rs"]
+mod mcp_event_trigger;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -38,6 +50,8 @@ pub(crate) struct WorkflowDefinition {
     pub(crate) active: bool,
     pub(crate) schedule: WorkflowSchedule,
     pub(crate) prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) action: Option<DirectAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) directory: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -154,6 +168,8 @@ pub(crate) struct WorkflowSchedule {
     pub(crate) date: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cron: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -262,15 +278,39 @@ pub(crate) struct WorkflowRun {
     pub(crate) next_attempt_at: Option<u64>,
     pub(crate) lease_owner: Option<String>,
     pub(crate) lease_expires_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) shell_result: Option<WorkflowShellResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) compose_result: Option<WorkflowComposeResult>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WorkflowComposeResult {
+    pub(crate) value: Value,
+    pub(crate) truncated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WorkflowShellResult {
+    pub(crate) exit_code: i32,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
+    pub(crate) truncated: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct WorkflowSource {
-    definition: WorkflowDefinition,
-    source_path: String,
-    source_hash: String,
+pub(crate) struct WorkflowSource {
+    pub(crate) definition: WorkflowDefinition,
+    pub(crate) source_path: String,
+    pub(crate) source_hash: String,
+    #[serde(skip)]
+    pub(crate) local_origin: Option<String>,
 }
+
+pub(crate) const RUNE_SCHEDULED_PROMPT: &str = "rune-scheduled";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -352,15 +392,135 @@ pub(crate) struct WorkflowHistoryQuery {
     limit: Option<usize>,
 }
 
+pub(crate) fn agent_tool_available(
+    state: &AppState,
+    snapshot: &crate::workspace_runtime::PluginGenerationLease,
+    execution: &neoism_agent_service_api::ExecutionPolicy,
+) -> bool {
+    !state.services().hosted
+        && crate::caller::native_execution_allowed(execution)
+        && snapshot
+            .manifests
+            .iter()
+            .any(|plugin| plugin.id == neoism_agent_builtins::plugin::workflows::ID)
+}
+
+pub(crate) async fn agent_tool(
+    state: &AppState,
+    directory: &str,
+    permissions: &[PermissionRule],
+    input: Value,
+) -> Result<crate::tool::ToolExecutionResult, String> {
+    #[derive(Deserialize)]
+    #[serde(tag = "action", rename_all = "lowercase", deny_unknown_fields)]
+    enum Request {
+        List,
+        Get { id: String },
+        Preview { id: String },
+        History { id: String },
+        Activate { id: String, revision: String },
+        Pause { id: String },
+        Run { id: String, revision: String },
+        Draft { definition: Box<WorkflowDefinition> },
+    }
+
+    crate::ensure_tool_permission(permissions, "workflow", "*")?;
+    let request: Request = serde_json::from_value(input).map_err(|error| error.to_string())?;
+    let query = WorkflowQuery {
+        directory: Some(directory.to_owned()),
+        scope: WorkflowScope::Workspace,
+    };
+    let headers = HeaderMap::new();
+    let result = match request {
+        Request::List => workflow_list(State(state.clone()), Query(query), headers).await,
+        Request::Get { id } => {
+            workflow_get(State(state.clone()), Query(query), headers, Path(id)).await
+        }
+        Request::Preview { id } => {
+            workflow_preview(State(state.clone()), Query(query), headers, Path(id)).await
+        }
+        Request::History { id } => {
+            let history = WorkflowHistoryQuery {
+                directory: query.directory,
+                scope: query.scope,
+                limit: Some(20),
+            };
+            workflow_history(State(state.clone()), Query(history), headers, Path(id)).await
+        }
+        Request::Pause { id } => {
+            crate::ensure_tool_permission(permissions, "workflow_pause", &id)?;
+            workflow_pause(State(state.clone()), Query(query), headers, Path(id)).await
+        }
+        request @ (Request::Activate { .. } | Request::Run { .. }) => {
+            let (id, revision, activate) = match request {
+                Request::Activate { id, revision } => (id, revision, true),
+                Request::Run { id, revision } => (id, revision, false),
+                _ => unreachable!(),
+            };
+            let workspace = workspace_root(directory.to_owned()).map_err(|e| e.to_string())?;
+            let source = find_source(state.services(), &workspace, &id)
+                .await
+                .map_err(|e| e.to_string())?;
+            if revision != format!("sha256:{}", source.source_hash) {
+                return Err("Workflow changed; inspect its current definition before proceeding".into());
+            }
+            let operation = if activate { "workflow_activate" } else { "workflow_run" };
+            crate::ensure_tool_permission(permissions, operation, &format!("{id}@{revision}"))?;
+            track_workspace(state, &workspace).await;
+            let _guard = state.inner.workflow_reconcile.lock().await;
+            if activate {
+                activate_source(state, workspace, id, source, None).await
+            } else {
+                run_source(state, workspace, source).await
+            }
+        }
+        Request::Draft { definition } => {
+            if definition.active {
+                return Err("workflow draft must be paused (active: false)".into());
+            }
+            validate_definition(&definition).map_err(|error| error.to_string())?;
+            let workspace = canonical_definition_context(FsPath::new(directory))
+                .map_err(|error| error.to_string())?;
+            let path = managed_workflow_path(&workspace, &definition.id)
+                .map_err(|error| error.to_string())?;
+            crate::ensure_tool_permission(permissions, "edit", &path.to_string_lossy())?;
+            let directory = workspace.to_string_lossy();
+            let guard = state.inner.management_lock.lock().await;
+            let catalog = discover_async(state.services().clone(), directory.to_string())
+                .await
+                .map_err(|error| error.to_string())?;
+            if catalog.workflows.contains_key(&definition.id) {
+                return Err("A workflow with this ID already exists".into());
+            }
+            let bytes = workflow_markdown(&definition).map_err(|error| error.to_string())?;
+            atomic_workflow_write_with_mode(&workspace, &path, &bytes, true)
+                .map_err(|error| error.to_string())?;
+            drop(guard);
+            Ok(Json(json!({ "id": definition.id, "sourcePath": path, "active": false })))
+        }
+    }
+    .map_err(|error| error.to_string())?;
+    Ok(crate::tool::ToolExecutionResult {
+        title: "Scheduled workflows".into(),
+        output: result.0.to_string(),
+        metadata: None,
+    })
+}
+
 pub(crate) fn spawn_scheduler(state: AppState) {
     let weak_state = std::sync::Arc::downgrade(&state.inner);
     let workflow_notify = state.inner.workflow_notify.clone();
+    let local = !state.services().hosted;
     tokio::spawn(async move {
         let (watch_tx, mut watch_rx) = tokio::sync::mpsc::unbounded_channel();
         if let Some(inner) = weak_state.upgrade() {
             if let Err(error) = recover_unfinished_runs(&AppState { inner }).await {
                 tracing::warn!(%error, "failed to recover workflow runs");
             }
+        }
+        let mut event_worker = tokio::task::JoinSet::new();
+        if local {
+            mcp_event_trigger::spawn(&mut event_worker, weak_state.clone());
         }
         let mut watcher: Option<notify::RecommendedWatcher>;
         loop {
@@ -594,10 +754,36 @@ pub(crate) async fn workflow_activate(
 ) -> Result<Json<Value>, ApiError> {
     let workspace = workflow_context(&state, query.directory, query.scope, &headers)?;
     track_workspace(&state, &workspace).await;
+    let _guard = state.inner.workflow_reconcile.lock().await;
     let source = find_source(state.services(), &workspace, &workflow_id).await?;
+    let action = if source.definition.action.is_some() {
+        let action = admit_operator_action(&state, &headers, &workspace, &source)?;
+        Some(action.approval_identity().to_owned())
+    } else {
+        None
+    };
+    activate_source(&state, workspace, workflow_id, source, action.as_deref()).await
+}
+
+async fn activate_source(
+    state: &AppState,
+    workspace: String,
+    workflow_id: String,
+    source: WorkflowSource,
+    action_identity: Option<&str>,
+) -> Result<Json<Value>, ApiError> {
+    if action_identity.is_none() {
+        reject_direct_workflow(&source.definition)?;
+    }
     let id = activation_id(&workspace, &workflow_id);
     let existing = state.inner.store.get_workflow(&id).await?;
     let now = now_millis();
+    let activated_at = existing.as_ref()
+        .filter(|item| {
+            action_identity.is_none()
+                || (item.active && item.source_hash == source.source_hash && item.source_path == source.source_path)
+        })
+        .map_or(now, |item| item.activated_at);
     let projection = WorkflowProjection {
         activation_id: id,
         workflow_id,
@@ -606,15 +792,16 @@ pub(crate) async fn workflow_activate(
         source_hash: source.source_hash,
         definition: source.definition,
         active: true,
-        activated_at: existing
-            .as_ref()
-            .map(|item| item.activated_at)
-            .unwrap_or(now),
+        activated_at,
         last_scheduled_at: existing.and_then(|item| item.last_scheduled_at),
         updated: now,
     };
-    state.inner.store.upsert_workflow(&projection).await?;
-    publish_workflow(&state, &projection);
+    if let Some(identity) = action_identity {
+        state.inner.store.activate_scheduled_workflow_action(&projection, identity).await?;
+    } else {
+        state.inner.store.upsert_workflow(&projection).await?;
+    }
+    publish_workflow(state, &projection);
     state.inner.workflow_notify.notify_one();
     Ok(Json(json!(projection)))
 }
@@ -627,6 +814,7 @@ pub(crate) async fn workflow_pause(
 ) -> Result<Json<Value>, ApiError> {
     let workspace = workflow_context(&state, query.directory, query.scope, &headers)?;
     track_workspace(&state, &workspace).await;
+    let _guard = state.inner.workflow_reconcile.lock().await;
     let id = activation_id(&workspace, &workflow_id);
     if !state
         .inner
@@ -655,10 +843,42 @@ pub(crate) async fn workflow_run_now(
 ) -> Result<Json<Value>, ApiError> {
     let workspace = workflow_context(&state, query.directory, query.scope, &headers)?;
     track_workspace(&state, &workspace).await;
+    let guard = state.inner.workflow_reconcile.lock().await;
     let source = find_source(state.services(), &workspace, &workflow_id).await?;
-    let projection = ensure_projection(&state, workspace, source, false).await?;
-    let mut run = new_run(&projection, now_millis(), "manual");
-    assign_run_lease(&state, &mut run);
+    if source.definition.action.is_some() {
+        let action = admit_operator_action(&state, &headers, &workspace, &source)?;
+        let trigger = if matches!(action.action(), DirectAction::Compose { .. }) { MANUAL_COMPOSE } else { "manual" };
+        let approval_identity = action.approval_identity().to_owned();
+        let projection = ensure_projection(&state, workspace, source, false).await?;
+        let run = claim_manual_run_with_trigger(&state, &projection, trigger).await?;
+        drop(guard);
+        tokio::spawn(execute_shell_run(
+            state, projection, run.clone(), approval_identity, check_operator_action_approval,
+        ));
+        return Ok(Json(json!(run)));
+    }
+    run_source(&state, workspace, source).await
+}
+
+async fn run_source(
+    state: &AppState,
+    workspace: String,
+    source: WorkflowSource,
+) -> Result<Json<Value>, ApiError> {
+    reject_direct_workflow(&source.definition)?;
+    let projection = ensure_projection(state, workspace, source, false).await?;
+    let run = claim_manual_run(state, &projection).await?;
+    tokio::spawn(execute_run(state.clone(), projection, run.clone()));
+    Ok(Json(json!(run)))
+}
+
+async fn claim_manual_run(state: &AppState, projection: &WorkflowProjection) -> Result<WorkflowRun, ApiError> {
+    claim_manual_run_with_trigger(state, projection, "manual").await
+}
+
+pub(crate) async fn claim_manual_run_with_trigger(state: &AppState, projection: &WorkflowProjection, trigger: &str) -> Result<WorkflowRun, ApiError> {
+    let mut run = new_run(projection, now_millis(), trigger);
+    assign_run_lease(state, &mut run);
     if !state
         .inner
         .store
@@ -669,9 +889,8 @@ pub(crate) async fn workflow_run_now(
             "Workflow already has a queued or running run",
         ));
     }
-    publish_run(&state, &run);
-    tokio::spawn(execute_run(state.clone(), projection, run.clone()));
-    Ok(Json(json!(run)))
+    publish_run(state, &run);
+    Ok(run)
 }
 
 pub(crate) async fn workflow_preview(
@@ -712,13 +931,20 @@ pub(crate) async fn workflow_history(
     track_workspace(&state, &workspace).await;
     let id = activation_id(&workspace, &workflow_id);
     if state.inner.store.get_workflow(&id).await?.is_none() {
-        return Err(ApiError::not_found("Workflow has no run history"));
+        find_source(state.services(), &workspace, &workflow_id).await?;
+        return Ok(Json(json!({ "runs": [] })));
     }
-    let runs = state
+    let mut runs = state
         .inner
         .store
         .list_workflow_runs(&id, query.limit.unwrap_or(50))
         .await?;
+    if !is_shell_operator(&state, &headers) {
+        for run in &mut runs {
+            run.shell_result = None;
+            run.compose_result = None;
+        }
+    }
     Ok(Json(json!({ "runs": runs })))
 }
 
@@ -729,13 +955,17 @@ pub(crate) async fn workflow_run_get(
     Path((workflow_id, run_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
     let workspace = workflow_context(&state, query.directory, query.scope, &headers)?;
-    let run = state
+    let mut run = state
         .inner
         .store
         .get_workflow_run(&run_id)
         .await?
         .filter(|run| run.activation_id == activation_id(&workspace, &workflow_id))
         .ok_or_else(|| ApiError::not_found("Workflow run not found"))?;
+    if !is_shell_operator(&state, &headers) {
+        run.shell_result = None;
+        run.compose_result = None;
+    }
     Ok(Json(json!(run)))
 }
 
@@ -755,6 +985,9 @@ pub(crate) async fn workflow_run_retry(
         .await?
         .filter(|run| run.activation_id == activation)
         .ok_or_else(|| ApiError::not_found("Workflow run not found"))?;
+    if previous.trigger == "mcpEvent" {
+        return Err(ApiError::conflict("MCP event submissions cannot be retried"));
+    }
     if !matches!(
         previous.status.as_str(),
         "failed" | "interrupted" | "replaced"
@@ -769,6 +1002,10 @@ pub(crate) async fn workflow_run_retry(
         .get_workflow(&activation)
         .await?
         .ok_or_else(|| ApiError::not_found("Workflow activation not found"))?;
+    reject_direct_workflow(&projection.definition)?;
+    if scheduled_direct_trigger(&previous.trigger) || previous.trigger == MANUAL_COMPOSE {
+        return Err(ApiError::conflict("Direct action runs cannot be retried"));
+    }
     let mut run = new_retry_run(&previous, now_millis(), "manual-retry");
     assign_run_lease(&state, &mut run);
     if !state
@@ -937,6 +1174,15 @@ fn atomic_workflow_write(
     path: &FsPath,
     bytes: &[u8],
 ) -> anyhow::Result<()> {
+    atomic_workflow_write_with_mode(workspace, path, bytes, false)
+}
+
+fn atomic_workflow_write_with_mode(
+    workspace: &FsPath,
+    path: &FsPath,
+    bytes: &[u8],
+    create_only: bool,
+) -> anyhow::Result<()> {
     let directory = path.parent().context("workflow path has no parent")?;
     fs::create_dir_all(directory)?;
     for candidate in [managed_workflow_root(workspace), directory.to_path_buf()] {
@@ -958,10 +1204,17 @@ fn atomic_workflow_write(
         let _ = fs::remove_file(&temp);
         return Err(error.into());
     }
-    if let Err(error) = fs::rename(&temp, path) {
+    drop(file);
+    let publish = if create_only {
+        // Publish atomically without replacing a file created outside the API lock.
+        fs::hard_link(&temp, path)
+    } else {
+        fs::rename(&temp, path)
+    };
+    if create_only || publish.is_err() {
         let _ = fs::remove_file(&temp);
-        return Err(error.into());
     }
+    publish?;
     #[cfg(unix)]
     fs::File::open(directory)?.sync_all()?;
     Ok(())
@@ -1391,6 +1644,7 @@ pub(crate) async fn workflow_delete(
             details,
         );
     }
+    let dispatch_guard = state.inner.workflow_reconcile.lock().await;
     if let Err(error) = fs::remove_file(&path) {
         return admin_error(
             500,
@@ -1409,6 +1663,7 @@ pub(crate) async fn workflow_delete(
         .store
         .set_workflow_active(&activation, false, now_millis())
         .await;
+    drop(dispatch_guard);
     drop(_guard);
     if let Err(error) = refresh_after_definition_change(state, &directory).await {
         return admin_error(
@@ -1487,6 +1742,7 @@ pub(crate) async fn workspace_disabled(state: &AppState, workspace: &FsPath) {
 
 async fn reconcile_workspaces(state: &AppState) -> anyhow::Result<()> {
     let _reconcile = state.inner.workflow_reconcile.lock().await;
+    reconcile_rune_prompts(state, None).await?;
     let workspaces = state
         .inner
         .workflow_workspaces
@@ -1511,6 +1767,7 @@ async fn reconcile_workspaces(state: &AppState) -> anyhow::Result<()> {
         }
         for source in catalog.workflows.into_values() {
             let id = activation_id(&workspace, &source.definition.id);
+            if state.inner.store.rune_prompt_pin(&id).await?.is_some() { continue; }
             let existing = state.inner.store.get_workflow(&id).await?;
             match existing {
                 None if source.definition.active => {
@@ -1537,7 +1794,9 @@ async fn reconcile_workspaces(state: &AppState) -> anyhow::Result<()> {
                     let was_active = projection.active;
                     projection.source_path = source.source_path;
                     projection.source_hash = source.source_hash;
-                    projection.active = source.definition.active;
+                    projection.active = source.definition.active
+                        && projection.definition.action.is_none()
+                        && source.definition.action.is_none();
                     projection.definition = source.definition;
                     projection.updated = now_millis();
                     if projection.active && !was_active {
@@ -1638,6 +1897,11 @@ fn markdown_files(root: &FsPath) -> anyhow::Result<Vec<PathBuf>> {
 fn parse_source(path: &FsPath) -> anyhow::Result<WorkflowSource> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
+    let source_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    parse_source_text(&source_path, &raw)
+}
+
+fn parse_source_text(path: &FsPath, raw: &str) -> anyhow::Result<WorkflowSource> {
     let normalized = raw.replace("\r\n", "\n");
     let mut lines = normalized.split_inclusive('\n');
     if lines.next().map(str::trim_end) != Some("---") {
@@ -1670,13 +1934,185 @@ fn parse_source(path: &FsPath) -> anyhow::Result<WorkflowSource> {
     validate_definition(&definition)?;
     Ok(WorkflowSource {
         definition,
-        source_path: path
-            .canonicalize()
-            .unwrap_or_else(|_| path.to_path_buf())
-            .display()
-            .to_string(),
+        source_path: path.display().to_string(),
         source_hash: format!("{:x}", Sha256::digest(raw.as_bytes())),
+        local_origin: None,
     })
+}
+
+/// A read-only catalog for the dedicated local daemon capability. Do not call
+/// workspace tracking or the ordinary discovery path: they can import installation
+/// resources and/or reconcile active workflows as a side effect.
+pub(crate) async fn local_workspace_catalog(state: &AppState, root: PathBuf) -> Result<Value, ApiError> {
+    #[cfg(not(unix))]
+    {
+        let _ = (state, root);
+        Err(ApiError::forbidden("The local workflow catalog currently requires Unix"))
+    }
+    #[cfg(unix)]
+    {
+        let _guard = state.inner.workflow_reconcile.lock().await;
+        let catalog = scan_local_workflows(state, root.clone()).await?;
+        reconcile_rune_prompts(state, Some((&root, &catalog))).await?;
+        let persisted = state.inner.store.list_workflows().await?;
+        let workflows = catalog.workflows.into_values().filter(|source| source.definition.action.is_none()).map(|source| {
+            let projection = persisted.iter().find(|item| item.workspace_root == root.to_string_lossy()
+                && item.workflow_id == source.definition.id && item.definition.action.is_none()
+                && item.source_path == source.source_path);
+            json!({ "active": projection.map(|item| item.active).unwrap_or(source.definition.active),
+                "activationID": projection.map(|item| item.activation_id.as_str()), "writable": false,
+                "definition": source.definition, "sourcePath": source.source_path, "sourceHash": source.source_hash,
+                "sourceOrigin": source.local_origin, "canActivate": rune_schedule_eligible(&source.definition) })
+        }).collect::<Vec<_>>();
+        Ok(json!({ "workflows": workflows, "diagnostics": catalog.diagnostics }))
+    }
+}
+
+pub(crate) fn rune_schedule_eligible(definition: &WorkflowDefinition) -> bool {
+    definition.action.is_none() && definition.schedule.frequency != "event"
+        && definition.directory.is_none() && definition.skill.is_none() && definition.retry.max_attempts == 1
+        && definition.concurrency.mode == WorkflowConcurrencyMode::Forbid
+}
+
+#[cfg(unix)]
+fn rune_origin_matches(projection: &WorkflowProjection, origin: &str, source: &WorkflowSource) -> bool {
+    rune_schedule_eligible(&source.definition) && source.definition.id == projection.workflow_id
+        && source.source_path == projection.source_path && source.source_hash == projection.source_hash
+        && source.local_origin.as_deref() == Some(origin)
+}
+
+async fn invalidate_rune_prompt(state: &AppState, projection: &WorkflowProjection, epoch: i64) -> anyhow::Result<()> {
+    if state.inner.store.invalidate_rune_prompt(&projection.activation_id, epoch).await? {
+        let mut paused = projection.clone();
+        paused.active = false;
+        publish_workflow(state, &paused);
+        state.inner.workflow_notify.notify_one();
+    }
+    Ok(())
+}
+
+/// Called with workflow_reconcile held; retain an inactive pin on failure.
+async fn reconcile_rune_prompts(state: &AppState, scanned: Option<(&FsPath, &WorkflowCatalog)>) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut catalogs = BTreeMap::new();
+        for projection in state.inner.store.list_active_workflows().await? {
+            let root = FsPath::new(&projection.workspace_root);
+            if scanned.is_some_and(|(scope, _)| scope != root) { continue; }
+            let Some((epoch, origin)) = state.inner.store.rune_prompt_pin(&projection.activation_id).await? else { continue };
+            let catalog = if let Some((_, catalog)) = scanned { Some(catalog) } else {
+                if !catalogs.contains_key(root) {
+                    catalogs.insert(root.to_path_buf(), scan_local_workflows(state, root.to_path_buf()).await.ok());
+                }
+                catalogs.get(root).and_then(Option::as_ref)
+            };
+            if !catalog.and_then(|catalog| catalog.workflows.get(&projection.workflow_id))
+                .is_some_and(|source| rune_origin_matches(&projection, &origin, source)) {
+                invalidate_rune_prompt(state, &projection, epoch).await?;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (state, scanned);
+    Ok(())
+}
+
+async fn rune_dispatch_allowed(state: &AppState, projection: &WorkflowProjection, expected_epoch: Option<i64>) -> anyhow::Result<bool> {
+    let pin = state.inner.store.rune_prompt_pin(&projection.activation_id).await?;
+    let Some(expected_epoch) = expected_epoch else { return Ok(pin.is_none()); };
+    let Some((epoch, origin)) = pin.filter(|(epoch, _)| *epoch == expected_epoch) else { return Ok(false) };
+    let Some(current) = state.inner.store.get_workflow(&projection.activation_id).await? else { return Ok(false) };
+    if !current.active || current.workspace_root != projection.workspace_root || current.source_path != projection.source_path
+        || current.source_hash != projection.source_hash || current.workflow_id != projection.workflow_id { return Ok(false); }
+    #[cfg(unix)]
+    if local_prompt_source(state, PathBuf::from(&current.workspace_root), &current.workflow_id).await
+        .is_ok_and(|source| rune_origin_matches(&current, &origin, &source)) { return Ok(true); }
+    #[cfg(not(unix))]
+    let _ = origin;
+    invalidate_rune_prompt(state, &current, epoch).await?;
+    Ok(false)
+}
+
+#[cfg(unix)]
+async fn scan_local_workflows(state: &AppState, root: PathBuf) -> Result<WorkflowCatalog, ApiError> {
+    let config = state.services().config.clone();
+    tokio::task::spawn_blocking(move || {
+        let installation = config.snapshot(&neoism_agent_service_api::ConfigSnapshotRequest::installation())?;
+        let excluded = installation.discovery_roots.into_iter()
+            .filter(|r| r.scope == neoism_agent_service_api::ConfigDiscoveryScope::Installation)
+            .map(|r| r.path.canonicalize().unwrap_or(r.path)).collect::<Vec<_>>();
+        local_workflow_sources(&root, &excluded)
+    }).await.map_err(|_| ApiError::internal("Workflow catalog scan failed"))?
+        .map_err(|_| ApiError::internal("Could not read local workflow catalog"))
+}
+
+#[cfg(unix)]
+pub(crate) async fn local_prompt_source(state: &AppState, root: PathBuf, id: &str) -> Result<WorkflowSource, ApiError> {
+    scan_local_workflows(state, root).await?.workflows.remove(id)
+        .filter(|source| source.definition.action.is_none())
+        .ok_or_else(|| ApiError::not_found("Workspace prompt workflow not found"))
+}
+
+#[cfg(unix)]
+fn local_workflow_sources(root: &FsPath, excluded: &[PathBuf]) -> anyhow::Result<WorkflowCatalog> {
+    use std::{io::Read, os::unix::fs::MetadataExt};
+    const MAX_SOURCES: usize = 256;
+    const MAX_SOURCE_BYTES: u64 = 128 * 1024;
+    const MAX_TOTAL_BYTES: usize = 4 * 1024 * 1024;
+    let mut catalog = WorkflowCatalog::default();
+    // Only direct files in fixed project directories. No arbitrary config search
+    // roots, ancestor traversal, symlinks, hard links, special files or cross-device reads.
+    let workspace = open_shell_path(root, true)?.metadata()?;
+    let mut count = 0;
+    let mut bytes = 0;
+    let mut duplicates = std::collections::HashSet::new();
+    for config in [".neoism", ".agent"] {
+        for name in ["workflow", "workflows"] {
+            let directory = root.join(config).join(name);
+            if excluded.iter().any(|path| directory.starts_with(path) || path.starts_with(&directory)) { continue; }
+            let Ok(dir) = open_shell_path(&directory, true) else { continue };
+            if dir.metadata()?.dev() != workspace.dev() { continue; }
+            for entry in fs::read_dir(&directory)? {
+                let path = entry?.path();
+                if path.extension().and_then(|s| s.to_str()) != Some("md") { continue; }
+                let Ok(file) = open_shell_path(&path, false) else { continue };
+                let md = file.metadata()?;
+                if !md.is_file() || md.nlink() != 1 || md.dev() != workspace.dev() { continue; }
+                count += 1;
+                if count > MAX_SOURCES { bail!("too many workspace workflow sources"); }
+                let mut raw = String::new();
+                if (&file).take(MAX_SOURCE_BYTES + 1).read_to_string(&mut raw).is_err() || raw.len() as u64 > MAX_SOURCE_BYTES {
+                    catalog.diagnostics.push(WorkflowDiagnostic { source_path: path.display().to_string(), message: "Invalid or oversized workflow source".into() });
+                    continue;
+                }
+                bytes += raw.len();
+                if bytes > MAX_TOTAL_BYTES { bail!("workspace workflow sources exceed the catalog limit"); }
+                match parse_source_text(&path, &raw) {
+                    Ok(mut source) => {
+                        let final_md = file.metadata()?;
+                        let stamp = |m: &fs::Metadata| [m.dev(), m.ino(), m.ctime() as u64, m.ctime_nsec() as u64, m.mtime() as u64, m.mtime_nsec() as u64];
+                        if stamp(&md) != stamp(&final_md) || final_md.nlink() != 1 { continue; }
+                        let current = open_shell_path(&path, false).and_then(|file| file.metadata());
+                        if !current.is_ok_and(|current| current.nlink() == 1 && stamp(&current) == stamp(&final_md)) { continue; }
+                        let parent = dir.metadata()?;
+                        let current_parent = open_shell_path(&directory, true).and_then(|dir| dir.metadata());
+                        if !current_parent.is_ok_and(|current| (current.dev(), current.ino()) == (parent.dev(), parent.ino())) { continue; }
+                        let config_dir = open_shell_path(&root.join(config), true)?.metadata()?;
+                        let origin = format!("{:?}:{:?}", [workspace.dev(), workspace.ino(), config_dir.dev(), config_dir.ino(), parent.dev(), parent.ino()], stamp(&final_md));
+                        source.local_origin = Some(format!("{:x}", Sha256::digest(origin.as_bytes())));
+                        let id = source.definition.id.clone();
+                        if duplicates.contains(&id) || catalog.workflows.insert(id.clone(), source).is_some() {
+                            duplicates.insert(id.clone());
+                            catalog.workflows.remove(&id);
+                            catalog.diagnostics.push(WorkflowDiagnostic { source_path: path.display().to_string(), message: "Duplicate workflow ID in workspace".into() });
+                        }
+                    }
+                    Err(error) => catalog.diagnostics.push(WorkflowDiagnostic { source_path: path.display().to_string(), message: error.to_string() }),
+                }
+            }
+        }
+    }
+    Ok(catalog)
 }
 
 fn validate_definition(definition: &WorkflowDefinition) -> anyhow::Result<()> {
@@ -1694,7 +2130,15 @@ fn validate_definition(definition: &WorkflowDefinition) -> anyhow::Result<()> {
     if definition.name.trim().is_empty() {
         bail!("name must not be empty");
     }
-    if definition.prompt.trim().is_empty() {
+    if let Some(action) = &definition.action {
+        action.validate_workflow_action()?;
+        if !definition.prompt.trim().is_empty() || definition.active || definition.skill.is_some()
+            || definition.agent.is_some() || definition.model.is_some() || definition.permissions.is_some()
+            || definition.retry.max_attempts != 1 || definition.concurrency.mode != WorkflowConcurrencyMode::Forbid
+        {
+            bail!("Direct workflows require explicit activation and cannot have a prompt, agent options, permissions, retries, or non-forbid concurrency");
+        }
+    } else if definition.prompt.trim().is_empty() {
         bail!("Markdown prompt body must not be empty");
     }
     if let Some(directory) = definition.directory.as_deref() {
@@ -1771,9 +2215,39 @@ fn validate_definition(definition: &WorkflowDefinition) -> anyhow::Result<()> {
     {
         bail!("concurrency.maxRunning must be 1 unless concurrency.mode is allow");
     }
-    let schedule = &definition.schedule;
+    if definition.schedule.frequency == "event" && definition.action.is_some() {
+        bail!("event-only schedules require a prompt workflow");
+    }
+    validate_schedule(&definition.schedule)
+}
+
+fn validate_schedule(schedule: &WorkflowSchedule) -> anyhow::Result<()> {
     if schedule.interval == 0 {
         bail!("schedule.interval must be at least 1");
+    }
+    if schedule.frequency == "event" {
+        if schedule.interval != 1
+            || schedule.timezone != "UTC"
+            || schedule.at.is_some()
+            || schedule.date.is_some()
+            || schedule.time.is_some()
+            || schedule.minute.is_some()
+            || !schedule.weekdays.is_empty()
+            || schedule.month_day.is_some()
+            || schedule.cron.is_some()
+        {
+            bail!("event-only schedules do not accept clock settings");
+        }
+        return Ok(());
+    }
+    if schedule.frequency == "cron" {
+        let (cron, tz) = parse_cron_schedule(schedule)?;
+        // Reject expressions with no possible next occurrence (e.g. February 31).
+        cron_next_slot(&cron, tz, now_millis())?;
+        return Ok(());
+    }
+    if schedule.cron.is_some() {
+        bail!("schedule.cron requires schedule.frequency `cron`");
     }
     resolve_timezone(&schedule.timezone)?;
     if let Some(at) = schedule.at.as_deref() {
@@ -1833,7 +2307,7 @@ fn validate_definition(definition: &WorkflowDefinition) -> anyhow::Result<()> {
             if schedule.minute.is_some() || !schedule.weekdays.is_empty() { bail!("monthly schedules only accept time and monthDay"); }
         }
         "once" => bail!("one-time schedules require schedule.date"),
-        other => bail!("unsupported schedule.frequency `{other}`; use hourly, daily, weekly, monthly, or a date"),
+        other => bail!("unsupported schedule.frequency `{other}`; use hourly, daily, weekly, monthly, cron, or a date"),
     }
     Ok(())
 }
@@ -1873,27 +2347,84 @@ fn weekday_number(value: &str) -> anyhow::Result<u32> {
     }
 }
 
+fn parse_cron_schedule(schedule: &WorkflowSchedule) -> anyhow::Result<(Cron, Tz)> {
+    if schedule.interval != 1
+        || schedule.minute.is_some()
+        || schedule.time.is_some()
+        || !schedule.weekdays.is_empty()
+        || schedule.month_day.is_some()
+        || schedule.date.is_some()
+        || schedule.at.is_some()
+    {
+        bail!("cron schedules only accept schedule.cron and schedule.timezone, with interval 1");
+    }
+    let expression = schedule.cron.as_deref().context("missing schedule.cron")?;
+    if expression.chars().take(257).count() > 256 || expression.split_whitespace().count() != 5 {
+        bail!("schedule.cron must be five fields (minute hour day-of-month month day-of-week), at most 256 characters");
+    }
+    let cron = expression
+        .parse::<Cron>()
+        .map_err(|error| anyhow::anyhow!("invalid schedule.cron: {error}"))?;
+    let tz = schedule.timezone.parse::<Tz>().with_context(|| {
+        format!("cron schedules require an IANA timezone, not `{}`", schedule.timezone)
+    })?;
+    Ok((cron, tz))
+}
+
+fn cron_search_start(tz: Tz, millis: u64) -> anyhow::Result<DateTime<Tz>> {
+    // Croner returns whole-second instants. Floor before searching so the
+    // exclusive forward / inclusive backward comparisons also work for subsecond inputs.
+    let utc = DateTime::from_timestamp((millis / 1_000) as i64, 0)
+        .filter(|date| date.year() <= croner::YEAR_UPPER_LIMIT)
+        .context("timestamp is outside the cron search range")?;
+    Ok(utc.with_timezone(&tz))
+}
+
+fn cron_next_slot(cron: &Cron, tz: Tz, after: u64) -> anyhow::Result<u64> {
+    // Croner jumps between matching fields and bounds iterations and calendar years.
+    let next = cron
+        .find_next_occurrence(&cron_search_start(tz, after)?, false)
+        .map_err(|error| {
+            anyhow::anyhow!("could not calculate the next schedule.cron time: {error}")
+        })?;
+    Ok(u64::try_from(next.timestamp_millis())?)
+}
+
 fn preview_slots(
     schedule: &WorkflowSchedule,
     after: u64,
     count: usize,
 ) -> Result<Vec<u64>, ApiError> {
-    if is_one_time(schedule) {
+    if schedule.frequency == "event" {
+        return Ok(Vec::new());
+    }
+    let cron = if schedule.frequency == "cron" {
+        Some(parse_cron_schedule(schedule).map_err(|error| ApiError::bad_request(error.to_string()))?)
+    } else if is_one_time(schedule) {
         let slot = one_time_slot(schedule)
             .map_err(|error| ApiError::bad_request(error.to_string()))?;
         return Ok((slot > after).then_some(slot).into_iter().collect());
-    }
+    } else {
+        None
+    };
     let mut slots = Vec::with_capacity(count);
     let mut cursor = after;
     for _ in 0..count {
-        cursor = next_slot(schedule, cursor)
-            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        cursor = match &cron {
+            Some((cron, tz)) => cron_next_slot(cron, *tz, cursor),
+            None => next_slot(schedule, cursor),
+        }
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
         slots.push(cursor);
     }
     Ok(slots)
 }
 
 fn next_slot(schedule: &WorkflowSchedule, after: u64) -> anyhow::Result<u64> {
+    if schedule.frequency == "cron" {
+        let (cron, tz) = parse_cron_schedule(schedule)?;
+        return cron_next_slot(&cron, tz, after);
+    }
     let tz = resolve_timezone(&schedule.timezone)?;
     let after_utc = Utc
         .timestamp_millis_opt(after as i64)
@@ -2055,6 +2586,24 @@ fn latest_due(
     activated_at: u64,
     now: u64,
 ) -> anyhow::Result<Option<u64>> {
+    if schedule.frequency == "event" {
+        return Ok(None);
+    }
+    if schedule.frequency == "cron" {
+        if activated_at > now {
+            return Ok(None);
+        }
+        let (cron, tz) = parse_cron_schedule(schedule)?;
+        // Look backward once, rather than replaying missed ticks after downtime.
+        let previous = match cron.find_previous_occurrence(&cron_search_start(tz, now)?, true) {
+            Ok(previous) => previous,
+            Err(CronError::TimeSearchLimitExceeded) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        return Ok(u64::try_from(previous.timestamp_millis())
+            .ok()
+            .filter(|slot| *slot >= activated_at && *slot <= now));
+    }
     if is_one_time(schedule) {
         let slot = one_time_slot(schedule)?;
         return Ok((slot >= activated_at && slot <= now).then_some(slot));
@@ -2095,6 +2644,9 @@ async fn next_scheduler_due(state: &AppState) -> anyhow::Result<Option<u64>> {
     let mut earliest: Option<u64> = None;
     for projection in state.inner.store.list_active_workflows().await? {
         let schedule = &projection.definition.schedule;
+        if schedule.frequency == "event" {
+            continue;
+        }
         let next = if is_one_time(schedule) {
             let slot = one_time_slot(schedule)?;
             let already_scheduled = projection
@@ -2128,7 +2680,18 @@ fn is_one_time(schedule: &WorkflowSchedule) -> bool {
 async fn schedule_due_workflows(state: &AppState) -> anyhow::Result<()> {
     reconcile_workspaces(state).await?;
     schedule_due_retries(state).await?;
+    let _guard = state.inner.workflow_reconcile.lock().await;
     for mut projection in state.inner.store.list_active_workflows().await? {
+        let pin = state.inner.store.rune_prompt_pin(&projection.activation_id).await?;
+        if pin.is_none() {
+        if projection.definition.action.is_some() {
+            if let Some((run, grant)) = claim_due_shell(state, &projection, now_millis()).await? {
+                tokio::spawn(execute_scheduled_shell_run(
+                    state.clone(), projection, run, grant, check_operator_action_approval,
+                ));
+            }
+            continue;
+        }
         let source = match tokio::task::spawn_blocking({
             let path = projection.source_path.clone();
             move || parse_source(FsPath::new(&path))
@@ -2150,10 +2713,15 @@ async fn schedule_due_workflows(state: &AppState) -> anyhow::Result<()> {
             }
         };
         if source.source_hash != projection.source_hash {
+            if source.definition.action.is_some() {
+                pause_invalid_source(state, &projection, "direct shell workflows require explicit activation").await?;
+                continue;
+            }
             projection.definition = source.definition;
             projection.source_hash = source.source_hash;
             projection.updated = now_millis();
             state.inner.store.upsert_workflow(&projection).await?;
+        }
         }
         let now = now_millis();
         let Some(slot) = latest_due(
@@ -2171,19 +2739,58 @@ async fn schedule_due_workflows(state: &AppState) -> anyhow::Result<()> {
         {
             continue;
         }
-        let mut run = new_run(&projection, slot, "scheduled");
+        let mut run = new_run(&projection, slot, if pin.is_some() { RUNE_SCHEDULED_PROMPT } else { "scheduled" });
         assign_run_lease(state, &mut run);
-        let claimed = state
-            .inner
-            .store
-            .claim_scheduled_workflow_run(&run, &projection.definition.concurrency)
-            .await?;
+        let epoch = pin.map(|(epoch, _)| epoch);
+        let claimed = if let Some(epoch) = epoch {
+            if !rune_dispatch_allowed(state, &projection, Some(epoch)).await? { continue; }
+            state.inner.store.claim_scheduled_rune_prompt(&run, &projection.definition.concurrency, epoch).await?
+        } else {
+            state.inner.store.claim_scheduled_workflow_run(&run, &projection.definition.concurrency).await?
+        };
         if claimed {
             publish_run(state, &run);
-            tokio::spawn(execute_run(state.clone(), projection, run));
+            tokio::spawn(execute_prompt_run(state.clone(), projection, run, epoch));
         }
     }
     Ok(())
+}
+
+type ScheduledActionGrant = (i64, String);
+
+/// Called under the reconciliation lock so pause, activation and occurrence
+/// claims have a single order within the scheduler's server instance.
+async fn claim_due_shell(
+    state: &AppState,
+    projection: &WorkflowProjection,
+    now: u64,
+) -> anyhow::Result<Option<(WorkflowRun, ScheduledActionGrant)>> {
+    let Some(grant) = state.inner.store.scheduled_workflow_action_grant(projection).await? else {
+        pause_invalid_source(state, projection, "missing scheduled action activation").await?;
+        return Ok(None);
+    };
+    if !shell_source_is_current(FsPath::new(&projection.source_path), &projection.source_hash) {
+        pause_invalid_source(state, projection, "direct shell source changed").await?;
+        return Ok(None);
+    }
+    let Some(slot) = latest_due(&projection.definition.schedule, projection.activated_at, now)? else {
+        return Ok(None);
+    };
+    if projection.last_scheduled_at.is_some_and(|last| slot <= last) {
+        return Ok(None);
+    }
+    let trigger = if matches!(projection.definition.action, Some(DirectAction::Compose { .. })) {
+        SCHEDULED_COMPOSE
+    } else {
+        SCHEDULED_SHELL
+    };
+    let mut run = new_run(projection, slot, trigger);
+    assign_run_lease(state, &mut run);
+    if !state.inner.store.claim_scheduled_workflow_action(&run, &projection.definition.concurrency, grant.0).await? {
+        return Ok(None);
+    }
+    publish_run(state, &run);
+    Ok(Some((run, grant)))
 }
 
 async fn schedule_due_retries(state: &AppState) -> anyhow::Result<()> {
@@ -2193,7 +2800,7 @@ async fn schedule_due_retries(state: &AppState) -> anyhow::Result<()> {
         else {
             continue;
         };
-        if !projection.active {
+        if !projection.active || projection.definition.action.is_some() {
             continue;
         }
         let lease_expires_at = now.saturating_add(5 * 60 * 1000);
@@ -2253,8 +2860,17 @@ async fn ensure_projection(
     source: WorkflowSource,
     active: bool,
 ) -> Result<WorkflowProjection, ApiError> {
-    let id = activation_id(&workspace, &source.definition.id);
+            let id = activation_id(&workspace, &source.definition.id);
     if let Some(mut existing) = state.inner.store.get_workflow(&id).await? {
+        if source.definition.action.is_some()
+            && existing.source_hash == source.source_hash
+            && existing.source_path == source.source_path
+        {
+            return Ok(existing);
+        }
+        if existing.definition.action.is_some() || source.definition.action.is_some() {
+            existing.active = false;
+        }
         existing.source_path = source.source_path;
         existing.source_hash = source.source_hash;
         existing.definition = source.definition;
@@ -2285,7 +2901,7 @@ fn new_run(
     trigger: &str,
 ) -> WorkflowRun {
     let created = now_millis();
-    let id = format!("wfr_{}_{}", created, crate::slug());
+    let id = format!("wfr_{}_{}", created, Id::ascending(IdKind::Event));
     WorkflowRun {
         id: id.clone(),
         activation_id: projection.activation_id.clone(),
@@ -2304,6 +2920,8 @@ fn new_run(
         next_attempt_at: None,
         lease_owner: None,
         lease_expires_at: None,
+        shell_result: None,
+        compose_result: None,
     }
 }
 
@@ -2331,6 +2949,8 @@ fn new_retry_run(previous: &WorkflowRun, _due: u64, trigger: &str) -> WorkflowRu
         next_attempt_at: None,
         lease_owner: None,
         lease_expires_at: None,
+        shell_result: None,
+        compose_result: None,
     }
 }
 
@@ -2363,12 +2983,16 @@ fn assign_run_lease(state: &AppState, run: &mut WorkflowRun) {
     run.lease_expires_at = Some(now_millis().saturating_add(5 * 60 * 1000));
 }
 
-async fn execute_run(
+pub(crate) async fn execute_run(
     state: AppState,
     projection: WorkflowProjection,
-    mut run: WorkflowRun,
+    run: WorkflowRun,
 ) {
-    let result = execute_run_inner(&state, &projection, &mut run).await;
+    execute_prompt_run(state, projection, run, None).await;
+}
+
+async fn execute_prompt_run(state: AppState, projection: WorkflowProjection, mut run: WorkflowRun, epoch: Option<i64>) {
+    let result = execute_run_inner(&state, &projection, &mut run, epoch).await;
     let mut publish_terminal = true;
     match result {
         Ok(()) => {
@@ -2397,7 +3021,7 @@ async fn execute_run(
             run.status = "failed".to_string();
             run.error = Some(message.clone());
             run.finished_at = Some(now_millis());
-            if run.attempt < projection.definition.retry.max_attempts
+            if epoch.is_none() && projection.definition.action.is_none() && run.attempt < projection.definition.retry.max_attempts
                 && error_is_retryable(&projection.definition.retry, &message)
             {
                 let due = now_millis().saturating_add(retry_delay(
@@ -2455,7 +3079,15 @@ async fn execute_run_inner(
     state: &AppState,
     projection: &WorkflowProjection,
     run: &mut WorkflowRun,
+    epoch: Option<i64>,
 ) -> Result<(), ApiError> {
+    reject_direct_workflow(&projection.definition)?;
+    if epoch.is_some() {
+        let _guard = state.inner.workflow_reconcile.lock().await;
+        if !rune_dispatch_allowed(state, projection, epoch).await? {
+            return Err(ApiError::conflict("Rune activation is no longer current"));
+        }
+    }
     let mut prompt = projection.definition.prompt.clone();
     if let Some(skill_name) = projection.definition.skill.as_deref() {
         let plugins = state.plugin_snapshot(&projection.workspace_root).await;
@@ -2476,7 +3108,8 @@ async fn execute_run_inner(
     extra.insert("workflowActivationID".to_string(), json!(run.activation_id));
     extra.insert("workflowScheduledAt".to_string(), json!(run.scheduled_at));
     extra.insert("workflowTrigger".to_string(), json!(run.trigger));
-    let execution_directory = workflow_execution_directory(state.services(), projection)?;
+    let execution_directory = if epoch.is_some() { projection.workspace_root.clone() }
+        else { workflow_execution_directory(state.services(), projection)? };
     let plugins = state.plugin_snapshot(&execution_directory).await;
     if !crate::plugins::enabled(&plugins, neoism_agent_builtins::plugin::workflows::ID) {
         return Err(ApiError::not_found(
@@ -2519,6 +3152,15 @@ async fn execute_run_inner(
     let message_id =
         Id::parse(IdKind::Message, format!("msg_workflow_{}", &digest[..24]))
             .map_err(|error| ApiError::internal(error.to_string()))?;
+    // Fence again at prompt admission after session creation. Serialize the check
+    // and admission against Pause/Activate and ordinary reconciliation.
+    let _dispatch = if run.trigger != "rune-manual" {
+        let guard = state.inner.workflow_reconcile.lock().await;
+        if !rune_dispatch_allowed(state, projection, epoch).await? {
+            return Err(ApiError::conflict("Rune activation is no longer current"));
+        }
+        epoch.map(|_| guard)
+    } else { None };
     crate::append_prompt(
         state,
         session.id.as_str(),
@@ -2538,15 +3180,378 @@ async fn execute_run_inner(
     Ok(())
 }
 
+fn reject_direct_workflow(definition: &WorkflowDefinition) -> Result<(), ApiError> {
+    if definition.action.is_some() {
+        return Err(ApiError::forbidden("Direct workflows require a local operator request"));
+    }
+    Ok(())
+}
+
+fn is_shell_operator(state: &AppState, headers: &HeaderMap) -> bool {
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    state.inner.caller_policy.is_workflow_shell_operator(bearer)
+}
+
+fn admit_operator_action(
+    state: &AppState,
+    headers: &HeaderMap,
+    workspace: &str,
+    source: &WorkflowSource,
+) -> Result<ValidatedDirectAction, ApiError> {
+    if !is_shell_operator(state, headers) {
+        return Err(ApiError::forbidden("Direct workflows require the local operator bearer credential"));
+    }
+    let revision = format!("sha256:{}", source.source_hash);
+    if requested_revision(headers, None).as_deref() != Some(revision.as_str()) {
+        return Err(ApiError::conflict("Direct workflows require If-Match with the current source revision"));
+    }
+    let action = prepare_workflow_shell(workspace, &source.definition, &source.source_path, &source.source_hash)?;
+    check_operator_action_approval(&action)?;
+    Ok(action)
+}
+
+fn shell_admission_error(error: anyhow::Error) -> ApiError {
+    ApiError::bad_request(error.to_string())
+}
+
+fn prepare_workflow_shell(
+    workspace: &str,
+    definition: &WorkflowDefinition,
+    source_path: &str,
+    source_hash: &str,
+) -> Result<ValidatedDirectAction, ApiError> {
+    if !cfg!(unix) || workspace.starts_with(INSTALLATION_CONTEXT_PREFIX) {
+        return Err(ApiError::forbidden("Direct workflows are only supported in local Unix workspaces"));
+    }
+    validate_definition(definition).map_err(shell_admission_error)?;
+    let root = FsPath::new(workspace);
+    let canonical_root = root.canonicalize().map_err(|e| shell_admission_error(e.into()))?;
+    if root != canonical_root {
+        return Err(ApiError::conflict("Direct workflow workspace changed"));
+    }
+    let expected = managed_workflow_path(root, &definition.id).map_err(shell_admission_error)?;
+    if expected != FsPath::new(source_path) {
+        return Err(ApiError::forbidden("Direct workflows must use their managed workspace source"));
+    }
+    if !shell_source_is_current(&expected, source_hash) {
+        return Err(ApiError::conflict("Direct workflow source changed or is inaccessible"));
+    }
+    let cwd = root.join(definition.directory.as_deref().unwrap_or("."));
+    let action = definition.action.clone().ok_or_else(|| ApiError::bad_request("Missing direct shell action"))?
+        .validate(&cwd, &format!("sha256:{source_hash}"))
+        .map_err(shell_admission_error)?;
+    if !action.directory().starts_with(root) {
+        return Err(ApiError::forbidden("Direct workflow cwd must be inside the workspace"));
+    }
+    Ok(action)
+}
+
+fn shell_source_is_current(path: &FsPath, source_hash: &str) -> bool {
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        const MAX_SOURCE_BYTES: u64 = 128 * 1024;
+        let Ok(file) = open_shell_path(path, false) else { return false; };
+        if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
+            return false;
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_SOURCE_BYTES + 1).read_to_end(&mut bytes).is_ok()
+            && bytes.len() as u64 <= MAX_SOURCE_BYTES
+            && format!("{:x}", Sha256::digest(&bytes)) == source_hash
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, source_hash);
+        false
+    }
+}
+
+/// Walk an absolute path without following any symlink, retaining the final
+/// handle so the runner never resolves an approved cwd by name again.
+#[cfg(unix)]
+fn open_shell_path(path: &FsPath, directory: bool) -> std::io::Result<fs::File> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut components = path.components().peekable();
+    if components.next() != Some(Component::RootDir) {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    let mut parent = fs::File::open("/")?;
+    while let Some(component) = components.next() {
+        let Component::Normal(name) = component else {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        };
+        let name = CString::new(name.as_bytes())?;
+        let mut flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
+        if directory || components.peek().is_some() {
+            flags |= libc::O_DIRECTORY;
+        }
+        // SAFETY: The parent fd and NUL-terminated component outlive openat.
+        let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+        if fd == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: A successful openat returns a new owned file descriptor.
+        parent = unsafe { fs::File::from_raw_fd(fd) };
+    }
+    Ok(parent)
+}
+
+fn check_operator_action_approval(action: &ValidatedDirectAction) -> Result<(), ApiError> {
+    if matches!(action.action(), DirectAction::Compose { tool_ids, .. } if crate::tool_composition::metadata::is_metadata(tool_ids)) {
+        return crate::tool_composition::metadata::check_operator(action).map_err(|error| {
+            ApiError::forbidden(format!("{error}; approval identity: {}", action.approval_identity()))
+        });
+    }
+    let shell = matches!(action.action(), DirectAction::Shell { .. });
+    let configured = std::env::var(if shell { workflow_action::SHELL_APPROVALS_ENV } else { workflow_action::COMPOSE_APPROVALS_ENV }).ok();
+    let docs = std::env::var(workflow_action::COMPOSE_DOCS_PERMISSION_ENV).ok();
+    check_configured_action_approval(action, configured.as_deref(), docs.as_deref())
+}
+
+fn check_configured_action_approval(
+    action: &ValidatedDirectAction,
+    configured: Option<&str>,
+    docs: Option<&str>,
+) -> Result<(), ApiError> {
+    let shell = matches!(action.action(), DirectAction::Shell { .. });
+    let approval = if shell {
+        workflow_action::require_shell_approval(action, configured)
+    } else {
+        workflow_action::require_compose_approval(action, configured)
+    };
+    approval.map_err(|error| {
+        ApiError::forbidden(format!("{error}; approval identity: {}", action.approval_identity()))
+    })?;
+    if !shell && docs != Some("allow") {
+        return Err(ApiError::forbidden("Direct compose requires explicit operator docs permission"));
+    }
+    Ok(())
+}
+
+async fn execute_shell_run(
+    state: AppState,
+    projection: WorkflowProjection,
+    run: WorkflowRun,
+    queued_identity: String,
+    check_approval: impl FnOnce(&ValidatedDirectAction) -> Result<(), ApiError>,
+) {
+    execute_direct_shell_run(state, projection, run, queued_identity, None, check_approval).await;
+}
+
+async fn execute_scheduled_shell_run(
+    state: AppState,
+    projection: WorkflowProjection,
+    run: WorkflowRun,
+    (epoch, identity): ScheduledActionGrant,
+    check_approval: impl FnOnce(&ValidatedDirectAction) -> Result<(), ApiError>,
+) {
+    execute_direct_shell_run(state, projection, run, identity, Some(epoch), check_approval).await;
+}
+
+async fn execute_direct_shell_run(
+    state: AppState,
+    projection: WorkflowProjection,
+    mut run: WorkflowRun,
+    queued_identity: String,
+    scheduled_epoch: Option<i64>,
+    check_approval: impl FnOnce(&ValidatedDirectAction) -> Result<(), ApiError>,
+) {
+    if scheduled_direct_trigger(&run.trigger) != scheduled_epoch.is_some() {
+        return;
+    }
+    let guard = if scheduled_epoch.is_some() {
+        Some(state.inner.workflow_reconcile.lock().await)
+    } else {
+        None
+    };
+    let start = state.inner.store.start_workflow_shell_run(&run).await;
+    match start {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            tracing::error!(%error, run_id = %run.id, "failed to start workflow shell run");
+            return;
+        }
+    }
+    run.started_at = Some(now_millis());
+    run.status = "running".into();
+    publish_run(&state, &run);
+    let result = async {
+        if let Some(epoch) = scheduled_epoch {
+            if state.services().hosted || state.services().workspace_worker.is_some() {
+                bail!("Scheduled shell workflows require a local runtime");
+            }
+            let current = state.inner.store.scheduled_workflow_action_grant(&projection).await?;
+            if !current.as_ref().is_some_and(|(current_epoch, identity)| *current_epoch == epoch && identity == &queued_identity) {
+                bail!("Scheduled action activation was paused or changed");
+            }
+        }
+        dispatch_workflow_action(&state, &projection, &queued_identity, check_approval, guard).await
+    }.await;
+    match result {
+        Ok(DirectResult::Shell(result)) => {
+            if result.exit_code != 0 {
+                run.error = Some(format!("Shell exited with status {}", result.exit_code));
+            }
+            run.shell_result = Some(result);
+        }
+        Ok(DirectResult::Compose(result)) => run.compose_result = Some(result),
+        Err(error) => run.error = Some(error.to_string()),
+    }
+    run.finished_at = Some(now_millis());
+    run.status = if run.error.is_none() { "completed" } else { "failed" }.into();
+    match state.inner.store.finish_workflow_shell_run(&run).await {
+        Ok(true) => publish_run(&state, &run),
+        Ok(false) => {}
+        Err(error) => tracing::error!(%error, run_id = %run.id, "failed to finish workflow shell run"),
+    }
+}
+
+enum DirectResult {
+    Shell(WorkflowShellResult),
+    Compose(WorkflowComposeResult),
+}
+
+async fn dispatch_workflow_compose(
+    state: &AppState,
+    projection: &WorkflowProjection,
+    approval_identity: &str,
+    check_approval: impl FnOnce(&ValidatedDirectAction) -> Result<(), ApiError>,
+) -> anyhow::Result<WorkflowComposeResult> {
+    // Do not initialize or reconcile workspace plugins from an unattended run.
+    let runtime = state.inner.workspace_runtimes.loaded_for_tenant("local", &projection.workspace_root)
+        .await.context("Direct compose requires a loaded local workspace catalog")?;
+    // The runtime lookup can suspend. Revalidate bytes and cwd after it returns.
+    let action = prepare_workflow_shell(
+        &projection.workspace_root, &projection.definition, &projection.source_path, &projection.source_hash,
+    ).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    action.require_approval(Some(approval_identity))?;
+    check_approval(&action).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let DirectAction::Compose { code, tool_ids } = action.action() else {
+        bail!("Not a fixed compose action");
+    };
+    let rules = [PermissionRule {
+        permission: "docs".into(),
+        pattern: "*".into(),
+        action: PermissionAction::Allow,
+    }];
+    let result = if crate::tool_composition::metadata::is_metadata(tool_ids) {
+        anyhow::ensure!(!state.services().hosted && state.services().workspace_worker.is_none(),
+            "metadata composition requires a local runtime");
+        crate::tool_composition::metadata::run(
+            state, &projection.workspace_root, runtime.snapshot(), tool_ids, code, approval_identity,
+        ).await?
+    } else {
+        crate::tool_composition::unattended::run(
+            state, runtime.snapshot(), &rules, tool_ids, code, Default::default(),
+        ).await.map_err(anyhow::Error::msg)?
+    };
+    anyhow::ensure!(result.ok, "Direct compose program failed");
+    let fits = crate::tool_composition::serialized_size(&result.value, 16 * 1024).is_ok();
+    Ok(WorkflowComposeResult {
+        value: if fits { result.value } else { Value::Null },
+        truncated: result.truncated || !fits,
+    })
+}
+
+async fn dispatch_workflow_action(
+    state: &AppState,
+    projection: &WorkflowProjection,
+    queued_identity: &str,
+    check_approval: impl FnOnce(&ValidatedDirectAction) -> Result<(), ApiError>,
+    dispatch_guard: Option<tokio::sync::MutexGuard<'_, ()>>,
+) -> anyhow::Result<DirectResult> {
+    #[cfg(not(unix))]
+    {
+        let _ = (state, projection, queued_identity, check_approval, dispatch_guard);
+        bail!("Direct shell workflows require Unix");
+    }
+    #[cfg(unix)]
+    {
+        // Re-read the file and resolve cwd after queueing. The immutable, checked
+        // command is passed to the runner without any trigger/template expansion.
+        let action = prepare_workflow_shell(
+            &projection.workspace_root,
+            &projection.definition,
+            &projection.source_path,
+            &projection.source_hash,
+        )
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        action.require_approval(Some(queued_identity))?;
+        if matches!(action.action(), DirectAction::Compose { .. }) {
+            let result = dispatch_workflow_compose(state, projection, queued_identity, check_approval).await;
+            drop(dispatch_guard);
+            return result.map(DirectResult::Compose);
+        }
+        check_approval(&action).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        let DirectAction::Shell { command } = action.action() else {
+            bail!("Not a fixed shell action");
+        };
+        let directory = open_shell_path(action.directory(), true)
+            .context("could not pin approved shell cwd")?;
+        let runner = crate::local_process::run_in_pinned_directory(
+            crate::local_process::ProcessSpec {
+                executable: "/bin/sh".into(),
+                args: vec!["-c".into(), command.clone()],
+                cwd: None,
+                env: BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())]),
+                stdin: None,
+                timeout_ms: Some(30_000),
+            },
+            directory,
+        );
+        // The bounded runner spawns before its first suspension. Serialize
+        // that dispatch point with pause, without locking for process lifetime.
+        tokio::pin!(runner);
+        let started = futures::poll!(&mut runner);
+        drop(dispatch_guard);
+        let captured = match started {
+            std::task::Poll::Ready(result) => result?,
+            std::task::Poll::Pending => runner.await?,
+        };
+
+        const HISTORY_STREAM_BYTES: usize = 4096;
+        let truncated = captured.truncated
+            || captured.stdout.len() > HISTORY_STREAM_BYTES
+            || captured.stderr.len() > HISTORY_STREAM_BYTES;
+        let text = |bytes: &[u8]| {
+            String::from_utf8_lossy(&bytes[..bytes.len().min(HISTORY_STREAM_BYTES)]).into_owned()
+        };
+        Ok(DirectResult::Shell(WorkflowShellResult {
+            exit_code: captured.status,
+            stdout: text(&captured.stdout),
+            stderr: text(&captured.stderr),
+            truncated,
+        }))
+    }
+}
+
 async fn recover_unfinished_runs(state: &AppState) -> anyhow::Result<()> {
     for mut run in state.inner.store.list_unfinished_workflow_runs().await? {
+        // Scheduler startup can race an operator's first manual invocation.
+        // A live compose lease owned by this process is not restart work.
+        if matches!(run.trigger.as_str(), MANUAL_COMPOSE | SCHEDULED_COMPOSE)
+            && run.lease_owner.as_deref() == Some(state.inner.execution_owner_id.as_str())
+            && run.lease_expires_at.is_some_and(|expiry| expiry > now_millis())
+        {
+            continue;
+        }
         run.status = "interrupted".to_string();
         let message = "server restarted before the workflow run completed".to_string();
         run.error = Some(message.clone());
         run.finished_at = Some(now_millis());
         let projection = state.inner.store.get_workflow(&run.activation_id).await?;
         if let Some(projection) = projection.filter(|projection| {
-            run.attempt < projection.definition.retry.max_attempts
+            run.trigger != "mcpEvent" && !scheduled_direct_trigger(&run.trigger) && run.trigger != MANUAL_COMPOSE
+                && projection.definition.action.is_none()
+                && run.attempt < projection.definition.retry.max_attempts
                 && error_is_retryable(&projection.definition.retry, &message)
         }) {
             let due = now_millis().saturating_add(retry_delay(
@@ -2668,12 +3673,12 @@ fn workflow_source_is_global(
         .any(|root| !root.starts_with(&workspace) && source.starts_with(root))
 }
 
-fn activation_id(workspace: &str, workflow_id: &str) -> String {
+pub(crate) fn activation_id(workspace: &str, workflow_id: &str) -> String {
     let digest = Sha256::digest(format!("{workspace}\0{workflow_id}").as_bytes());
     format!("wfa_{:x}", digest)
 }
 
-fn publish_workflow(state: &AppState, projection: &WorkflowProjection) {
+pub(crate) fn publish_workflow(state: &AppState, projection: &WorkflowProjection) {
     state.publish(EventPayload::new(
         event_type::WORKFLOW_UPDATED,
         json!({
@@ -2684,6 +3689,10 @@ fn publish_workflow(state: &AppState, projection: &WorkflowProjection) {
 }
 
 fn publish_run(state: &AppState, run: &WorkflowRun) {
+    // Output belongs in scoped run history, not in the workflow event stream.
+    let mut run = run.clone();
+    run.shell_result = None;
+    run.compose_result = None;
     state.publish(EventPayload::new(
         event_type::WORKFLOW_RUN_UPDATED,
         json!({
@@ -2699,6 +3708,74 @@ mod global_tests;
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rune_pin_survives_restart_and_fences_replacement_and_queued_dispatch() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let root = base.join("project");
+        let sources = root.join(".agent/workflows");
+        fs::create_dir_all(&sources).unwrap();
+        let path = sources.join("pin.md");
+        let text = "---\nid: pin\nname: Pinned\nactive: true\nschedule:\n  frequency: daily\n  time: '09:00'\n---\nA harmless fixture.\n";
+        fs::write(&path, text).unwrap();
+        let db = base.join("agent.db");
+        let state = AppState::open_database(&db).await.unwrap();
+        let source = local_prompt_source(&state, root.clone(), "pin").await.unwrap();
+        let workspace = root.to_str().unwrap();
+        let id = activation_id(workspace, "pin");
+        let mut projection = WorkflowProjection {
+            activation_id: id.clone(), workflow_id: "pin".into(), workspace_root: workspace.into(),
+            source_path: source.source_path, source_hash: source.source_hash, definition: source.definition,
+            active: true, activated_at: now_millis(), last_scheduled_at: None, updated: now_millis(),
+        };
+        let origin = source.local_origin.unwrap();
+        state.inner.store.pin_rune_prompt(&projection, &origin).await.unwrap();
+        let (epoch, _) = state.inner.store.rune_prompt_pin(&id).await.unwrap().unwrap();
+        assert!(rune_dispatch_allowed(&state, &projection, Some(epoch)).await.unwrap());
+        let run = new_run(&projection, now_millis(), RUNE_SCHEDULED_PROMPT);
+        assert!(state.inner.store.claim_scheduled_rune_prompt(&run, &projection.definition.concurrency, epoch).await.unwrap());
+
+        // A replacement with identical bytes must still invalidate consent.
+        let replacement = base.join("replacement.md");
+        fs::write(&replacement, text).unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        execute_prompt_run(state.clone(), projection.clone(), run.clone(), Some(epoch)).await;
+        let rejected = state.inner.store.get_workflow_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(rejected.status, "failed");
+        assert_eq!(rejected.session_id, None);
+        assert!(!state.inner.store.get_workflow(&id).await.unwrap().unwrap().active);
+        drop(state);
+
+        let restarted = AppState::open_database(&db).await.unwrap();
+        assert_eq!(restarted.inner.store.rune_prompt_pin(&id).await.unwrap().unwrap().1, origin);
+        assert!(restarted.inner.store.upsert_workflow(&projection).await.is_err());
+        assert!(!restarted.inner.store.claim_scheduled_rune_prompt(&new_run(&projection, run.scheduled_at + 1, RUNE_SCHEDULED_PROMPT), &projection.definition.concurrency, epoch).await.unwrap());
+        let current = local_prompt_source(&restarted, root.clone(), "pin").await.unwrap();
+        restarted.inner.store.pin_rune_prompt(&projection, current.local_origin.as_deref().unwrap()).await.unwrap();
+        let (fresh, _) = restarted.inner.store.rune_prompt_pin(&id).await.unwrap().unwrap();
+        assert_ne!(fresh, epoch);
+        assert!(!rune_dispatch_allowed(&restarted, &projection, Some(epoch)).await.unwrap());
+        assert!(rune_dispatch_allowed(&restarted, &projection, Some(fresh)).await.unwrap());
+
+        fs::write(&path, text.replace("harmless", "different harmless")).unwrap();
+        reconcile_workspaces(&restarted).await.unwrap();
+        assert!(!restarted.inner.store.get_workflow(&id).await.unwrap().unwrap().active);
+        let changed = local_prompt_source(&restarted, root, "pin").await.unwrap();
+        projection.source_hash = changed.source_hash;
+        projection.definition = changed.definition;
+        restarted.inner.store.pin_rune_prompt(&projection, changed.local_origin.as_deref().unwrap()).await.unwrap();
+        assert!(restarted.inner.store.get_workflow(&id).await.unwrap().unwrap().active);
+        drop(restarted);
+
+        let moved = sources.join("moved.md");
+        fs::rename(&path, &moved).unwrap();
+        let restarted = AppState::open_database(&db).await.unwrap();
+        assert!(restarted.inner.store.get_workflow(&id).await.unwrap().unwrap().active);
+        reconcile_workspaces(&restarted).await.unwrap();
+        assert!(!restarted.inner.store.get_workflow(&id).await.unwrap().unwrap().active);
+    }
     use super::*;
     use crate::state::SessionStore;
     use chrono::Timelike;
@@ -2714,6 +3791,7 @@ mod tests {
             month_day: None,
             date: None,
             at: None,
+            cron: None,
         }
     }
 
@@ -2728,6 +3806,397 @@ mod tests {
         assert_eq!(source.definition.id, "daily-review");
         assert_eq!(source.definition.prompt, "Review the workspace.");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    const SHELL_SOURCE: &str = "---\nid: shell-test\nname: Shell test\nschedule:\n  date: 2099-09-15\n  time: '09:30'\naction:\n  kind: shell\n  command: |\n    printf '%s\\n' \"$PWD\"\n    printf '%4100s' x\n    printf 'oops' >&2\n    exit 7\n---\n";
+
+    #[cfg(unix)]
+    fn shell_source(root: &FsPath) -> (PathBuf, String) {
+        let workspace = root.canonicalize().unwrap();
+        let path = workspace.join(".agent/workflows/shell-test.md");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, SHELL_SOURCE).unwrap();
+        (path, workspace.to_str().unwrap().to_owned())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_workflow_file_cannot_activate_or_supply_approval() {
+        let root = tempfile::tempdir().unwrap();
+        let (path, _) = shell_source(root.path());
+        let definition = parse_source(&path).unwrap().definition;
+        assert!(reject_direct_workflow(&definition).is_err());
+        assert!(parse_source(&path).unwrap().definition.prompt.is_empty());
+        for field in ["active: true", "approval: approved", "permissions: {bash: allow}"] {
+            fs::write(&path, SHELL_SOURCE.replacen("action:\n", &format!("{field}\naction:\n"), 1)).unwrap();
+            assert!(parse_source(&path).is_err(), "accepted {field}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_shell_rechecks_stale_source_and_persists_bounded_result() {
+        let root = tempfile::tempdir().unwrap();
+        let (path, workspace) = shell_source(root.path());
+        let state = AppState::open_database(root.path().join("state.sqlite3")).await.unwrap();
+        let source = parse_source(&path).unwrap();
+        let projection = ensure_projection(&state, workspace.clone(), source, false).await.unwrap();
+        let action = prepare_workflow_shell(&workspace, &projection.definition, &projection.source_path, &projection.source_hash).unwrap();
+        let identity = action.approval_identity().to_owned();
+        assert!(workflow_action::require_shell_approval(&action, None).is_err());
+        assert!(workflow_action::require_shell_approval(&action, Some(&format!("{identity},*"))).is_err());
+        let run = claim_manual_run(&state, &projection).await.unwrap();
+        fs::write(&path, format!("{SHELL_SOURCE}\n")).unwrap();
+        execute_shell_run(state.clone(), projection.clone(), run.clone(), identity.clone(), |_| {
+            panic!("stale source should fail before the grant check")
+        }).await;
+        let stale = state.inner.store.get_workflow_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(stale.status, "failed");
+        assert!(stale.error.unwrap().contains("source changed"));
+        assert!(stale.shell_result.is_none());
+
+        fs::write(&path, SHELL_SOURCE).unwrap();
+        // Use a distinct occurrence key even on clocks with coarse resolution.
+        let mut run = new_run(&projection, run.scheduled_at + 1, "manual");
+        assign_run_lease(&state, &mut run);
+        assert!(state.inner.store.claim_workflow_run(&run, &projection.definition.concurrency).await.unwrap());
+        execute_shell_run(state.clone(), projection, run.clone(), identity.clone(), |action| {
+            workflow_action::require_shell_approval(action, Some(&identity)).map_err(shell_admission_error)
+        }).await;
+        let finished = state.inner.store.get_workflow_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(finished.status, "failed");
+        assert!(finished.session_id.is_none());
+        let result = finished.shell_result.unwrap();
+        assert_eq!(result.exit_code, 7);
+        assert!(result.stdout.starts_with(&format!("{workspace}\n")));
+        assert_eq!(result.stdout.len(), 4096);
+        assert_eq!(result.stderr, "oops");
+        assert!(result.truncated);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scheduled_shell_uses_durable_activation_and_rechecks_before_spawn() {
+        let root = tempfile::tempdir().unwrap();
+        let (path, workspace) = shell_source(root.path());
+        let text = SHELL_SOURCE
+            .replace("  date: 2099-09-15\n  time: '09:30'", "  frequency: cron\n  cron: '0 * * * *'")
+            .replace("    exit 7", "    exit 0");
+        fs::write(&path, &text).unwrap();
+        let db = root.path().join("scheduled.sqlite3");
+        let state = AppState::open_database(&db).await.unwrap();
+        let id = activation_id(&workspace, "shell-test");
+        let source = parse_source(&path).unwrap();
+        let action = prepare_workflow_shell(&workspace, &source.definition, &source.source_path, &source.source_hash).unwrap();
+        let identity = action.approval_identity().to_owned();
+        let allow = |action: &ValidatedDirectAction| {
+            workflow_action::require_shell_approval(action, Some(&identity)).map_err(shell_admission_error)
+        };
+        assert!(activate_source(&state, workspace.clone(), "shell-test".into(), parse_source(&path).unwrap(), None).await.is_err());
+        let inactive = ensure_projection(&state, workspace.clone(), parse_source(&path).unwrap(), false).await.unwrap();
+        assert!(state.inner.store.scheduled_workflow_action_grant(&inactive).await.unwrap().is_none());
+        let activate = |state: AppState| {
+            let workspace = workspace.clone();
+            let source = parse_source(&path).unwrap();
+            let identity = identity.clone();
+            async move {
+                let _ = activate_source(&state, workspace, "shell-test".into(), source, Some(&identity)).await.unwrap();
+            }
+        };
+        allow(&action).unwrap();
+        activate(state.clone()).await;
+        drop(state);
+        let state = AppState::open_database(&db).await.unwrap();
+        let load = || state.inner.store.get_workflow(&id);
+        let projection = load().await.unwrap().unwrap();
+        let hour = 3_600_000;
+        let slot = (projection.activated_at / hour + 1) * hour;
+        let (run, grant) = claim_due_shell(&state, &projection, slot).await.unwrap().unwrap();
+        execute_scheduled_shell_run(state.clone(), projection, run.clone(), grant, allow).await;
+        let finished = state.inner.store.get_workflow_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(finished.status, "completed");
+        assert_eq!(finished.shell_result.unwrap().exit_code, 0);
+        let projection = load().await.unwrap().unwrap();
+        assert!(claim_due_shell(&state, &projection, slot).await.unwrap().is_none());
+        assert!(ensure_projection(&state, workspace.clone(), parse_source(&path).unwrap(), false).await.unwrap().active);
+
+        let (run, grant) = claim_due_shell(&state, &projection, slot + hour).await.unwrap().unwrap();
+        state.inner.store.set_workflow_active(&id, false, now_millis()).await.unwrap();
+        assert!(state.inner.store.scheduled_workflow_action_grant(&projection).await.unwrap().is_none());
+        // Even reactivating exactly the same revision cannot revive this queued run.
+        activate(state.clone()).await;
+        execute_scheduled_shell_run(state.clone(), projection, run.clone(), grant, |_| panic!("old activation must not dispatch")).await;
+        let paused = state.inner.store.get_workflow_run(&run.id).await.unwrap().unwrap();
+        assert!(paused.error.unwrap().contains("paused or changed"));
+        assert!(paused.shell_result.is_none());
+
+        let projection = load().await.unwrap().unwrap();
+        let (run, grant) = claim_due_shell(&state, &projection, slot + 2 * hour).await.unwrap().unwrap();
+        execute_scheduled_shell_run(state.clone(), projection, run.clone(), grant, |action| {
+            workflow_action::require_shell_approval(action, None).map_err(shell_admission_error)
+        }).await;
+        let denied = state.inner.store.get_workflow_run(&run.id).await.unwrap().unwrap();
+        assert!(denied.error.unwrap().contains("requires approval"));
+        assert!(denied.shell_result.is_none());
+
+        let projection = load().await.unwrap().unwrap();
+        let (run, grant) = claim_due_shell(&state, &projection, slot + 3 * hour).await.unwrap().unwrap();
+        fs::write(&path, format!("{text}\n")).unwrap();
+        execute_scheduled_shell_run(state.clone(), projection.clone(), run.clone(), grant, |_| panic!("stale source must not dispatch")).await;
+        let stale = state.inner.store.get_workflow_run(&run.id).await.unwrap().unwrap();
+        assert!(stale.error.unwrap().contains("source changed"));
+        assert!(stale.shell_result.is_none());
+        assert!(claim_due_shell(&state, &projection, slot + 4 * hour).await.unwrap().is_none());
+        assert!(!load().await.unwrap().unwrap().active);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_compose_manual_and_scheduled_are_fenced() {
+        use neoism_agent_service_api::{DocumentationPage, DocumentationPageSummary,
+            DocumentationSearchHit, DocumentationService, ServiceError};
+
+        struct Docs;
+        impl DocumentationService for Docs {
+            fn list(&self) -> Result<Vec<DocumentationPageSummary>, ServiceError> {
+                Ok(vec![DocumentationPageSummary { path: "Start.md".into(), title: "Start".into() }])
+            }
+            fn search(&self, _: &str, _: usize) -> Result<Vec<DocumentationSearchHit>, ServiceError> {
+                panic!("search is unavailable")
+            }
+            fn read(&self, _: &str) -> Result<DocumentationPage, ServiceError> {
+                panic!("read is unavailable")
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let (path, workspace) = shell_source(root.path());
+        let text = "---\nid: shell-test\nname: Compose test\nschedule:\n  frequency: cron\n  cron: '0 * * * *'\naction:\n  kind: compose\n  toolIds: [docs]\n  code: |\n    return await tools.neoism.docs({operation: 'list'});\n---\n";
+        fs::write(&path, text.replace("toolIds: [docs]", "toolIds: [docs, bash]")).unwrap();
+        assert!(parse_source(&path).is_err());
+        fs::write(&path, text).unwrap();
+        let state = AppState::open_database_with_services(root.path().join("compose.db"),
+            crate::standard_services().with_documentation(std::sync::Arc::new(Docs))).await.unwrap();
+        // Drive scheduler claims explicitly against fixed slots in this test.
+        state.inner.workflow_scheduler_started.store(true, std::sync::atomic::Ordering::SeqCst);
+        let source = parse_source(&path).unwrap();
+        let action = prepare_workflow_shell(&workspace, &source.definition, &source.source_path, &source.source_hash).unwrap();
+        let identity = action.approval_identity().to_owned();
+        let allow = |action: &ValidatedDirectAction| check_configured_action_approval(action, Some(&identity), Some("allow"));
+        allow(&action).unwrap();
+        assert!(workflow_action::require_shell_approval(&action, Some(&identity)).is_err());
+        assert!(check_configured_action_approval(&action, None, Some("allow")).is_err());
+        let _ = activate_source(&state, workspace.clone(), "shell-test".into(), source, Some(&identity)).await.unwrap();
+        let id = activation_id(&workspace, "shell-test");
+        let projection = state.inner.store.get_workflow(&id).await.unwrap().unwrap();
+        assert!(dispatch_workflow_compose(&state, &projection, &identity, allow).await.is_err());
+        crate::agent_tool_registry::acquire_workspace_plugin_snapshot(&state, &workspace).await.unwrap();
+        let run = claim_manual_run_with_trigger(&state, &projection, MANUAL_COMPOSE).await.unwrap();
+        execute_shell_run(state.clone(), projection.clone(), run.clone(), identity.clone(), allow).await;
+        let check_result = |id: String| {
+            let state = state.clone();
+            async move {
+                let saved = state.inner.store.get_workflow_run(&id).await.unwrap().unwrap();
+                assert_eq!(saved.status, "completed", "{:?}", saved.error);
+                assert!(saved.shell_result.is_none());
+                assert_eq!(saved.compose_result.unwrap().value["documents"][0]["path"], "Start.md");
+            }
+        };
+        check_result(run.id).await;
+        let hour = 3_600_000;
+        let slot = (projection.activated_at / hour + 1) * hour;
+        let (run, grant) = claim_due_shell(&state, &projection, slot).await.unwrap().unwrap();
+        assert_eq!(run.trigger, SCHEDULED_COMPOSE);
+        execute_scheduled_shell_run(state.clone(), projection.clone(), run.clone(), grant, allow).await;
+        check_result(run.id).await;
+
+        let (run, grant) = claim_due_shell(&state, &projection, slot + hour).await.unwrap().unwrap();
+        execute_scheduled_shell_run(state.clone(), projection.clone(), run.clone(), grant, |action| {
+            check_configured_action_approval(action, Some(&identity), Some("deny"))
+        }).await;
+        let denied = state.inner.store.get_workflow_run(&run.id).await.unwrap().unwrap();
+        assert!(denied.error.unwrap().contains("docs permission"));
+        assert!(denied.compose_result.is_none());
+
+        let (run, grant) = claim_due_shell(&state, &projection, slot + 2 * hour).await.unwrap().unwrap();
+        fs::write(&path, format!("{text}\n")).unwrap();
+        execute_scheduled_shell_run(state.clone(), projection, run.clone(), grant, |_| panic!("stale source must not dispatch")).await;
+        let stale = state.inner.store.get_workflow_run(&run.id).await.unwrap().unwrap();
+        assert!(stale.error.unwrap().contains("source changed"));
+        assert!(stale.compose_result.is_none());
+    }
+
+    #[tokio::test]
+    async fn agent_workflow_draft_is_paused_and_cannot_overwrite_a_source() {
+        let unique = Id::ascending(IdKind::Event).to_string();
+        let root = std::env::temp_dir().join(format!("neoism-workflow-draft-{unique}"));
+        fs::create_dir_all(&root).unwrap();
+        let state = AppState::open_database(root.join("state.sqlite3")).await.unwrap();
+        let workspace = root.to_str().unwrap();
+        let permissions = [PermissionRule {
+            permission: "*".into(),
+            pattern: "*".into(),
+            action: PermissionAction::Allow,
+        }];
+        let id = format!("draft-{}", unique.to_ascii_lowercase());
+        let path = root.join(".agent/workflows").join(format!("{id}.md"));
+        let mut input = json!({"action":"draft", "definition":{
+            "id": id, "name":"Review", "prompt":"List changed files.", "active":true,
+            "schedule":{"frequency":"daily", "time":"09:00"}
+        }});
+        assert!(agent_tool(&state, workspace, &permissions, input.clone()).await.is_err());
+        assert!(!path.exists());
+
+        input["definition"]["active"] = json!(false);
+        assert!(agent_tool(&state, workspace, &permissions, input.clone()).await.is_ok());
+        let source = parse_source(&path).unwrap();
+        assert!(!source.definition.active);
+        input["definition"]["prompt"] = json!("Replacement prompt.");
+        assert!(agent_tool(&state, workspace, &permissions, input).await.is_err());
+        assert_eq!(parse_source(&path).unwrap().definition.prompt, "List changed files.");
+        drop(state);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn agent_workflow_lifecycle_requires_permission_and_current_revision() {
+        let unique = Id::ascending(IdKind::Event).to_string();
+        let root = std::env::temp_dir().join(format!("neoism-workflow-lifecycle-{unique}"));
+        let workflow_dir = root.join(".agent/workflows");
+        fs::create_dir_all(&workflow_dir).unwrap();
+        let path = workflow_dir.join("approval-flow.md");
+        let original = "---\nid: approval-flow\nname: Review\nschedule:\n  date: 2099-09-15\n  time: '09:30'\n---\nReview changed files.\n";
+        fs::write(&path, original).unwrap();
+        let state = AppState::open_database(root.join("state.sqlite3")).await.unwrap();
+        let workspace = workspace_root(root.display().to_string()).unwrap();
+        let allow = |permission: &str, pattern: String| PermissionRule {
+            permission: permission.into(),
+            pattern,
+            action: PermissionAction::Allow,
+        };
+        let mut permissions = vec![allow("workflow", "*".into())];
+        let revision = format!("sha256:{}", parse_source(&path).unwrap().source_hash);
+        let input = json!({"action":"activate", "id":"approval-flow", "revision":revision});
+        let err = agent_tool(&state, &workspace, &permissions, input.clone()).await.unwrap_err();
+        assert_eq!(crate::permission_runtime::parse_permission_required_error(&err),
+            Some(("workflow_activate".into(), vec![format!("approval-flow@{revision}")])));
+        permissions.push(allow("workflow_activate", format!("approval-flow@{revision}")));
+        fs::write(&path, format!("{original}Check formatting too.\n")).unwrap();
+        let err = agent_tool(&state, &workspace, &permissions, input).await.unwrap_err();
+        assert!(err.contains("Workflow changed"));
+        let activation = activation_id(&workspace, "approval-flow");
+        assert!(state.inner.store.get_workflow(&activation).await.unwrap().is_none());
+
+        let revision = format!("sha256:{}", parse_source(&path).unwrap().source_hash);
+        permissions.push(allow("workflow_activate", format!("approval-flow@{revision}")));
+        permissions.push(allow("workflow_pause", "approval-flow".into()));
+        agent_tool(&state, &workspace, &permissions,
+            json!({"action":"activate", "id":"approval-flow", "revision":revision})).await.unwrap();
+        assert!(state.inner.store.get_workflow(&activation).await.unwrap().unwrap().active);
+        agent_tool(&state, &workspace, &permissions,
+            json!({"action":"pause", "id":"approval-flow"})).await.unwrap();
+        assert!(!state.inner.store.get_workflow(&activation).await.unwrap().unwrap().active);
+        drop(state);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cron_round_trips_file_schedule_and_previews_local_weekdays() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("review.md");
+        fs::write(
+            &path,
+            "---\nid: review\nname: Review\nschedule:\n  frequency: cron\n  cron: '30 9 * * MON-FRI'\n  timezone: America/New_York\n---\nReview.\n",
+        )
+        .unwrap();
+        let source = parse_source(&path).unwrap();
+        fs::write(&path, workflow_markdown(&source.definition).unwrap()).unwrap();
+        let schedule = parse_source(&path).unwrap().definition.schedule;
+        assert_eq!(schedule.cron.as_deref(), Some("30 9 * * MON-FRI"));
+
+        // At Friday's exact slot, preview must skip to Monday; DST changes over the weekend.
+        let friday = utc_millis(2026, 3, 6, 14, 30);
+        assert_eq!(
+            preview_slots(&schedule, friday, 2).unwrap(),
+            [utc_millis(2026, 3, 9, 13, 30), utc_millis(2026, 3, 10, 13, 30)]
+        );
+        assert_eq!(next_slot(&schedule, friday - 1).unwrap(), friday);
+    }
+
+    fn utc_millis(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> u64 {
+        Utc.with_ymd_and_hms(year, month, day, hour, minute, 0)
+            .unwrap()
+            .timestamp_millis() as u64
+    }
+
+    #[test]
+    fn cron_due_coalesces_downtime_and_respects_activation_and_milliseconds() {
+        let mut cron = schedule("cron");
+        cron.cron = Some("*/5 * * * *".into());
+        let old = utc_millis(2020, 1, 1, 0, 0);
+        let slot = utc_millis(2026, 8, 27, 12, 5);
+        assert_eq!(latest_due(&cron, old, slot + 987).unwrap(), Some(slot));
+        assert_eq!(latest_due(&cron, slot, slot).unwrap(), Some(slot));
+        assert_eq!(latest_due(&cron, slot + 1, slot + 987).unwrap(), None);
+        assert_eq!(latest_due(&cron, slot, slot - 1).unwrap(), None);
+        assert!(next_slot(&cron, u64::MAX).is_err());
+
+        cron.cron = Some("0 0 29 FEB *".into());
+        let past_leap = utc_millis(2096, 2, 29, 0, 0);
+        let next_leap = utc_millis(2104, 2, 29, 0, 0);
+        assert_eq!(next_slot(&cron, past_leap).unwrap(), next_leap);
+        assert_eq!(latest_due(&cron, old, next_leap - 1).unwrap(), Some(past_leap));
+    }
+
+    #[test]
+    fn cron_fixed_time_handles_dst_gap_and_fold() {
+        let mut cron = schedule("cron");
+        cron.timezone = "America/New_York".into();
+        cron.cron = Some("30 2 * * *".into());
+        let gap_end = utc_millis(2026, 3, 8, 7, 0);
+        assert_eq!(next_slot(&cron, gap_end - 1).unwrap(), gap_end);
+        assert_eq!(latest_due(&cron, gap_end, gap_end + 1).unwrap(), Some(gap_end));
+
+        cron.cron = Some("30 1 * * *".into());
+        let early = utc_millis(2026, 11, 1, 5, 30);
+        let late = utc_millis(2026, 11, 1, 6, 30);
+        assert_eq!(next_slot(&cron, early - 1).unwrap(), early);
+        assert_eq!(next_slot(&cron, early).unwrap(), utc_millis(2026, 11, 2, 6, 30));
+        assert_eq!(latest_due(&cron, early, late).unwrap(), Some(early));
+    }
+
+    #[test]
+    fn rejects_invalid_cron_schedules() {
+        let valid = json!({"frequency": "cron", "cron": "0 9 * * 1-5"});
+        let parse = |value| serde_json::from_value::<WorkflowSchedule>(value).unwrap();
+        let cron = parse(valid.clone());
+        assert_eq!(cron.timezone, "UTC");
+        assert_eq!(cron.interval, 1);
+        validate_schedule(&cron).unwrap();
+        assert!(serde_json::to_value(schedule("daily")).unwrap().get("cron").is_none());
+        for (key, value) in [
+            ("cron", json!(null)),
+            ("cron", json!("0 0 9 * * 1-5")),
+            ("cron", json!("*/0 * * * *")),
+            ("cron", json!("0 0 31 FEB *")),
+            ("cron", json!(format!("{}0 9 * * *", " ".repeat(256)))),
+            ("timezone", json!("+05:00")),
+            ("timezone", json!("local")),
+            ("timezone", json!("America/Unknown")),
+            ("interval", json!(2)),
+            ("date", json!("2099-01-01")),
+            ("at", json!("2099-01-01T00:00:00Z")),
+            ("minute", json!(0)),
+            ("time", json!("09:00")),
+            ("weekdays", json!(["mon"])),
+            ("monthDay", json!(1)),
+            ("frequency", json!("daily")),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[key] = value;
+            assert!(validate_schedule(&parse(invalid.clone())).is_err(), "{invalid}");
+        }
     }
 
     #[test]
@@ -2765,6 +4234,7 @@ mod tests {
             name: "Test".to_string(),
             active: false,
             prompt: "Run".to_string(),
+            action: None,
             directory: None,
             schedule: schedule("daily"),
             skill: None,
@@ -2842,6 +4312,7 @@ mod tests {
             active: true,
             schedule: one_time.clone(),
             prompt: "Run".to_string(),
+            action: None,
             directory: None,
             skill: None,
             agent: None,
@@ -2879,6 +4350,7 @@ mod tests {
                 active: true,
                 schedule: schedule("daily"),
                 prompt: "Run".to_string(),
+                action: None,
                 directory: Some("packages/app".to_string()),
                 skill: None,
                 agent: None,
@@ -2936,6 +4408,7 @@ mod tests {
                 active: true,
                 schedule: schedule("daily"),
                 prompt: "Run".to_string(),
+                action: None,
                 directory: None,
                 skill: None,
                 agent: None,
@@ -2970,7 +4443,7 @@ mod tests {
         std::fs::write(&workflow_path, source(true)).unwrap();
         let database = root.join("state.sqlite3");
         let state = AppState::open_database(database).await.unwrap();
-        let workspace = root.display().to_string();
+        let workspace = workspace_root(root.display().to_string()).unwrap();
         track_workspace(&state, &workspace).await;
         reconcile_workspaces(&state).await.unwrap();
         let id = activation_id(&workspace, "hot-reload");
@@ -3021,6 +4494,7 @@ mod tests {
                 active: true,
                 schedule: schedule("daily"),
                 prompt: "Run once".to_string(),
+                action: None,
                 directory: None,
                 skill: None,
                 agent: None,
@@ -3315,6 +4789,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_events_admission_is_durable_and_fenced() {
+        use crate::mcp_events::{Event, ListPage};
+        use crate::state::WorkflowEventAdmission::{Admitted, Blocked, Duplicate};
+
+        let path = std::env::temp_dir().join(format!(
+            "neoism-workflow-events-{}.turso.db",
+            Id::ascending(IdKind::Event)
+        ));
+        let mut projection = WorkflowProjection {
+            activation_id: "event-activation".into(),
+            workflow_id: "event-test".into(),
+            workspace_root: std::env::temp_dir().display().to_string(),
+            source_path: "event.md".into(),
+            source_hash: "revision-1".into(),
+            definition: serde_json::from_value(serde_json::json!({
+                "id": "event-test", "name": "Event test", "active": true,
+                "schedule": {"frequency": "daily"}, "prompt": "Summarize incoming data"
+            })).unwrap(),
+            active: true,
+            activated_at: 1,
+            last_scheduled_at: None,
+            updated: 1,
+        };
+        let page = ListPage::decode(br#"{"events":[{"name":"issue.updated","delivery":["push"],"inputSchema":{},"payloadSchema":{}}]}"#).unwrap();
+        let kind = &page.events[0];
+        let digest = [5; 32];
+        let mut event = Event {
+            name: kind.name.clone(),
+            event_id: "event-1".into(),
+            timestamp: "2026-07-28T00:00:00Z".into(),
+            data: serde_json::Map::new(),
+            cursor: Some("first".into()),
+        };
+        let store = SessionStore::open(path.clone()).await.unwrap();
+        store.upsert_workflow(&projection).await.unwrap();
+        let mut checkpoint = store.workflow_event_checkpoint(&projection, "issues", kind, &digest).await.unwrap().unwrap();
+        let mut stale = store.workflow_event_checkpoint(&projection, "issues", kind, &digest).await.unwrap().unwrap();
+        let Admitted(run_id) = store.admit_workflow_event(&mut checkpoint, &event).await.unwrap() else {
+            panic!("first event should be admitted")
+        };
+        event.cursor = Some("not-committed".into());
+        assert_eq!(store.admit_workflow_event(&mut checkpoint, &event).await.unwrap(), Duplicate);
+        assert_eq!(store.admit_workflow_event(&mut stale, &event).await.unwrap(), Blocked);
+        event.event_id = "event-2".into();
+        assert_eq!(store.admit_workflow_event(&mut checkpoint, &event).await.unwrap(), Blocked);
+        event.name = "unrelated".into();
+        assert!(store.admit_workflow_event(&mut checkpoint, &event).await.is_err());
+        event.name = kind.name.clone();
+        event.data.insert("huge".into(), serde_json::json!("x".repeat(16 * 1024)));
+        assert!(store.admit_workflow_event(&mut checkpoint, &event).await.is_err());
+        event.data.clear();
+        assert_eq!(checkpoint.cursor.as_deref(), Some("first"));
+        assert!(store.list_unfinished_workflow_runs().await.unwrap().is_empty());
+        let other = WorkflowProjection {
+            activation_id: "other-activation".into(),
+            workspace_root: format!("{}-other", projection.workspace_root),
+            ..projection.clone()
+        };
+        store.upsert_workflow(&other).await.unwrap();
+        let mut independent = store.workflow_event_checkpoint(&other, "issues", kind, &digest).await.unwrap().unwrap();
+        event.event_id = "event-1".into();
+        event.cursor = None;
+        assert!(matches!(store.admit_workflow_event(&mut independent, &event).await.unwrap(), Admitted(_)));
+        assert!(independent.cursor.is_none());
+        event.event_id = "event-2".into();
+        drop(store);
+
+        let store = SessionStore::open(path.clone()).await.unwrap();
+        let mut checkpoint = store.workflow_event_checkpoint(&projection, "issues", kind, &digest).await.unwrap().unwrap();
+        assert_eq!(checkpoint.cursor.as_deref(), Some("first"));
+        assert!(store.workflow_event_checkpoint(&projection, "issues", kind, &[6; 32]).await.unwrap().unwrap().cursor.is_none());
+        assert_eq!(store.get_workflow_run(&run_id).await.unwrap().unwrap().status, "event_pending");
+        store.set_workflow_active(&projection.activation_id, false, 1).await.unwrap();
+        assert!(store.workflow_event_checkpoint(&projection, "issues", kind, &digest).await.unwrap().is_none());
+        store.set_workflow_active(&projection.activation_id, true, 1).await.unwrap();
+        assert_eq!(store.admit_workflow_event(&mut checkpoint, &event).await.unwrap(), Blocked);
+        projection.source_hash = "revision-2".into();
+        store.upsert_workflow(&projection).await.unwrap();
+        assert!(store.workflow_event_checkpoint(&projection, "issues", kind, &digest).await.unwrap().unwrap().cursor.is_none());
+        assert_eq!(store.list_workflow_runs(&projection.activation_id, 10).await.unwrap().len(), 1);
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
     async fn durable_concurrency_and_retry_lineage_survive_reopen() {
         let path = std::env::temp_dir().join(format!(
             "neoism-workflow-policy-{}.turso.db",
@@ -3326,6 +4885,7 @@ mod tests {
             active: true,
             schedule: schedule("daily"),
             prompt: "Run".into(),
+            action: None,
             directory: None,
             skill: None,
             agent: None,

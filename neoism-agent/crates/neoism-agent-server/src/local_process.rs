@@ -59,6 +59,26 @@ pub(crate) async fn run_observed(
     stdout_observer: Option<process::OutputObserver>,
     stderr_observer: Option<process::OutputObserver>,
 ) -> anyhow::Result<ExecResult> {
+    run_inner(spec, cancel, stdout_observer, stderr_observer, None).await
+}
+
+/// Start with only the environment in the process spec, without inheriting
+/// server credentials, shell startup variables, or repository configuration.
+#[cfg(unix)]
+pub(crate) async fn run_in_pinned_directory(
+    spec: ProcessSpec,
+    directory: std::fs::File,
+) -> anyhow::Result<ExecResult> {
+    run_inner(spec, None, None, None, Some(directory)).await
+}
+
+async fn run_inner(
+    spec: ProcessSpec,
+    cancel: Option<Arc<AtomicBool>>,
+    stdout_observer: Option<process::OutputObserver>,
+    stderr_observer: Option<process::OutputObserver>,
+    pinned_directory: Option<std::fs::File>,
+) -> anyhow::Result<ExecResult> {
     if cancel
         .as_ref()
         .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
@@ -66,6 +86,23 @@ pub(crate) async fn run_observed(
         anyhow::bail!("command aborted");
     }
     let mut command = Command::new(&spec.executable);
+    #[cfg(unix)]
+    if let Some(directory) = pinned_directory {
+        use std::os::fd::AsRawFd;
+        command.env_clear();
+        // SAFETY: The closure retains the opened directory. In the child it
+        // does only the async-signal-safe fchdir syscall and reports errno.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::fchdir(directory.as_raw_fd()) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    debug_assert!(pinned_directory.is_none());
     command
         .args(&spec.args)
         .envs(&spec.env)

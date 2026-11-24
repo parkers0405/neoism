@@ -989,15 +989,17 @@ impl neoism_agent_builtins::plugin::workflows::WorkflowsHost for Workflows {
                     .await
                 }
                 WorkflowAction::Activate => {
-                    crate::workflow::workflow_activate(
+                    match crate::workflow::workflow_activate(
                         state,
                         Query(query_value(query)?),
                         headers,
                         Path(workflow_id),
                     )
                     .await
-                    .map_err(api_error)?
-                    .0
+                    {
+                        Ok(response) => response.0,
+                        Err(error) => return Ok(error.into_plugin_response()),
+                    }
                 }
                 WorkflowAction::Pause => {
                     crate::workflow::workflow_pause(
@@ -1011,15 +1013,17 @@ impl neoism_agent_builtins::plugin::workflows::WorkflowsHost for Workflows {
                     .0
                 }
                 WorkflowAction::Run => {
-                    crate::workflow::workflow_run_now(
+                    match crate::workflow::workflow_run_now(
                         state,
                         Query(query_value(query)?),
                         headers,
                         Path(workflow_id),
                     )
                     .await
-                    .map_err(api_error)?
-                    .0
+                    {
+                        Ok(response) => response.0,
+                        Err(error) => return Ok(error.into_plugin_response()),
+                    }
                 }
                 WorkflowAction::Preview => {
                     crate::workflow::workflow_preview(

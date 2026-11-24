@@ -288,6 +288,7 @@ pub struct App {
     pub splash: crate::home::SplashState,
     /// The open centered picker (`Alt+P`, themes), above everything else.
     pub picker: Option<crate::palette::Picker>,
+    pub workflows: Option<crate::workflows::Panel>,
     /// The file browser modal (Change Directory, attaching a picture).
     pub browser: Option<crate::browser::Browser>,
     /// The open form (Add / Edit Server, Add system).
@@ -357,19 +358,28 @@ pub struct App {
     pub glass_selection_policy: (bool, bool),
     pub goal_celebration: crate::goal_celebration::Celebration,
     pub connection_celebration: crate::connection_celebration::Celebration,
+    #[cfg(target_os = "macos")]
+    pub(crate) launch_documents: Option<Vec<std::path::PathBuf>>,
 }
 
 impl App {
     pub fn new() -> App {
+        let cwd = std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default();
+        Self::new_at(cwd)
+    }
+
+    pub(crate) fn new_at(cwd: String) -> App {
         let config = crate::config::load();
         let mut wordmark = Wordmark::default();
         wordmark.fire_enabled = config.wordmark_fire;
         let mut cursor = crate::ui::cursor::Cursor::default();
         cursor.liquid_glass = config.liquid_glass_cursor;
-        let cwd = std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default();
         let home = crate::startup::home();
         let workspace_name = std::path::Path::new(&cwd).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or("~".into());
+        let local_name = crate::ui::orb::local_display_name(config.display_name.as_deref());
         let mut app = App {
+            #[cfg(target_os = "macos")]
+            launch_documents: None,
             liquid_glass_selection: config.liquid_glass_selection,
             markdown_spellcheck: config.markdown_spellcheck,
             glass_selection_policy: (false, false),
@@ -423,6 +433,7 @@ impl App {
             mcp_icons: Default::default(),
             tools: Default::default(),
             picker: None,
+            workflows: None,
             browser: None,
             form: None,
             server: Default::default(),
@@ -469,11 +480,11 @@ impl App {
             tree_count: None,
             buffers: HashMap::new(),
             finder: None,
-            local_name: crate::ui::orb::local_display_name(config.display_name.as_deref()),
-            collab: crate::collab::Collab::new(&crate::ui::orb::local_display_name(config.display_name.as_deref())),
+            collab: crate::collab::Collab::new(&local_name),
             peer_hover: None,
             peer_blink: rune::Live::new(1.0),
-            orbs: Default::default(),
+            orbs: crate::ui::orb::Orbs::new(config.gold_avatar.then(|| local_name.clone())),
+            local_name,
             waker: None,
             mermaid_cache: Default::default(),
             mermaid_sources: Default::default(),
@@ -567,6 +578,7 @@ impl App {
             Inbound::Editor(message) => self.apply_editor_message(*message),
             // Live PTY output is uncorrelated (request 0); a reattach replays backlog under its request.
             Inbound::Reply { family, message, request_id } if family == "Pty" => {
+                if self.apply_harness_status(request_id, &message) { return; }
                 if let Ok(typed) = serde_json::from_value::<PtyServer>(message) { self.apply_pty(typed, request_id == 0); }
             }
             Inbound::Reply { family, message, request_id } if family == "Git" => {

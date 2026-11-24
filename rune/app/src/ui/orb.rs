@@ -1,6 +1,6 @@
 //! Presence orbs (`shared/src/editor/crdt/presence_avatar.rs`): a person's profile picture is a
 //! round pixel-plasma grid seeded from their display name, so the same person wears the same orb
-//! everywhere. Cell geometry is fixed per orb; only colours flow. An orb is one picture
+//! everywhere, with an optional local palette override. Cell geometry is fixed per orb; only colours flow. An orb is one picture
 //! (`rune::Pixels`) that `tick` repaints in place, so no view re-runs and it is a single
 //! element: a hundred-odd live-coloured cells per orb made user rows most of a transcript's
 //! elements, built and diffed again on every commit.
@@ -15,6 +15,7 @@ use std::time::Instant;
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Profile {
     hues: [f32; 5],
+    gold: bool,
     f: [f32; 4],
     s: [f32; 4],
     p: [f32; 2],
@@ -60,7 +61,7 @@ impl Profile {
         let s = [0.5 + r.next() * 0.9, 0.5 + r.next() * 0.9, 0.4 + r.next() * 0.8, 0.6 + r.next() * 1.1];
         let p = [r.next() * TAU, r.next() * TAU];
         let grid = 11 + (r.next() * 4.0).floor() as u32;
-        Profile { hues, f, s, p, grid }
+        Profile { hues, gold: false, f, s, p, grid }
     }
 
     /// The cells inside the unit circle: grid position and normalised centre.
@@ -81,10 +82,19 @@ impl Profile {
             + ((nx + ny) * self.f[2] + t * self.s[2]).sin()
             + (dist * self.f[3] - t * self.s[3]).sin();
         p = (p + 4.0) / 8.0;
+        let rim = 1.0 - ((dist - 0.62) / 0.38).max(0.0) * 0.55;
+        if self.gold {
+            // Obsidian shadows, antique bronze, molten gold, and champagne highlights.
+            const COLORS: [[f32; 3]; 4] = [[9.0, 8.0, 8.0], [108.0, 68.0, 26.0], [230.0, 170.0, 49.0], [255.0, 238.0, 185.0]];
+            // Light the opposite parts of the wave, with a wider band of black.
+            let stop = ((0.47 - p) * 14.0).clamp(0.0, 3.0);
+            let lo = (stop as usize).min(2);
+            let mix = stop - lo as f32;
+            return std::array::from_fn(|i| (COLORS[lo][i] + (COLORS[lo + 1][i] - COLORS[lo][i]) * mix) * rim / 255.0);
+        }
         let idx = p * self.hues.len() as f32;
         let lo = idx.floor() as usize;
         let hue = lerp_hue(self.hues[lo % 5], self.hues[(lo + 1) % 5], idx - lo as f32);
-        let rim = 1.0 - ((dist - 0.62) / 0.38).max(0.0) * 0.55;
         hsl(hue, 0.88, (34.0 + p * 40.0) * rim / 100.0)
     }
 }
@@ -140,6 +150,7 @@ impl Orb {
 
 /// Every orb shown so far, by seed and size, and the clock they flow on.
 pub struct Orbs {
+    gold_seed: Option<String>,
     orbs: RefCell<HashMap<(String, u32), Rc<Orb>>>,
     epoch: Instant,
     /// When the colours last flowed: the plasma drifts at most ~2 rad/s, so it steps at
@@ -151,16 +162,22 @@ pub struct Orbs {
 pub const STEP: std::time::Duration = std::time::Duration::from_millis(33);
 
 impl Default for Orbs {
-    fn default() -> Orbs { Orbs { orbs: Default::default(), epoch: Instant::now(), last: Default::default() } }
+    fn default() -> Orbs { Orbs::new(None) }
 }
 
 impl Orbs {
+    pub fn new(gold_seed: Option<String>) -> Orbs {
+        Orbs { gold_seed, orbs: Default::default(), epoch: Instant::now(), last: Default::default() }
+    }
+
     fn seconds(&self) -> f32 { self.epoch.elapsed().as_secs_f32() }
 
     fn orb(&self, seed: &str, side: u32) -> Rc<Orb> {
         let key = (seed.to_owned(), side);
         if let Some(orb) = self.orbs.borrow().get(&key) { return orb.clone(); }
-        let orb = Rc::new(Orb::new(Profile::from_seed(seed), side, self.seconds()));
+        let mut profile = Profile::from_seed(seed);
+        profile.gold = self.gold_seed.as_deref() == Some(seed);
+        let orb = Rc::new(Orb::new(profile, side, self.seconds()));
         self.orbs.borrow_mut().insert(key, orb.clone());
         orb
     }
@@ -242,6 +259,20 @@ mod tests {
         assert!(Rc::ptr_eq(&a, &orbs.orb("Parker", 56)));
         assert!(!Rc::ptr_eq(&a, &orbs.orb("Parker", 40)));
         assert!(!Rc::ptr_eq(&a, &orbs.orb("Peer", 56)));
+    }
+
+    #[test]
+    fn gold_palette_only_changes_the_matching_orb() {
+        let plain = Orbs::default();
+        let custom = Orbs::new(Some("Parker".into()));
+        let picture = custom.orb("Parker", 56).picture(1.5);
+        let opaque = || picture.chunks_exact(4).filter(|p| p[3] == 255);
+        assert!(opaque().filter(|p| p[0] < 24 && p[1] < 24 && p[2] < 24).count() * 2 > opaque().count());
+        let orb = custom.orb("Parker", 56);
+        assert!([0.5, 1.5, 2.5].into_iter().any(|t| orb.picture(t).chunks_exact(4)
+            .any(|p| p[3] == 255 && p[0] > 150 && p[1] > 100 && f32::from(p[2]) < 0.65 * f32::from(p[1]))));
+        assert_ne!(picture, plain.orb("Parker", 56).picture(1.5));
+        assert_eq!(custom.orb("Peer", 56).picture(1.5), plain.orb("Peer", 56).picture(1.5));
     }
 
     #[test]

@@ -326,14 +326,8 @@ async fn create_session_in_directory_inner(
     // Only explicit root creation may opt into an external runtime. Never infer
     // it from the mutable `agent` or `model` fields on later turns.
     let external = match request.external_provider.as_deref() {
-        Some("opencode") => Some(crate::external_agent::ExternalRuntime::OpenCode),
-        Some("claude") => Some(crate::external_agent::ExternalRuntime::Claude),
-        Some("codex") => Some(crate::external_agent::ExternalRuntime::Codex),
-        Some(_) => {
-            return Err(ApiError::bad_request(
-                "Invalid externalProvider; expected opencode, claude or codex",
-            ))
-        }
+        Some(id) => Some(crate::external_agent::ExternalRuntime::from_provider_id(id)
+            .ok_or_else(|| ApiError::bad_request("Invalid externalProvider"))?),
         None => None,
     };
     if external.is_some() && state.services().shared_control_plane() {
@@ -350,7 +344,7 @@ async fn create_session_in_directory_inner(
         && (external.is_none() || request.parent_id.is_some() || pending_import.is_some())
     {
         return Err(ApiError::bad_request(
-            "externalOptions requires a new external native root",
+            "externalOptions requires a new external root",
         ));
     }
     if external.is_some()
@@ -398,16 +392,16 @@ async fn create_session_in_directory_inner(
     .map_err(|error| {
         ApiError::internal(format!("directory discovery failed: {error}"))
     })??;
-    if let (Some(_runtime), Some(choices)) = (external, request.external_options.take()) {
+    if let (Some(runtime), Some(choices)) = (external, request.external_options.take()) {
         if choices.len() > 256 {
             return Err(ApiError::bad_request("Too many external options"));
         }
         let metadata = extra
             .get_mut("externalAgent")
             .expect("external root metadata");
-        // Pending selection is validated and provider-confirmed by the native runner,
-        // after all session/directory admissions. Never replay ACP for a new root.
-        metadata["nativeOptions"] = json!(choices);
+        // The owning runner validates the pending choices against the actual session.
+        let key = if runtime.acp_only() { "selectedOptions" } else { "nativeOptions" };
+        metadata[key] = json!(choices);
     }
     if state
         .services()
@@ -1354,7 +1348,7 @@ mod directory_tests {
         )
         .await
         .is_err());
-        for provider in ["opencode", "claude", "codex"] {
+        for provider in ["opencode", "claude", "codex", "grok", "kiro", "antigravity", "fx", "cursor"] {
             let created = create_session_in_directory(
                 &state,
                 root.to_str().unwrap(),

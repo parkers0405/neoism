@@ -486,6 +486,33 @@ mod tests {
     fn entry(name: &str, is_dir: bool) -> Entry { Entry { name: name.into(), is_dir } }
 
     #[test]
+    fn clicking_image_in_file_tree_opens_and_reuses_an_image_tab() {
+        let mut app = App::new();
+        app.cwd = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/splash").into();
+        app.sidebar = Some(Sidebar::Files);
+        app.images = Some(rune::ImageCache::new(std::sync::Arc::new(|| {})));
+        let path = "neoism-wordmark.png";
+        app.tree.set_listing(String::new(), vec![entry(path, false)]);
+        let mut rt = rune::Runtime::new(app, |a, _| super::view::view(a), (500.0, 300.0), rune::Env::new(true, 1.0));
+        rt.frame(1.0 / 60.0);
+        let key = format!("tree:{path}");
+        let [x, y, w, h] = rt.elements().iter().find(|e| e.key.as_deref() == Some(&key)).unwrap().rect;
+        let click = |rt: &mut rune::Runtime<App>| {
+            rt.pointer_down(x + w / 2.0, y + h / 2.0);
+            rt.pointer_up(x + w / 2.0, y + h / 2.0);
+            rt.frame(1.0 / 60.0);
+        };
+        click(&mut rt);
+        let tab = rt.state.active_tab().id;
+        assert_eq!(rt.state.active_tab().kind, crate::tabs::TabKind::Image { path: path.into() });
+        assert!(rt.state.active_buffer().is_none());
+        assert!(rt.state.viewer_file_image(tab, path).unwrap().wait().is_ok());
+        click(&mut rt);
+        assert_eq!(rt.state.active_tab().id, tab);
+        assert_eq!(rt.state.tabs.len(), 2);
+    }
+
+    #[test]
     fn folders_first_and_open_folders_nest() {
         let mut tree = Tree::default();
         tree.set_listing(String::new(), vec![entry("b.rs", false), entry("src", true), entry(".cargo", true), entry("A.md", false)]);

@@ -1,5 +1,112 @@
 use super::*;
 
+#[cfg(unix)]
+#[tokio::test]
+async fn local_workflow_catalog_is_exact_signed_and_read_only() {
+    use neoism_agent_service_api::daemon_credential::{issue, DaemonCredentialClaims, LOCAL_WORKFLOW_CATALOG_PATH as PATH};
+    let _guard = env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let workspace = root.join("workspace");
+    let other = root.join("other");
+    let sources = workspace.join(".agent/workflows");
+    std::fs::create_dir_all(&sources).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    let write = |path: &std::path::Path, id: &str| std::fs::write(path, format!("---\nid: {id}\nname: Test\nactive: true\nschedule:\n  frequency: daily\n  time: '09:00'\n---\nTest prompt\n")).unwrap();
+    write(&sources.join("local.md"), "local-only");
+    write(&other.join("secret.md"), "outside-secret");
+    std::os::unix::fs::symlink(other.join("secret.md"), sources.join("linked.md")).unwrap();
+    std::fs::hard_link(other.join("secret.md"), sources.join("hard-linked.md")).unwrap();
+    let previous = std::env::var_os("NEOISM_DAEMON_TOKEN");
+    std::env::set_var("NEOISM_DAEMON_TOKEN", "catalog-test-key");
+    let state = AppState::open_database(root.join("agent.db")).await.unwrap();
+    match previous {
+        Some(value) => std::env::set_var("NEOISM_DAEMON_TOKEN", value),
+        None => std::env::remove_var("NEOISM_DAEMON_TOKEN"),
+    }
+    let now = (now_millis() / 1000) as i64;
+    let workspace_path = workspace.to_str().unwrap();
+    let sign = |claims| issue(&claims, b"catalog-test-key").unwrap();
+    let capability = sign(DaemonCredentialClaims::local_workflow_catalog("workspace", workspace_path.into(), now, 60).unwrap());
+    let management = sign(DaemonCredentialClaims::local_prompt_workflow("workspace", workspace_path.into(), now, 60).unwrap());
+    let legacy = sign(DaemonCredentialClaims::new("legacy", "workspace", "local", vec![workspace_path.into()], false, now, 60).unwrap());
+    let hosted = sign(DaemonCredentialClaims::new("device:guest", "workspace", "workspace:workspace", vec![workspace_path.into()], true, now, 60).unwrap());
+    let system = sign(DaemonCredentialClaims::system_workflow(now, 60).unwrap());
+    let router = app(state.clone());
+    let send = |token: &str, path: &str, method: Method, directory: &str, id: &str| {
+        let mut req = request(method, path, None);
+        for (key, value) in [("authorization", format!("Bearer {token}")), ("x-neoism-directory", directory.into()), ("x-neoism-workspace-id", id.into())] {
+            req.headers_mut().insert(key, value.parse().unwrap());
+        }
+        router.clone().oneshot(req)
+    };
+    let allowed = send(&capability, PATH, Method::GET, workspace_path, "workspace").await.unwrap();
+    assert_eq!(allowed.status(), StatusCode::OK);
+    let catalog: Value = response_json(allowed).await;
+    assert_eq!(catalog["workflows"].as_array().unwrap().len(), 1);
+    assert_eq!(catalog["workflows"][0]["definition"]["id"], "local-only");
+    assert_eq!(catalog["workflows"][0]["writable"], false);
+    assert!(state.inner.store.list_workflows().await.unwrap().is_empty(), "a catalog read must not activate definitions");
+    let child = workspace.join(".agent");
+    let alias = workspace.join("..").join("workspace");
+    for (token, path, method, directory, id) in [
+        (&legacy, PATH, Method::GET, workspace_path, "workspace"),
+        (&hosted, PATH, Method::GET, workspace_path, "workspace"),
+        (&system, PATH, Method::GET, workspace_path, "workspace"),
+        (&capability, PATH, Method::POST, workspace_path, "workspace"),
+        (&capability, PATH, Method::HEAD, workspace_path, "workspace"),
+        (&capability, PATH, Method::GET, workspace_path, "wrong"),
+        (&capability, PATH, Method::GET, child.to_str().unwrap(), "workspace"),
+        (&capability, PATH, Method::GET, alias.to_str().unwrap(), "workspace"),
+        (&capability, PATH, Method::GET, other.to_str().unwrap(), "workspace"),
+        (&capability, "/v2/plugins/dev.neoism.workflows/local-catalog?scope=installation", Method::GET, workspace_path, "workspace"),
+        (&capability, "/v2/plugins/dev.neoism.workflows", Method::GET, workspace_path, "workspace"),
+        (&capability, "/v2/plugins/dev.neoism.workflows/local-only/run", Method::POST, workspace_path, "workspace"),
+        (&hosted, "/v2/plugins/dev.neoism.workflows", Method::GET, workspace_path, "workspace"),
+    ] {
+        let response = send(token, path, method.clone(), directory, id).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
+    }
+    use neoism_agent_service_api::daemon_credential::LOCAL_PROMPT_WORKFLOW_PATH as MANAGE;
+    let command = |token: &str, body: Value| {
+        let mut req = request(Method::POST, MANAGE, Some(body));
+        for (key, value) in [("authorization", format!("Bearer {token}")), ("x-neoism-directory", workspace_path.into()), ("x-neoism-workspace-id", "workspace".into())] {
+            req.headers_mut().insert(key, value.parse().unwrap());
+        }
+        router.clone().oneshot(req)
+    };
+    let current = format!("sha256:{}", catalog["workflows"][0]["sourceHash"].as_str().unwrap());
+    let source = sources.join("local.md");
+    let data = |operation: &str, revision: &str, path: &std::path::Path| json!({"operation": operation, "revision": revision, "source": path, "id": "local-only"});
+    for token in [&legacy, &hosted, &capability, &system] {
+        assert_eq!(command(token, data("history", &current, &source)).await.unwrap().status(), StatusCode::FORBIDDEN);
+    }
+    assert_eq!(send(&management, PATH, Method::GET, workspace_path, "workspace").await.unwrap().status(), StatusCode::FORBIDDEN);
+    let history = command(&management, data("history", &current, &source)).await.unwrap();
+    assert_eq!(history.status(), StatusCode::OK);
+    let history: Value = response_json(history).await;
+    assert_eq!(history, json!({"runs": []}));
+    let opened = command(&management, data("source", &current, &source)).await.unwrap();
+    assert_eq!(opened.status(), StatusCode::OK);
+    let opened: Value = response_json(opened).await;
+    assert_eq!(opened["path"], ".agent/workflows/local.md");
+    for operation in ["pause", "run"] {
+        assert_eq!(command(&management, data(operation, "sha256:stale", &source)).await.unwrap().status(), StatusCode::CONFLICT);
+        assert_eq!(command(&management, data(operation, &current, &other.join("secret.md"))).await.unwrap().status(), StatusCode::CONFLICT);
+    }
+    let source = crate::workflow::local_prompt_source(&state, workspace.clone(), "local-only").await.unwrap();
+    let activation = crate::workflow::activation_id(workspace_path, "local-only");
+    let projection = crate::workflow::WorkflowProjection {
+        activation_id: activation.clone(), workflow_id: "local-only".into(), workspace_root: workspace_path.into(),
+        source_path: source.source_path.clone(), source_hash: source.source_hash, definition: source.definition,
+        active: true, activated_at: now_millis(), last_scheduled_at: None, updated: now_millis(),
+    };
+    state.inner.store.upsert_workflow(&projection).await.unwrap();
+    let source = std::path::Path::new(&projection.source_path);
+    assert_eq!(command(&management, data("pause", &current, source)).await.unwrap().status(), StatusCode::OK);
+    assert!(!state.inner.store.get_workflow(&activation).await.unwrap().unwrap().active);
+}
+
 #[tokio::test]
 async fn system_workflow_machine_catalog_without_adoption_and_guest_isolation() {
     let _guard = env_lock();
@@ -148,10 +255,18 @@ async fn system_workflow_machine_catalog_without_adoption_and_guest_isolation() 
                 .oneshot(signed(&guest, Method::GET, &path, None))
                 .await
                 .unwrap();
-            assert!(matches!(
-                denied.status(),
-                StatusCode::NOT_FOUND | StatusCode::FORBIDDEN
-            ));
+            if path.ends_with("/tasks") && denied.status() == StatusCode::BAD_REQUEST {
+                // Without a matching scoped plugin route, the hosted request
+                // must fail the directory-scope guard before dispatch.
+                let body = axum::body::to_bytes(denied.into_body(), 16 * 1024).await.unwrap();
+                let denied: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(denied["code"], "auth.directory_scope_required", "{path}");
+            } else {
+                assert!(matches!(
+                    denied.status(),
+                    StatusCode::NOT_FOUND | StatusCode::FORBIDDEN
+                ), "guest request to {path} returned {}", denied.status());
+            }
         }
     }
     let created = app

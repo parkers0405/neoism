@@ -265,6 +265,7 @@ pub(crate) async fn handle_socket(
     // push lane so the socket pump never blocks behind them.
     let editor_query_tx = push_tx.clone();
     let git_blame_tx = push_tx.clone();
+    let mut harness_jobs = tokio::task::JoinSet::new();
     // Bounded FIFO; SQLite reads/writes cannot stall PTY forwarding or spawn
     // unbounded workers. Replies use a separate bounded lane for backpressure.
     let (database_tx, mut database_requests) = tokio::sync::mpsc::channel::<(u64, Option<String>, neoism_protocol::database::DatabaseRequest)>(8);
@@ -427,6 +428,12 @@ pub(crate) async fn handle_socket(
         // receiver could starve `stream.next()` indefinitely, leaving a
         // joined workspace's ListDir request waiting unread on the socket.
         let frame = tokio::select! {
+            Some(result) = harness_jobs.join_next(), if !harness_jobs.is_empty() => {
+                if let Ok(reply) = result {
+                    if send_json(&mut sink, &reply).await.is_err() { return; }
+                }
+                continue;
+            }
             Some(result) = completion_jobs.tasks.join_next(), if !completion_jobs.tasks.is_empty() => {
                 if let Some(mut reply) = completion_jobs.finish(result) {
                     // Recheck ownership and shell revision at delivery, not just
@@ -873,6 +880,20 @@ pub(crate) async fn handle_socket(
                     request_id,
                     message,
                 } => {
+                    if matches!(message, ClientMessage::GetHarnessStatus {}) {
+                        let error = check_permission(&device, Permission::PtyCreate).err().or_else(|| {
+                            (!harness_jobs.is_empty()).then(|| ServerMessage::Error { message: "A harness check is already running".into() })
+                        });
+                        if let Some(message) = error {
+                            if send_json(&mut sink, &ServiceServerMessage::PtyReply { request_id, message }).await.is_err() { return; }
+                        } else {
+                            harness_jobs.spawn(async move {
+                                let statuses = crate::harness_status::probe().await;
+                                ServiceServerMessage::PtyReply { request_id, message: ServerMessage::HarnessStatuses { statuses, host_os: Some(std::env::consts::OS.into()) } }
+                            });
+                        }
+                        continue;
+                    }
                     if let Some(denial) =
                         directory_permission_denial(&message, &device, &workspace_manager)
                     {
@@ -2402,7 +2423,7 @@ fn pty_client_session_id(message: &ClientMessage) -> Option<&str> {
         | ClientMessage::AttachPty { session_id, .. } => Some(session_id),
         // Directory requests must not establish their own authorization/subscription.
         ClientMessage::ChangeTerminalDirectory { .. } | ClientMessage::CompleteTerminal { .. } => None,
-        ClientMessage::CreatePty { .. } => None,
+        ClientMessage::CreatePty { .. } | ClientMessage::GetHarnessStatus {} => None,
     }
 }
 
@@ -2416,7 +2437,7 @@ fn pty_message_session_id(message: &ServerMessage) -> Option<&str> {
         | ServerMessage::TerminalDirectoryChangeFailed { session_id, .. }
         | ServerMessage::SessionCwd { session_id, .. } => Some(session_id),
         ServerMessage::SessionProgram { session_id, .. } => Some(session_id),
-        ServerMessage::Ack | ServerMessage::Error { .. } => None,
+        ServerMessage::Ack | ServerMessage::Error { .. } | ServerMessage::HarnessStatuses { .. } => None,
     }
 }
 

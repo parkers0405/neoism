@@ -30,6 +30,7 @@ pub enum Action {
     ToggleGitPanel,
     OpenAgent,
     ToggleConversations,
+    Workflows,
     Quit,
 }
 
@@ -96,6 +97,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("Servers", "daemon connections", Action::ShowServers, Service::Workspace),
     cmd("Neoism", "Alt+A", Action::OpenAgent, Service::Agent),
     cmd("Conversations", "Alt+C", Action::ToggleConversations, Service::Agent),
+    cmd("Workflows", "", Action::Workflows, Service::Agent),
     cmd("Quit", "Cmd+Q", Action::Quit, Service::Neoism),
 ];
 

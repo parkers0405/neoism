@@ -79,6 +79,23 @@ fn canonical_daemon_token_from_disk() -> Option<String> {
 }
 
 impl CallerPolicy {
+    /// Direct workflow shell dispatch is an opt-in local operator capability,
+    /// never delegated via daemon credentials or hosted/worker auth.
+    pub(crate) fn is_workflow_shell_operator(&self, bearer: Option<&str>) -> bool {
+        !self.strict_hosted
+            && self.worker.is_none()
+            && self.tenant_resolver.is_none()
+            && matches!(self.hosted_config, Ok(None))
+            && self
+                .local_token
+                .as_deref()
+                .zip(bearer)
+                .is_some_and(|(expected, supplied)| {
+                    !expected.is_empty()
+                        && constant_time_eq(expected.as_bytes(), supplied.as_bytes())
+                })
+    }
+
     /// Never discover a signing key on disk or delegate hosted/worker authority.
     pub(crate) fn local_wake_key(&self) -> Option<&[u8]> {
         if self.strict_hosted || self.worker.is_some() || self.tenant_resolver.is_some()
@@ -332,6 +349,20 @@ impl CallerPolicy {
 }
 
 impl CallerClaims {
+    pub(crate) fn is_local_workflow_catalog(&self) -> bool {
+        self.has_local_workflow_subject(neoism_agent_service_api::daemon_credential::LOCAL_WORKFLOW_CATALOG_SUBJECT)
+    }
+
+    pub(crate) fn is_local_prompt_workflow(&self) -> bool {
+        self.has_local_workflow_subject(neoism_agent_service_api::daemon_credential::LOCAL_PROMPT_WORKFLOW_SUBJECT)
+    }
+
+    fn has_local_workflow_subject(&self, subject: &str) -> bool {
+        self.subject == subject
+            && !self.hosted && self.tenant_id == "local" && self.workspace_id.is_some()
+            && self.resolved.is_none() && self.worker.is_none()
+    }
+
     /// Reserved subject accepted only for a verified explicit SystemWorkflow kind;
     /// hosted/resolver callers and workspace credentials cannot assert it.
     pub(crate) fn is_system_workflow(&self) -> bool {

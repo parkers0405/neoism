@@ -5,6 +5,12 @@ pub(crate) async fn handle_acp_request(
     method: &str,
     params: Value,
 ) -> Result<Value, AcpRpcError> {
+    // agy reports native edits/commands through tool updates rather than client callbacks.
+    if ctx.runtime == ExternalRuntime::Antigravity
+        && (method == "fs/write_text_file" || method.starts_with("terminal/"))
+    {
+        return Err(AcpRpcError { code: -32601, message: "Client mutations are not advertised for Antigravity".into() });
+    }
     match method {
         "fs/read_text_file" => handle_read_text_file(ctx, &params).await,
         "fs/write_text_file" => handle_write_text_file(ctx, &params).await,
@@ -261,6 +267,7 @@ async fn ensure_external_permission(
             code: -32000,
             message: format!("tool permission {permission_name} for {target} is denied"),
         }),
+        PermissionAction::Ask if skip_external_prompt(&ctx.state, &ctx.child_id, permission_name).await => Ok(()),
         PermissionAction::Ask => {
             let session_id =
                 Id::parse(IdKind::Session, ctx.child_id.clone()).map_err(|err| {
@@ -291,10 +298,28 @@ async fn ensure_external_permission(
     }
 }
 
+pub(super) async fn skip_external_prompt(state: &AppState, session_id: &str, permission_name: &str) -> bool {
+    if permission_name == "computer_clipboard" { return false; }
+    let Ok(Some(session)) = state.inner.store.get_session(session_id).await else { return false };
+    let tenant = crate::caller::session_tenant(&session);
+    let mut current = session.clone();
+    // Unattended runs do not gain approval by inheriting a workspace's interactive setting.
+    for _ in 0..64 {
+        if current.extra.contains_key("workflowRunID") || crate::caller::session_tenant(&current) != tenant { return false; }
+        let Some(parent) = current.parent_id else {
+            return state.try_plugin_snapshot_for_session_tenant(tenant, &session.directory, session_id).await
+                .is_ok_and(|snapshot| snapshot.config().dangerously_skip_permissions);
+        };
+        let Ok(Some(parent)) = state.inner.store.get_session(parent.as_str()).await else { return false };
+        current = parent;
+    }
+    false
+}
+
 async fn external_effective_permissions(
     ctx: &AcpEventContext,
 ) -> Result<Vec<PermissionRule>, AcpRpcError> {
-    external_effective_permissions_for_session(&ctx.state, &ctx.child_id).await
+    super::native::current_permissions(&ctx.state, &ctx.child_id).await.map_err(|message| AcpRpcError { code: -32000, message })
 }
 
 pub(super) async fn external_effective_permissions_for_session(
@@ -376,6 +401,21 @@ async fn ask_acp_permission(
         .and_then(Value::as_str)
         .unwrap_or("External agent permission")
         .to_string();
+    let rules = external_effective_permissions(ctx).await?;
+    if permission::evaluate("external_agent", &title, &rules).action == PermissionAction::Deny {
+        return Ok(None);
+    }
+    // Opaque provider tool requests cannot prove they respect a scoped deny. Never
+    // select a persistent/mode-changing grant when skipping an interactive prompt.
+    if !rules.iter().any(|rule| rule.action == PermissionAction::Deny)
+        && skip_external_prompt(&ctx.state, &ctx.child_id, "external_agent").await
+    {
+        if let Some(once) = options.as_array().and_then(|options| options.iter().find_map(|option| {
+            (option["kind"] == "allow_once").then(|| option["optionId"].as_str()).flatten()
+        })) {
+            return Ok(Some(once.to_owned()));
+        }
+    }
     let tool_call_id = tool_call
         .get("toolCallId")
         .or_else(|| tool_call.get("toolCallID"))

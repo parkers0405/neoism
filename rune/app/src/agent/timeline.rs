@@ -1027,6 +1027,33 @@ mod reasoning_tests {
     use super::*;
 
     #[test]
+    fn tool_output_before_its_card_does_not_push_down_folded_activity() {
+        use neoism_protocol::agent::{AgentServerMessage as M, ContentKind};
+        let mut app = App::new();
+        app.focused_view = true;
+        app.load_fixture("work", "Work", r#"[{"id":"ask","kind":"User","role":"User","text":"Check it"}]"#);
+        app.set_streaming("work", true);
+        let snapshot = |id| M::MessageUpdated { session_id: "work".into(), parent_message_id: None,
+            message: serde_json::from_value(serde_json::json!({"id":id,"kind":"Tool","role":"Assistant","tool":"bash","status":"completed"})).unwrap() };
+        app.apply_agent(snapshot("first"));
+        app.tick_activity();
+        let mut rt = rune::Runtime::new(app, |a: &App, cx: &mut Cx<App>| pane(a, Some("work"), cx), (1000.0, 674.0), rune::Env::new(true, 1.0));
+        for _ in 0..120 { rt.frame(1.0 / 120.0); }
+        let start = rt.presented("activity").unwrap().0[1];
+        let mut peak = start;
+        for event in [M::ContentDelta { session_id: "work".into(), message_id: "next".into(), parent_message_id: None,
+            kind: ContentKind::Tool { name: "bash".into() }, text: "one\n\ntwo\n\nthree\n\nfour".into() }, snapshot("next")] {
+            rt.update(|a, _| { a.apply_agent(event); a.tick_activity(); });
+            for _ in 0..120 {
+                rt.frame(1.0 / 120.0);
+                peak = peak.max(rt.presented("activity").unwrap().0[1]);
+            }
+        }
+        let end = rt.presented("activity").unwrap().0[1];
+        assert!((peak - start).abs() < 0.5 && (end - start).abs() < 0.5, "hidden tool displaced activity: {start} -> {peak} -> {end}");
+    }
+
+    #[test]
     fn folded_activity_follows_streaming_content_without_jumping_on_hidden_calls() {
         use neoism_protocol::agent::AgentServerMessage as M;
         let mut app = App::new();

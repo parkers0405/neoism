@@ -15,6 +15,8 @@ pub(crate) struct AcpRunCollector {
     pub(crate) nested_sessions: HashMap<String, String>,
     pub(crate) config_error: Option<String>,
     pub(crate) user_chunks: HashMap<String, String>,
+    pub(crate) antigravity_active_commands: std::collections::HashSet<String>,
+    pub(crate) antigravity_command_settled: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -151,9 +153,8 @@ pub(super) async fn initialize_acp_client(
     cancellation: Arc<AtomicBool>,
 ) -> Result<Value, String> {
     let initialize = tokio::select! {
-        result = client.initialize() => result.map_err(|error| format!(
-            "{} ACP initialize failed: {}", runtime.display_name(), error.message,
-        ))?,
+        result = client.initialize(runtime != ExternalRuntime::Antigravity) => result
+            .map_err(|error| session_setup_error(runtime, "initialize", &error, &Value::Null))?,
         _ = wait_for_cancel(cancellation) => return Err("Session aborted".into()),
     };
     if initialize.get("protocolVersion").and_then(Value::as_u64)
@@ -180,6 +181,9 @@ fn session_setup_method(
         return Ok("session/new");
     }
     let caps = &initialize["agentCapabilities"];
+    if runtime == ExternalRuntime::Antigravity && caps["sessionCapabilities"]["resume"].is_object() {
+        return Ok("session/resume");
+    }
     if caps["loadSession"] == true {
         return Ok("session/load");
     }
@@ -195,22 +199,9 @@ pub(super) fn session_setup_error(
     error: &AcpRpcError,
     initialize: &Value,
 ) -> String {
-    let message = error.message.to_ascii_lowercase();
-    let auth_required = [
-        "auth_required",
-        "authrequired",
-        "authentication_required",
-        "authentication required",
-        "not authenticated",
-        "unauthorized",
-        "not logged in",
-        "login required",
-        "log in required",
-        "please log in",
-        "please login",
-    ]
-    .iter()
-    .any(|needle| message.contains(needle));
+    // Some adapters report authentication required as a bare Unauthorized error.
+    let auth_required = runtime.is_sign_in_error(&error.message)
+        || (error.code == -32000 && error.message.trim().eq_ignore_ascii_case("unauthorized"));
     if auth_required {
         let methods = initialize["authMethods"]
             .as_array()
@@ -352,7 +343,7 @@ pub(crate) async fn run_acp_prompt(
     cancellation: Arc<AtomicBool>,
 ) -> Result<ExternalRunResult, String> {
     if !runtime.is_legacy_session(child) {
-        return Err("ACP runner requires an explicitly persisted legacy ACP conversation".into());
+        return Err("ACP runner requires an explicitly persisted ACP conversation".into());
     }
     let session_lock = super::options::session_lock(state, child.id.as_str()).await;
     let _session_guard = session_lock.lock().await;
@@ -460,8 +451,9 @@ pub(crate) async fn run_acp_prompt(
         }),
         PROMPT_TIMEOUT,
     );
+    tokio::pin!(prompt_request);
     let prompt_response = tokio::select! {
-        result = prompt_request => match result {
+        result = &mut prompt_request => match result {
             Ok(response) => response,
             Err(error) => {
                 // Flush updates preceding the failure response before recording
@@ -475,6 +467,10 @@ pub(crate) async fn run_acp_prompt(
         },
         _ = wait_for_cancel(cancellation.clone()) => {
             let _ = client.notify("session/cancel", json!({ "sessionId": acp_session_id }));
+            if runtime == ExternalRuntime::Antigravity {
+                // agy acknowledges cancellation by settling the prompt, not the notification.
+                let _ = tokio::time::timeout(Duration::from_secs(2), &mut prompt_request).await;
+            }
             let _ = tokio::time::timeout(Duration::from_millis(250), client.drain_events()).await;
             event_task.abort();
             settle_acp_run(state, runtime, child.id.as_str(), step, &collector, "interrupted").await;
@@ -500,21 +496,55 @@ pub(crate) async fn run_acp_prompt(
             runtime.display_name()
         ));
     }
+    let stop_reason = prompt_response.get("stopReason").and_then(Value::as_str);
+    if runtime == ExternalRuntime::Antigravity && stop_reason == Some("end_turn") {
+        // agy can return from session/prompt before an awaited command finishes.
+        // Leave the event stream alive, but never hold the session for a daemon.
+        let settled = collector.lock().await.antigravity_command_settled.clone();
+        let wait = async {
+            loop {
+                let changed = settled.notified();
+                if collector.lock().await.antigravity_active_commands.is_empty() {
+                    break;
+                }
+                changed.await;
+            }
+        };
+        let tail_result = tokio::select! {
+            biased;
+            _ = wait_for_cancel(cancellation.clone()) => Err(("interrupted", "Session aborted")),
+            result = tokio::time::timeout(Duration::from_secs(30), wait) => result
+                .map_err(|_| ("error", "Antigravity did not finish its pending command after the turn ended")),
+        };
+        if let Err((status, message)) = tail_result {
+            let _ = client.notify("session/cancel", json!({ "sessionId": acp_session_id }));
+            event_task.abort();
+            settle_acp_run(state, runtime, child.id.as_str(), step, &collector, status).await;
+            return Err(message.into());
+        }
+        if tokio::time::timeout(Duration::from_secs(5), client.drain_events()).await.is_err() {
+            event_task.abort();
+            settle_acp_run(state, runtime, child.id.as_str(), step, &collector, "error").await;
+            return Err("Antigravity's final command events could not be drained".into());
+        }
+    }
     event_task.abort();
+    let (status, failure) = match stop_reason {
+        Some("cancelled") => ("interrupted", Some(format!("{} ACP adapter cancelled the turn", runtime.display_name()))),
+        Some("refusal") if runtime == ExternalRuntime::Antigravity => ("error", Some("Antigravity refused the turn; check your provider quota and account status.".into())),
+        _ => ("completed", None),
+    };
     settle_acp_run(
         state,
         runtime,
         child.id.as_str(),
         step,
         &collector,
-        "completed",
+        status,
     )
     .await;
-    if prompt_response.get("stopReason").and_then(Value::as_str) == Some("cancelled") {
-        return Err(format!(
-            "{} ACP adapter cancelled the turn",
-            runtime.display_name()
-        ));
+    if let Some(error) = failure {
+        return Err(error);
     }
     update_external_session_metadata(
         state,

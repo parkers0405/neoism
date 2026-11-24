@@ -194,6 +194,7 @@ impl App {
                         TabKind::Agent { .. } => ("\u{f0a1e}", self.pal.fg),
                         TabKind::Database { .. } => ("\u{f1c0}", self.pal.blue),
                         TabKind::GitDiff => ("\u{e725}", self.pal.blue),
+                        TabKind::Image { .. } => (crate::image_viewer::ICON, self.pal.cyan),
                     };
                     (self.tab_title(tab), icon)
                 }

@@ -41,6 +41,8 @@ mod lsp_routes;
 mod management;
 mod mcp;
 mod mcp_auth;
+#[allow(dead_code)] // Wire models only; no Events transport or workflow consumer yet.
+mod mcp_events;
 mod mcp_routes;
 mod message_model;
 mod message_part_mutation;
@@ -111,6 +113,9 @@ mod utility_runtime;
 mod v2_routes;
 pub(crate) mod windows_process;
 mod workflow;
+mod local_prompt_workflow;
+#[allow(dead_code)] // Admission prerequisite only; no workflow dispatch is wired yet.
+mod workflow_action;
 mod workspace_runtime;
 mod workspace_worker;
 pub use workspace_worker::workspace_worker_services;

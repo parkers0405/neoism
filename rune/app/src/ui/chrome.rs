@@ -27,9 +27,14 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
             .child(crate::panes::view(app, cx)))
         .child_if(app.git_panel.open, || super::sidebar::view(app, "git", crate::git::view(app), crate::git::WIDTH * app.ty.scale(), 180.0, super::sidebar::chrome_max(app), true));
     track_caret(app, cx);
-    col().key("app-shell").w_full().h_full().fill(rgb(p.bg))
-        .on_layout(|a: &mut App, [_, _, w, h]: [f32; 4]| a.window = [w, h])
-        .on_paste(|a: &mut App, text, _| a.paste_content(text))
+    let shell = col().key("app-shell").w_full().h_full().fill(rgb(p.bg))
+        .on_layout(|a: &mut App, [_, _, w, h]: [f32; 4]| a.window = [w, h]);
+    let shell = if app.accepts_chat_image_paste() {
+        shell.on_paste_content(|a: &mut App, content, _| a.paste_window_content(content))
+    } else {
+        shell.on_paste(|a: &mut App, text, _| a.paste_content(text))
+    };
+    shell
         .child(super::wallpaper::view(app))
         .children(titlebar(app, cx))
         .child(body)
@@ -50,6 +55,7 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
         .child_if(app.finder.is_some(), || crate::finder::view(app))
         .child_if(app.browser.is_some(), || crate::browser::view::view(app))
         .child_if(app.form.is_some(), || crate::servers::form::view(app))
+        .child_if(app.workflows.is_some(), || crate::workflows::view(app))
         .child_if(app.modal.is_some(), || super::modal::view(app))
         .child_if(app.menu.is_some(), || super::menu::view(app))
         .child_if(app.tree_dnd.is_some(), || crate::tree::drag::ghost(app))
@@ -69,7 +75,7 @@ fn track_caret(app: &App, cx: &mut Cx<App>) {
     } else {
         match app.active_tab().kind {
             TabKind::Agent { .. } => app.ty.composer().size,
-            TabKind::Home | TabKind::Terminal | TabKind::Editor { .. } | TabKind::Database { .. } | TabKind::GitDiff => app.ty.small().size,
+            TabKind::Home | TabKind::Terminal | TabKind::Editor { .. } | TabKind::Image { .. } | TabKind::Database { .. } | TabKind::GitDiff => app.ty.small().size,
         }
     };
     app.cursor.caret_font.set(font);
@@ -87,7 +93,7 @@ fn cursor_in_overlay(app: &App) -> bool {
 
 #[cfg(target_os = "macos")]
 pub fn glass_cursor_allowed(app: &App) -> bool {
-    if app.context.is_some() || app.prompt.is_some() || app.modal.is_some() || app.form.is_some()
+    if app.context.is_some() || app.prompt.is_some() || app.modal.is_some() || app.form.is_some() || app.workflows.is_some()
         || app.diag_popup.is_some() || app.tab_drag.is_some() || app.tree_dnd.is_some()
         || app.server.progress().is_some() { return false; }
     // Slash/mention suggestions sit above the composer; other composer pickers own

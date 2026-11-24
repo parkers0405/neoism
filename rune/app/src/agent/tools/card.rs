@@ -127,15 +127,19 @@ fn header(cx: &Cx, m: &HistoryMessage, spec: Header) -> El {
     if !spec.clickable {
         return row;
     }
-    let id = m.id.clone();
-    // Only the Task row navigates (`hit_rects.rs`): diff sections and group children don't.
-    let task = (m.tool == "task").then(|| crate::agent::family::task_id(&m.detail, &m.text)).flatten();
     // A card that opens (its detail, or its sub-agent) shows the hand.
-    let hit = el().w(w).h(cx.pt(HEADER_H)).absolute(0.0, 0.0).cursor(rune::Cursor::Pointer).on_press(move |a: &mut App| match &task {
+    let hit = el().w(w).h(cx.pt(HEADER_H)).absolute(0.0, 0.0).cursor(rune::Cursor::Pointer).on_press(header_press(m));
+    row.child(hit)
+}
+
+fn header_press(m: &HistoryMessage) -> impl Fn(&mut App) + 'static + use<> {
+    let id = m.id.clone();
+    // Only a Task header with a child id navigates; other headers expand their detail.
+    let task = (m.tool == "task").then(|| crate::agent::family::task_id(&m.detail, &m.text)).flatten();
+    move |a| match &task {
         Some(session) => a.view_session(session),
         None => a.tools.toggle(&id),
-    });
-    row.child(hit)
+    }
 }
 
 fn header_title(m: &HistoryMessage) -> String {
@@ -145,13 +149,70 @@ fn header_title(m: &HistoryMessage) -> String {
         "shell" => "Shell".into(),
         "background_task" => "Background Task".into(),
         "background_task_result" => "Background Task Result".into(),
+        "task" => match m.agent_kind.as_deref().and_then(crate::agent::slash::harness_name) {
+            Some(name) => format!("{name} · {}", compact_title(&m.title)),
+            None => compact_title(&m.title),
+        },
         _ => compact_title(&m.title),
     }
 }
 
 #[cfg(test)]
-mod title_tests {
+mod tests {
     use super::*;
+    use neoism_protocol::agent::{AgentClientMessage, AgentServerMessage as M, ContentKind};
+    use serde_json::json;
+
+    #[test]
+    fn antigravity_task_header_opens_child_and_reuses_live_family_stream() {
+        let mut app = App::new();
+        app.open_conversation("root");
+        let tab_id = app.active_tab().id;
+        let child = "ses_antigravity_child";
+        app.apply_agent(M::CatalogFamily { session_id: "root".into(), snapshot: json!({
+            "rootSessionId": "root", "familyRevision": 1, "branches": [
+                {"sessionId": child, "parentSessionId": "root", "status": "outstanding", "agent": "antigravity"}
+            ]
+        }) });
+        // The daemon projects the launch acknowledgement as running from its output. Its
+        // task_id line names the Neoism child, not the external harness's own session.
+        let task: HistoryMessage = serde_json::from_value(json!({
+            "id": "delegation", "role": "Assistant", "kind": "Tool", "tool": "task",
+            "status": "running", "detail": format!("task_id: {child} (use this to check or continue the external subagent task)\nstatus: running"),
+            "agent_kind": "antigravity"
+        })).unwrap();
+        app.apply_agent(M::MessageUpdated { session_id: "root".into(), parent_message_id: None, message: task });
+        let press = header_press(&app.sessions["root"].messages[0]);
+        press(&mut app);
+        assert_eq!(app.active_tab().id, tab_id);
+        assert_eq!(app.active_tab().kind, crate::tabs::TabKind::Agent { session: Some(child.into()) });
+        assert_eq!(app.sessions[child].live_from, Some(0));
+
+        let sent = app.agent_sent.borrow();
+        let requests: Vec<AgentClientMessage> = sent.iter().map(|m| serde_json::from_str(m).unwrap()).collect();
+        assert_eq!(requests.iter().filter(|m| matches!(m, AgentClientMessage::ResumeStream { session_id } if session_id == "root")).count(), 1);
+        assert!(!requests.iter().any(|m| matches!(m,
+            AgentClientMessage::SwitchThread { session_id } | AgentClientMessage::ResumeStream { session_id } if session_id == child
+        )), "a second subscription would duplicate child deltas");
+        assert!(requests.iter().any(|m| matches!(m, AgentClientMessage::GetHistory { session_id, .. } if session_id == child)));
+        drop(sent);
+
+        // Family wire events retain the child's session id even on the root subscription.
+        let tool: HistoryMessage = serde_json::from_value(json!({
+            "id": "child-tool", "role": "Assistant", "kind": "Tool", "tool": "bash", "status": "running"
+        })).unwrap();
+        app.apply_agent(M::MessageUpdated { session_id: child.into(), parent_message_id: None, message: tool });
+        for text in ["First ", "answer"] {
+            app.apply_agent(M::ContentDelta {
+                session_id: child.into(), message_id: "child-reply".into(), parent_message_id: None,
+                kind: ContentKind::Text, text: text.into(),
+            });
+        }
+        assert!(app.session_live(child));
+        assert!(app.sessions[child].messages.iter().any(|m| m.id == "child-tool" && m.status == "running"));
+        assert_eq!(app.sessions[child].messages.iter().find(|m| m.id == "child-reply").unwrap().text, "First answer");
+        assert_eq!(app.sessions["root"].messages.len(), 1, "child events must not leak into the parent transcript");
+    }
 
     #[test]
     fn shell_and_background_headers_show_only_the_tool_name() {
@@ -209,6 +270,9 @@ fn symbol(cx: &Cx, m: &HistoryMessage) -> El {
     let icons = &cx.app.tools.icons;
     let image_slot = |image: &rune::Image| el().w(cx.pt(18.0)).h(cx.pt(18.0)).pixels(image.pixels()).absolute(cx.pt(20.0), 0.0);
     if m.tool == "task" {
+        if let Some(mark) = m.agent_kind.as_deref().and_then(|id| crate::agent::slash::harness_mark(cx.app, id, cx.pt(16.0))) {
+            return mark.absolute(cx.pt(21.0), cx.pt(1.0));
+        }
         if let Some(image) = icons.agent(m.agent_kind.as_deref()) { return image_slot(image); }
     }
     let mcp = m.mcp.is_some() || m.tool == "execute" || m.tool.starts_with("mcp__");

@@ -9,6 +9,8 @@ use std::collections::HashMap;
 
 const ATLAS: &[u8] = include_bytes!("../../../assets/provider-logos.png");
 const TILE: u32 = 64;
+pub(super) const ANTIGRAVITY: usize = 8;
+pub(super) const CURSOR: usize = 9;
 
 #[derive(Default)]
 pub struct Logos {
@@ -25,7 +27,7 @@ fn is_dark(bg: u32) -> bool {
 pub fn color(index: usize, pal: &Palette) -> u32 {
     match index {
         1 => 0xd97757,
-        0 | 2 | 7 => if is_dark(pal.bg) { 0xffffff } else { 0x000000 },
+        0 | 2 | 7 | CURSOR => if is_dark(pal.bg) { 0xffffff } else { 0x000000 },
         _ => pal.blue,
     }
 }
@@ -34,6 +36,21 @@ impl Logos {
     /// The tinted mark for atlas tile `index`, made once per colour.
     pub fn image(&self, images: &ImageCache, index: usize, rgb: u32) -> Option<Image> {
         if let Some(image) = self.tinted.borrow().get(&(index, rgb)) { return Some(image.clone()); }
+        if matches!(index, ANTIGRAVITY | CURSOR) {
+            let source = if index == ANTIGRAVITY { include_str!("../../../assets/icons/antigravity.svg") } else { include_str!("../../../assets/icons/cursor.svg") };
+            let source = source.replace("#ffffff", &format!("#{rgb:06x}"));
+            let tree = resvg::usvg::Tree::from_str(&source, &resvg::usvg::Options::default()).ok()?;
+            let mut pixels = resvg::tiny_skia::Pixmap::new(TILE, TILE)?;
+            let scale = TILE as f32 / tree.size().width();
+            resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(scale, scale), &mut pixels.as_mut());
+            let rgba: Vec<u8> = pixels.pixels().iter().flat_map(|pixel| {
+                let p = pixel.demultiply();
+                [p.red(), p.green(), p.blue(), p.alpha()]
+            }).collect();
+            let image = images.rgba(TILE, TILE, rgba);
+            self.tinted.borrow_mut().insert((index, rgb), image.clone());
+            return Some(image);
+        }
         let mut atlas = self.atlas.borrow_mut();
         if atlas.is_none() { *atlas = decode(ATLAS); }
         let (width, rgba) = atlas.as_ref()?;

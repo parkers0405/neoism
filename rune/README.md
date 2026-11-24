@@ -412,6 +412,8 @@ with, row for row, against the same conversation opened fresh.
 
 ## Running
 
+Set `presence.avatar-palette` to `"obsidian-gold"` in `config.json` and relaunch Rune to give your own animated presence orb a black, bronze, gold and champagne palette. Omit the setting to use the name-generated colours. The override is local to this app and does not change collaborators' avatars.
+
 Window recovery is independent from live daemon state. `neoism --new-window` opens fresh tabs; a normal launch restores the most recently saved closed local window, never one still open in another process. Explicit directory/file launches also start independently so recovery cannot override the requested project. Each window holds an OS lock on its own recovery snapshot in `$XDG_STATE_HOME/neoism/rune/session.windows/` (the old `session.json` remains readable). Closing a window saves its tabs, splits, drafts and unsaved text, then releases its daemon resources; reopening starts fresh shells and reloads conversation history. Explicitly closing the last workspace forgets only that window's recovery. Startup keeps at most 20 clean closed-window snapshots, plus active windows and any snapshots containing unsaved edits or drafts; protected recovery is never automatically evicted. These disk snapshots do not keep hidden tabs or shells running. Linked-window synchronization is separate and is not implied by sharing a daemon or directory.
 
 ```sh
@@ -431,9 +433,13 @@ The agent composer uses native blue atomic pills for selected skills, image/file
 
 `/goals` opens the current conversation's persistent goal in the same above-composer panel, with Markdown content, lifecycle status, a live elapsed timer and any completion/blocker summary. `/goal` and its set/pause/resume/clear commands are unchanged. Age is wall-clock time since the server's persisted `created` timestamp (paused time is included and labelled); complete/blocked goals use their last `updated` timestamp instead of continuing to tick. Headless scenes: `goals`, `goals-paused`, `goals-complete`, and `goals-empty`.
 
+**Workflows** in the command palette (`Alt+P`) opens the selected workspace’s prompt workflow catalog on the local daemon (Unix). Filter by name or ID; click a row or use ↑/↓ to inspect it. **Refresh** reloads definitions and diagnostics. **History** lists recent Rune manual and scheduled runs. **Open source** opens the revalidated Markdown source in the regular workspace editor; normal editor save behavior applies. **Activate**, **Pause**, and **Run now** ask for confirmation and check the source revision again on the server. Activate pins the exact source and revision across restarts. Editing, moving, or replacing that source pauses the schedule when Agent detects the change; refresh, inspect, and explicitly activate again. Activate and Run now require a workspace-root prompt with no skill or retries and with forbid concurrency; event schedules cannot be activated here. The catalog reads direct Markdown files in `.agent/{workflow,workflows}` and `.neoism/{workflow,workflows}`; it omits installation sources, linked files, nested folders and direct operator workflows. Headless scene: `workflows` (fixture data).
+
 Chat Markdown image previews (`![description](path)`) load local absolute paths, workspace-relative paths, `file://` URLs and inline image data URLs through Rune's image cache. File reads and decoding run off the UI thread; completed decodes invalidate memoized Markdown so placeholders become pictures. Click a picture to open the existing image viewer. This is native-local loading, not a filesystem-serving HTTP endpoint; remote-host paths and web image URLs are not fetched. Use `--scene timeline-inline-image` to check the surface headlessly.
 
 Sent photos sit above and outside the text bubble. Multiple photos form a fanned stack; horizontal trackpad swipes (or Shift+wheel) cycle every photo without scrolling the transcript sideways. Click the stack to open the selected photo full-window, then use horizontal swipes, Left/Right, or the viewer arrows to browse the set. Escape, the close button, or the backdrop dismisses the viewer. `--scene agent-attach` checks a single photo; set `NEOISM_RUNE_PHOTO_STACK=1` for four photos.
+
+Clicking a local image file in the file tree opens a read-only tab that fits the image to its pane without cropping. Reopening the file selects the existing tab. Use `--scene image-viewer` to check the file preview headlessly.
 
 ## Validation and remaining migration work
 

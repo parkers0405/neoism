@@ -15,6 +15,7 @@ mod todos;
 
 pub use diff::is_edit_tool;
 pub use group::{group_at, group_end, is_todos, visible};
+pub(crate) use group::live_subagent;
 pub use icons::Icons;
 
 /// Shared with the activity line so its context label uses exactly the grouping vocabulary.

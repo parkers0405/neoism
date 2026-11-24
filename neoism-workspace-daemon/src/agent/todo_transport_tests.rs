@@ -90,7 +90,9 @@ fn todos_transport_recursive_output_kind_and_legacy_inference() {
 #[test]
 fn task_agent_identity_survives_reconstruction_and_recursive_history_transport() {
     let mut messages = Vec::new();
-    for kind in [AgentKind::Claude, AgentKind::Codex, AgentKind::OpenCode, AgentKind::Neoism] {
+    let kinds = [AgentKind::Claude, AgentKind::Codex, AgentKind::OpenCode, AgentKind::Neoism,
+        AgentKind::Antigravity, AgentKind::Cursor, AgentKind::Grok, AgentKind::Kiro, AgentKind::Fx];
+    for kind in kinds {
         let message = history_from_part(&json!({
             "id": kind.id(), "type": "tool", "tool": "task",
             "state": {
@@ -114,7 +116,7 @@ fn task_agent_identity_survives_reconstruction_and_recursive_history_transport()
     let mapped = roundtrip(parent.clone());
     assert_eq!(mapped.agent_kind, Some(AgentKind::Claude));
     assert_eq!(mapped.composition_children.iter().map(|child| child.agent_kind).collect::<Vec<_>>(),
-        vec![Some(AgentKind::Codex), Some(AgentKind::OpenCode), Some(AgentKind::Neoism)]);
+        kinds[1..].iter().copied().map(Some).collect::<Vec<_>>());
     assert_eq!(history_from_agent_message(mapped), parent);
 }
 

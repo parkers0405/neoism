@@ -36,6 +36,11 @@ pub enum AgentKind {
     Claude,
     Codex,
     OpenCode,
+    Antigravity,
+    Cursor,
+    Grok,
+    Kiro,
+    Fx,
     Neoism,
 }
 
@@ -45,7 +50,7 @@ impl AgentKind {
             AgentKind::Claude => CLAUDE_IMAGE_ID,
             AgentKind::Codex => CODEX_IMAGE_ID,
             AgentKind::OpenCode => OPENCODE_IMAGE_ID,
-            AgentKind::Neoism => NEOISM_IMAGE_ID,
+            _ => NEOISM_IMAGE_ID,
         }
     }
 
@@ -57,6 +62,11 @@ impl AgentKind {
             AgentKind::Claude => "claude",
             AgentKind::Codex => "codex",
             AgentKind::OpenCode => "opencode",
+            AgentKind::Antigravity => "antigravity",
+            AgentKind::Cursor => "cursor",
+            AgentKind::Grok => "grok",
+            AgentKind::Kiro => "kiro",
+            AgentKind::Fx => "fx",
             AgentKind::Neoism => "neoism",
         }
     }
@@ -67,7 +77,7 @@ impl AgentKind {
             "codex" => Some(AgentKind::Codex),
             "opencode" => Some(AgentKind::OpenCode),
             "neoism" | "neoism-agent" => Some(AgentKind::Neoism),
-            _ => None,
+            _ => Self::from_external_agent(id),
         }
     }
 
@@ -80,6 +90,11 @@ impl AgentKind {
             "opencode" | "open-code" => Some(Self::OpenCode),
             "claude" | "claude-code" | "claude-agent" => Some(Self::Claude),
             "codex" | "openai-codex" => Some(Self::Codex),
+            "antigravity" | "agy" => Some(Self::Antigravity),
+            "cursor" | "cursor-agent" => Some(Self::Cursor),
+            "grok" | "grok-build" => Some(Self::Grok),
+            "kiro" | "kiro-cli" => Some(Self::Kiro),
+            "fx" => Some(Self::Fx),
             _ => None,
         }
     }
@@ -141,6 +156,11 @@ impl AgentKind {
             AgentKind::Claude => "Claude Code",
             AgentKind::Codex => "Codex",
             AgentKind::OpenCode => "OpenCode",
+            AgentKind::Antigravity => "Antigravity",
+            AgentKind::Cursor => "Cursor",
+            AgentKind::Grok => "Grok Build",
+            AgentKind::Kiro => "Kiro",
+            AgentKind::Fx => "fx",
             AgentKind::Neoism => "Neoism",
         }
     }

@@ -10,6 +10,7 @@ pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     // The image preview is modal over everything.
     if app.image_preview_key(event) { return true; }
     if app.modal.is_some() { return crate::ui::modal::keys(app, event, tx); }
+    if app.workflows.is_some() { return shortcut(app, event, tx); }
     if app.prompt.is_some() { return app.context_prompt_key(event); }
     if app.context.is_some() { return app.context_key(event); }
     if app.form.is_some() { return app.form_key(event, tx); }
@@ -73,7 +74,11 @@ pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
 /// arrows reorder the active tab unless the workspace strip has focus.
 pub fn shortcut(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     if app.modal.is_some() { return crate::ui::modal::keys(app, event, tx); }
-    if app.capture_binding(event) { return true; }
+    if app.workflows.is_some() {
+        app.workflows_key(event, tx);
+        return true;
+    }
+    if app.capture_binding(event, tx) { return true; }
     // Super+V / Super+C, as the desktop binds them (fields keep their own Ctrl chords).
     let m = event.mods;
     if m.logo && !m.ctrl && !m.alt && !m.shift {
@@ -451,7 +456,7 @@ impl App {
             if let Some(filter) = active_id.and_then(|id| self.terminals.get_mut(&id)).and_then(|t| t.filter.as_mut()) { filter.1.focused = false; }
         }
         // An inline picker's query keeps the keyboard while it is open and nothing over it is.
-        let covered = self.project_add.is_some() || self.project_menu.is_some() || self.picker.is_some() || self.finder.is_some()
+        let covered = self.workflows.is_some() || self.project_add.is_some() || self.project_menu.is_some() || self.picker.is_some() || self.finder.is_some()
             || self.browser.is_some() || self.form.is_some() || self.modal.is_some() || self.menu.is_some() || self.settings.is_some();
         let mut refocused = false;
         if picker_owns_focus && !covered && self.focus == Focus::Content && let Some(picker) = self.composer.picker.as_mut().filter(|p| !p.query.focused) {
@@ -460,7 +465,7 @@ impl App {
         }
         let overlay = covered || picker_owns_focus || self.block_filter_focused();
         let prompt_changed = self.sync_prompt_focus(self.focus == Focus::Content && !overlay);
-        let want = self.focus == Focus::Content && !overlay && !self.question_prompt() && !matches!(self.active_tab().kind, TabKind::Editor { .. } | TabKind::Database { .. } | TabKind::GitDiff);
+        let want = self.focus == Focus::Content && !overlay && !self.question_prompt() && !matches!(self.active_tab().kind, TabKind::Editor { .. } | TabKind::Image { .. } | TabKind::Database { .. } | TabKind::GitDiff);
         let active = self.active;
         let mut changed = prompt_changed | refocused;
         for (index, tab) in self.tabs.iter_mut().enumerate() {

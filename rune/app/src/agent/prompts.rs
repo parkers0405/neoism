@@ -192,15 +192,24 @@ impl App {
     }
 }
 
-/// Same input-anchored card geometry/tokens as slash::view and the shared prompt picker.
+/// Root prompts sit above the composer; child prompts sit at the foot of their read-only pane.
 pub fn card(app: &App) -> El {
     let Some(i) = app.prompt_index() else { return el() };
     let p = &app.composer.prompts.pending[i];
-    let Some(&[x, y, width, _]) = app.rects.get(&format!("composer-card:{}", app.active_tab().id)) else { return el() };
     let s = app.ty.scale();
+    let tab = app.active_tab().id;
+    let area = app.rects.get(&format!("agent-area:{tab}"));
+    let child = app.active_session().is_some_and(|id| app.families.is_child(&id));
+    let anchor = if child {
+        area.map(|&[x, y, w, h]| {
+            let inset = (if w >= 700.0 { super::timeline::COLUMN_PAD_X - 16.0 } else { 12.0 }).min(w * 0.2);
+            [x + inset, y + h, w - inset * 2.0, 0.0]
+        })
+    } else { app.rects.get(&format!("composer-card:{tab}")).copied() };
+    let Some([x, y, width, _]) = anchor else { return el() };
     let palette = app.pal;
     let identity = (p.session.clone(), p.id.clone());
-    let source = if app.families.is_child(&p.session) {
+    let source = if !child && app.families.is_child(&p.session) {
         format!("Subagent {} · ", app.families.member(&p.session).map_or(p.session.as_str(), |m| m.title.as_str()))
     } else { String::new() };
     let (title, rows, selected) = if let Some((title, patterns)) = &p.permission {
@@ -211,7 +220,7 @@ pub fn card(app: &App) -> El {
         (format!("{source}({}/{}) {}", (q.current + 1).min(q.questions.len()), q.questions.len(), item.text),
             q.visible_rows().into_iter().map(|r| (r.label, r.description)).collect(), q.selected)
     };
-    let top = app.rects.get(&format!("agent-area:{}", app.active_tab().id)).map_or(0.0, |r| r[1]) + 8.0 * s;
+    let top = area.map_or(0.0, |r| r[1]) + 8.0 * s;
     let row_h = 46.0 * s;
     let fit = (((y - top - 90.0 * s) / row_h).floor().max(1.0) as usize).min(7);
     let first = selected.saturating_sub(fit - 1).min(rows.len().saturating_sub(fit));
@@ -270,6 +279,23 @@ mod tests {
     }
     fn key(a: &mut App, key: Key) { assert!(a.prompt_key(&KeyEvent { key, mods: Default::default() })); }
     fn last(a: &App) -> Value { serde_json::from_str(a.agent_sent.borrow().last().unwrap()).unwrap() }
+
+    #[test]
+    fn child_permission_renders_at_the_bottom_without_a_composer_and_replies_to_the_child() {
+        let mut a = app();
+        family(&mut a);
+        a.open_child("root", "child");
+        permission(&mut a, "child", "p");
+        let tab = a.active_tab().id;
+        a.rects.remove(&format!("composer-card:{tab}"));
+        a.rects.insert(format!("agent-area:{tab}"), [55.0, 75.0, 820.0, 550.0]);
+        let mut rt = rune::Runtime::new(a, |a: &App, _: &mut rune::Cx<App>| el().w_full().h_full().child(card(a)), (900.0, 650.0), rune::Env::new(true, 1.0));
+        for _ in 0..5 { rt.frame(1.0 / 120.0); }
+        let (_, y) = rt.find("agent-prompt:child:p").expect("child permission card without a composer");
+        assert!(y > 420.0 && y < 625.0, "card center {y} should be near the pane bottom");
+        key(&mut rt.state, Key::Enter);
+        assert_eq!(last(&rt.state), json!({"ApproveTool":{"session_id":"child","request_id":"p","decision":"Yes"}}));
+    }
 
     #[test]
     fn unopened_children_and_nested_children_route_to_main_even_when_family_arrives_late() {

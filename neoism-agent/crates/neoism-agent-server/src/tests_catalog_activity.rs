@@ -1028,6 +1028,53 @@ async fn catalog_activity_terminal_child_busy_ledger_is_not_resurrection_authori
 }
 
 #[tokio::test]
+async fn catalog_activity_clears_permission_when_waiting_handler_is_dropped() {
+    let path = std::env::temp_dir().join(format!(
+        "catalog-drop-permission-{}.sqlite3",
+        Id::ascending(IdKind::Event)
+    ));
+    let state = AppState::open_database(path.clone()).await.unwrap();
+    let root = store_test_session(&neoism_agent_core::new_session_id(), now_millis());
+    state.inner.store.insert_session(&root).await.unwrap();
+    let mut body = stream(&state).await.into_body().into_data_stream();
+    assert_eq!(next_activity(&mut body).await["activity"], "idle");
+
+    let handler = tokio::spawn({
+        let state = state.clone();
+        let session_id = root.id.clone();
+        async move {
+            let error = crate::permission_runtime::permission_required_many(
+                "read", vec!["file.txt".into()],
+            );
+            crate::permission_runtime::ask_permission_for_tool_cancellable(
+                &state,
+                &session_id,
+                &Id::ascending(IdKind::Message),
+                "call",
+                "read",
+                &json!({}),
+                &error.to_string(),
+                Some(Default::default()),
+            )
+            .await
+        }
+    });
+    assert_eq!(next_activity(&mut body).await["activity"], "permission");
+    // A harness can drop the handler without letting it poll its cancellation branch.
+    handler.abort();
+    assert!(handler.await.unwrap_err().is_cancelled());
+    assert_eq!(
+        next_activity(&mut body).await,
+        json!({"sessionID": root.id, "activity": "idle"})
+    );
+    assert!(state.inner.store.list_pending_permissions().await.unwrap().is_empty());
+
+    drop(body);
+    state.shutdown().await.unwrap();
+    cleanup_sqlite_files(&path);
+}
+
+#[tokio::test]
 async fn catalog_activity_real_permission_reply_sessionless_fallback_reprojects() {
     let path = std::env::temp_dir().join(format!(
         "catalog-real-reply-{}.sqlite3",

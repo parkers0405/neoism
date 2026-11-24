@@ -26,6 +26,7 @@ pub enum Action {
     /// Remove the server or system awaiting confirmation.
     ConfirmRemove,
     CopyServerInvite,
+    Workflow(crate::workflows::Operation),
 }
 
 pub struct Button {
@@ -100,6 +101,7 @@ impl App {
             Action::CancelConnect => self.cancel_connect(),
             Action::ConfirmRemove => self.confirm_remove(),
             Action::CopyServerInvite => {},
+            Action::Workflow(operation) => self.confirm_workflow_operation(operation),
         }
     }
 

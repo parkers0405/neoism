@@ -166,12 +166,14 @@ def main():
     # A dry run keeps the developer's own release profile, so it reuses their build.
     rune_env = {**(os.environ if reuse_services else ENV), 'GIT_HASH': commit, 'CARGO_TARGET_DIR': str(RUNE_TARGET)}
     rune_env.pop('RUSTUP_TOOLCHAIN', None)
+    # Some app tests temporarily change process-wide configuration and home directories.
+    app_tests = ('cargo', 'test', '--locked', '--release', '--', '--test-threads=1')
     if test_app_only:
-        run('cargo', 'test', '--locked', '--release', cwd=RUNE, env=rune_env)
+        run(*app_tests, cwd=RUNE, env=rune_env)
         return
     run('cargo', 'build', '--locked', '--release', cwd=RUNE, env=rune_env)
     if SYSTEM == 'linux' and not reuse_services:
-        run('cargo', 'test', '--locked', '--release', cwd=RUNE, env=rune_env)
+        run(*app_tests, cwd=RUNE, env=rune_env)
     stage(ghostty)
     run(DIST / f'neoism{SUFFIX}', '--version')
     run(sys.executable, ROOT / 'scripts/package-rune-release.py', *(['--reuse-services'] if reuse_services else []))

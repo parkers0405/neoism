@@ -8,6 +8,8 @@ pub mod view;
 mod fonts;
 
 pub use view::view;
+pub(crate) use view::{mobile_back, mobile_view};
+pub(crate) mod mobile_backgrounds;
 
 use crate::app::App;
 use crate::daemon::Family;
@@ -533,6 +535,10 @@ impl App {
         self.apply_config_document_reply(request_id, message);
         if let Some(config) = message.get("Config") {
             let mut value = config["value"].clone();
+            if self.mobile && self.settings.is_some() {
+                value["ui"]["window"]["background-image"] = self.mobile_backgrounds.config["ui"]["window"]["background-image"].clone();
+                value["ui"]["window"]["background-image-disabled"] = self.mobile_backgrounds.config["ui"]["window"]["background-image-disabled"].clone();
+            }
             // The cursor renders on this machine, not the server hosting the workspace.
             if self.server.remote() {
                 value["appearance"]["effects"]["liquid-glass-cursor"] = json!(self.cursor.liquid_glass);
@@ -615,6 +621,7 @@ impl App {
 
     /// The Backgrounds gallery: pick a picture, the pack's, or none.
     pub fn choose_background(&mut self, choice: crate::palette::backgrounds::Choice) {
+        if self.mobile { self.choose_mobile_background(choice); return; }
         let image = self.apply_background(&choice);
         if let Some(settings) = &mut self.settings {
             settings.set_local("ui.window.background-image", image);
@@ -626,6 +633,7 @@ impl App {
     /// Change one field of the configured picture. The window shows it at
     /// once; `commit` writes it (a slider commits when it is let go).
     pub fn set_background_field(&mut self, field: &str, value: Value, commit: bool) {
+        if self.mobile { self.set_mobile_background_field(field, value, commit); return; }
         let Some(settings) = &mut self.settings else { return };
         let mut image = settings.values["ui"]["window"]["background-image"].clone();
         if !image.is_object() || !image["path"].is_string() { return; }

@@ -34,7 +34,7 @@ impl<S: 'static> Runtime<S> {
                 [near(p.rect.w, viewport[0]), near(p.rect.h, viewport[1])]
             });
             let at = crate::ScrollPos { offset: [st.x.offset as f32, st.offset as f32 + st.slack.height()], max: [st.x.max as f32, st.max as f32],
-                viewport, drawn };
+                viewport, drawn, following_bottom: matches!(st.mode, ScrollMode::Pinned) };
             let by = Rc::as_ptr(f) as *const () as usize;
             let by_hand = std::mem::take(&mut st.by_hand);
             let prev = st.told.replace(at);
@@ -126,7 +126,7 @@ mod tests {
         rt.frame(1.0 / 60.0);
         rt.frame(1.0 / 60.0);
         assert_eq!(told.get(), first + 1);
-        assert_eq!(TOLD.with(|t| t.get()), ScrollPos { offset: [0.0, 10.0], max: [0.0, 800.0], viewport: [300.0, 200.0], drawn: [300.0, 200.0] });
+        assert_eq!(TOLD.with(|t| t.get()), ScrollPos { offset: [0.0, 10.0], max: [0.0, 800.0], viewport: [300.0, 200.0], drawn: [300.0, 200.0], following_bottom: false });
     }
 
     #[test]

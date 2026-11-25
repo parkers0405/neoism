@@ -17625,6 +17625,15 @@
             }
           },
           {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "description": "Exact sha256 source revision; required for direct action workflows.",
+              "type": "string"
+            }
+          },
+          {
             "in": "query",
             "name": "scope",
             "required": false,
@@ -17642,15 +17651,6 @@
             "name": "X-Neoism-Directory",
             "required": false,
             "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "If-Match",
-            "required": false,
-            "schema": {
-              "description": "Exact sha256 source revision; required for direct action workflows.",
               "type": "string"
             }
           }
@@ -17901,6 +17901,15 @@
             }
           },
           {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "description": "Exact sha256 source revision; required for direct action workflows.",
+              "type": "string"
+            }
+          },
+          {
             "in": "query",
             "name": "scope",
             "required": false,
@@ -17918,15 +17927,6 @@
             "name": "X-Neoism-Directory",
             "required": false,
             "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "If-Match",
-            "required": false,
-            "schema": {
-              "description": "Exact sha256 source revision; required for direct action workflows.",
               "type": "string"
             }
           }
@@ -19955,7 +19955,12 @@
               "enum": [
                 "opencode",
                 "claude",
-                "codex"
+                "codex",
+                "grok",
+                "kiro",
+                "antigravity",
+                "fx",
+                "cursor"
               ],
               "type": "string"
             }
@@ -23038,6 +23043,222 @@
         },
         "tags": [
           "catalog"
+        ]
+      }
+    },
+    "/v2/subagents/default": {
+      "get": {
+        "operationId": "v2.subagents.default.get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "directory",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Neoism-Directory",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "model": {
+                      "description": "For neoism, provider/model (split on the first slash). For external harnesses, the exact advertised model value. Omit or send null to clear the override.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "provider": {
+                      "description": "Subagent harness ID; use neoism for native tasks.",
+                      "type": "string"
+                    },
+                    "reasoning": {
+                      "description": "For neoism, the model variant. For external harnesses, the exact advertised reasoning value, not the selector ID. Omit or send null to clear the override.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "provider"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Workspace subagent default"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "501": {
+            "$ref": "#/components/responses/NotImplemented"
+          }
+        },
+        "tags": [
+          "subagents"
+        ]
+      },
+      "post": {
+        "operationId": "v2.subagents.default.set",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "directory",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Neoism-Directory",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "model": {
+                    "description": "For neoism, provider/model (split on the first slash). For external harnesses, the exact advertised model value. Omit or send null to clear the override.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "provider": {
+                    "description": "Subagent harness ID; use neoism for native tasks.",
+                    "type": "string"
+                  },
+                  "reasoning": {
+                    "description": "For neoism, the model variant. For external harnesses, the exact advertised reasoning value, not the selector ID. Omit or send null to clear the override.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "provider"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "model": {
+                      "description": "For neoism, provider/model (split on the first slash). For external harnesses, the exact advertised model value. Omit or send null to clear the override.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "provider": {
+                      "description": "Subagent harness ID; use neoism for native tasks.",
+                      "type": "string"
+                    },
+                    "reasoning": {
+                      "description": "For neoism, the model variant. For external harnesses, the exact advertised reasoning value, not the selector ID. Omit or send null to clear the override.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "provider"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Workspace subagent default"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "501": {
+            "$ref": "#/components/responses/NotImplemented"
+          }
+        },
+        "tags": [
+          "subagents"
         ]
       }
     },

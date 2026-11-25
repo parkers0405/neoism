@@ -44,6 +44,14 @@ function outputs(events, id) {
   return text;
 }
 
+test('failed terminal status rejects the turn with the provider error', async t => {
+  const { rpc, adapter } = await fixture(t);
+  const { result } = await start(adapter);
+  const rejected = assert.rejects(result, /Codex turn failed: Provider connection reset/);
+  rpc.event('turn/completed', { turn: { id: 'turn-1', status: 'failed', error: { message: 'Provider connection reset' } } });
+  await rejected;
+});
+
 test('initialize → initialized → account/models; describe never sends a turn', async t => {
   const { rpc, adapter } = await fixture(t);
   const description = await adapter.describe();

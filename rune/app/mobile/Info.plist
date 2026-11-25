@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key><string>Neoism</string>
+    <key>CFBundleExecutable</key><string>neoism-rune</string>
+    <key>CFBundleIdentifier</key><string>ai.neoism.mobile</string>
+    <key>CFBundleName</key><string>Neoism</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <!-- CFBundleIcons and CFBundleIcons~ipad are merged from actool before signing. -->
+    <key>NSCameraUsageDescription</key><string>Neoism uses the camera to scan the pairing QR code shown on your computer.</string>
+    <key>NSMicrophoneUsageDescription</key><string>Neoism uses the microphone to dictate text into your chat draft.</string>
+    <key>NSSpeechRecognitionUsageDescription</key><string>Neoism uses Apple speech recognition to turn your dictation into draft text.</string>
+    <key>CFBundleSupportedPlatforms</key><array><string>iPhoneSimulator</string></array>
+    <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
+    <key>UIRequiredDeviceCapabilities</key><array><string>arm64</string></array>
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationPortraitUpsideDown</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+    <key>UIApplicationSceneManifest</key>
+    <dict>
+        <key>UIApplicationSupportsMultipleScenes</key><false/>
+        <key>UISceneConfigurations</key>
+        <dict>
+            <key>UIWindowSceneSessionRoleApplication</key>
+            <array>
+                <dict>
+                    <key>UISceneClassName</key><string>UIWindowScene</string>
+                    <key>UISceneDelegateClassName</key><string>WinitSceneDelegate</string>
+                </dict>
+            </array>
+        </dict>
+    </dict>
+    <key>UILaunchScreen</key><dict/>
+</dict>
+</plist>

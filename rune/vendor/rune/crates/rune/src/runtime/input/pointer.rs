@@ -176,10 +176,10 @@ impl<S: 'static> Runtime<S> {
     }
 
     pub fn pointer_down(&mut self, x: f32, y: f32) {
-        self.pointer_down_source(x, y, false);
+        self.pointer_down_source(x, y, None);
     }
 
-    pub(super) fn pointer_down_source(&mut self, x: f32, y: f32, touch: bool) {
+    pub(super) fn pointer_down_source(&mut self, x: f32, y: f32, touch: Option<f64>) {
         if self.press.held().is_some_and(|h| h.button != crate::PointerButton::Primary) {
             self.pointer = Some((x, y));
             return;
@@ -239,7 +239,7 @@ impl<S: 'static> Runtime<S> {
                 && (x - first.point.0).abs() <= CLICK_SLOP && (y - first.point.1).abs() <= CLICK_SLOP
         });
         if let Some(ji) = self.textbox_input(ti) {
-            self.input_down(ji, x, y, now, second);
+            self.input_down(ji, x, y, now, second, touch.filter(|_| self.touch_edit_field(ji)));
             return;
         }
         // Clicking a link leaves focus where it is (a composer keeps typing). Selectable text
@@ -283,7 +283,7 @@ impl<S: 'static> Runtime<S> {
         };
         let path = n.path.clone();
         let drag_out = self.drags_out(n).then(|| n.handlers.drag_threshold.unwrap_or(crate::drag_out::DRAG_THRESHOLD));
-        let pending = touch && n.handlers.touch_policy != crate::el::TouchPolicy::Drag;
+        let pending = touch.is_some() && n.handlers.touch_policy != crate::el::TouchPolicy::Drag;
         if n.handlers.on_drag.is_some() && drag_out.is_none() && !pending {
             self.queue.push(Action::Drag(path.clone(), d, crate::PointerButton::Primary));
         }

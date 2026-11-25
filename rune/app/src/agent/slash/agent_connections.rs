@@ -2,6 +2,7 @@
 use super::picker::{Kind, Picker, Row};
 use super::view::{query_row, sans};
 use crate::ui::theme::{glyph, rgb, NERD};
+use crate::ui::ChildIf;
 use crate::App;
 use neoism_protocol::pty::{ClientMessage, HarnessAuth, HarnessStatus, ServerMessage};
 use rune::{el, text, Color, El, Tx};
@@ -16,7 +17,7 @@ pub(super) struct Readiness {
 }
 
 impl Readiness {
-    fn get(&self, id: &str) -> Option<&HarnessStatus> {
+    pub(super) fn get(&self, id: &str) -> Option<&HarnessStatus> {
         self.statuses.iter().find(|item| item.id == id)
     }
 }
@@ -45,6 +46,10 @@ fn harness(id: &str) -> Option<&'static Harness> {
     HARNESSES.iter().find(|item| item.id == id)
 }
 
+pub(super) fn rows() -> Vec<Row> {
+    HARNESSES.iter().map(|item| Row::new(item.name, item.account, "", item.id)).collect()
+}
+
 pub(crate) fn harness_name(id: &str) -> Option<&'static str> { harness(id).map(|item| item.name) }
 
 pub(crate) fn harness_mark(app: &App, id: &str, size: f32) -> Option<El> {
@@ -58,8 +63,7 @@ pub(crate) fn harness_mark(app: &App, id: &str, size: f32) -> Option<El> {
 
 impl App {
     pub(crate) fn open_agent_connections(&mut self, provider: Option<&str>) {
-        let rows = HARNESSES.iter().map(|item| Row::new(item.name, item.account, "", item.id)).collect();
-        let mut picker = Picker::new(Kind::AgentConnections, "Connect an agent", rows).placeholder("Search harnesses");
+        let mut picker = Picker::new(Kind::AgentConnections, "Connect an agent", rows()).placeholder("Search harnesses");
         if let Some(index) = HARNESSES.iter().position(|item| Some(item.id) == provider) {
             picker.selected = index;
         }
@@ -68,7 +72,8 @@ impl App {
         self.check_harness_status();
     }
 
-    fn check_harness_status(&mut self) {
+    pub(super) fn check_harness_status(&mut self) {
+        if self.composer.harness_status.pending.is_some() { return; }
         if self.connection != crate::app::Connection::Connected || !self.workspace_ready { return; }
         if let Some(daemon) = &self.daemon {
             let message = serde_json::to_value(ClientMessage::GetHarnessStatus {}).expect("harness request serializes");
@@ -87,16 +92,18 @@ impl App {
             readiness.statuses = statuses;
             readiness.host_os = host_os;
         }
+        self.refresh_subagent_harness_rows();
         true
     }
 
     pub(crate) fn poll_harness_status(&mut self) -> bool {
-        if !self.composer.picker.as_ref().is_some_and(|picker| picker.kind == Kind::AgentConnections) { return false; }
+        if !self.composer.picker.as_ref().is_some_and(|picker| matches!(picker.kind, Kind::AgentConnections | Kind::SubagentModels)) { return false; }
         let now = Instant::now();
         let readiness = &mut self.composer.harness_status;
         if self.connection != crate::app::Connection::Connected || !self.workspace_ready || self.daemon.is_none() {
             let changed = readiness.pending.is_some() || !readiness.statuses.is_empty();
             *readiness = Readiness::default();
+            if changed { self.refresh_subagent_harness_rows(); }
             return changed;
         }
         let expired = readiness.pending.is_some_and(|(_, deadline)| now >= deadline);
@@ -203,11 +210,14 @@ pub(super) fn view(app: &App, picker: &Picker, composer: [f32; 4]) -> El {
         let height = (320.0 * s).min(space);
         (cx, cy - gap - height, cw, height)
     };
-    let side = (214.0 * s).min(width * 0.41);
-    let header = 48.0 * s;
+    let subagents = picker.kind == Kind::SubagentModels;
+    let side = if subagents { super::subagent_models::RAIL_WIDTH * s } else { (214.0 * s).min(width * 0.41) };
+    let header = (if subagents { 36.0 } else { 48.0 }) * s;
     let body = (height - header).max(1.0);
-    let detail_w = (width - side).max(1.0);
-    picker.limit.set(((body - 52.0 * s) / (36.0 * s)).floor().max(1.0) as usize);
+    let reasoning_w = if subagents { (125.0 * s).min(width * 0.28) } else { 0.0 };
+    let detail_w = (width - side - reasoning_w).max(1.0);
+    let rail_overhead = if subagents { 23.0 + super::subagent_models::RAIL_ACTION_HEIGHT } else { 52.0 };
+    picker.limit.set(((body - rail_overhead * s) / (36.0 * s)).floor().max(1.0) as usize);
     let rows = picker.rows();
     let visible = picker.limit.get();
     let first = picker.top.min(picker.selected).max((picker.selected + 1).saturating_sub(visible))
@@ -215,33 +225,37 @@ pub(super) fn view(app: &App, picker: &Picker, composer: [f32; 4]) -> El {
 
     let title = rune::row().h(header).px(14.0 * s).gap(8.0 * s).center_y()
         .border_sides([0.0, 0.0, 1.0, 0.0], rgb(p.fg).alpha(0.1))
-        .child(text("Connect an agent").font(sans(15.0 * s, 600.0)).color(rgb(p.fg)).grow(1.0))
+        .child(text(if subagents { "Subagents" } else { "Connect an agent" })
+            .font(sans(15.0 * s, 600.0)).color(rgb(p.fg)).grow(1.0))
         .child(el().key("connect-agent-expand").w(24.0 * s).h(24.0 * s).center().radius(6.0 * s).hover(rgb(p.fg).alpha(0.1))
             .child(text(if modal { "\u{f0615}" } else { "\u{f0616}" }).font(rune::tok::TextStyle::new(14.0 * s, 400.0).family(NERD)).color(rgb(p.dim)))
-            .on_press(|a: &mut App| a.composer.card_modal = !a.composer.card_modal))
+            .on_press_tx(App::toggle_picker_modal))
         .child(el().key("connect-agent-close").w(24.0 * s).h(24.0 * s).center().radius(6.0 * s).hover(rgb(p.red).alpha(0.15))
             .child(text("\u{f0156}").font(rune::tok::TextStyle::new(14.0 * s, 400.0).family(NERD)).color(rgb(p.red)))
-            .on_press(|a: &mut App| a.close_prompt_picker()));
+            .on_press(|a: &mut App| { if !a.return_to_subagent_models() { a.close_prompt_picker(); } }));
 
     let mut list = rune::col().w_full().gap(2.0 * s).px(7.0 * s);
     for (index, row) in rows.iter().enumerate().skip(first).take(picker.limit.get()) {
-        let Some(item) = harness(&row.value) else { continue };
+        let id = row.value.clone();
         let selected = picker.selected == index;
-        list = list.child(rune::row().key(format!("connect-agent:{}", item.id)).h(34.0 * s).w_full().px(8.0 * s).gap(8.0 * s).center_y().radius(8.0 * s)
+        list = list.child(rune::row().key(format!("connect-agent:{id}")).h(34.0 * s).w_full().px(8.0 * s).gap(8.0 * s).center_y().radius(8.0 * s)
             .fill(rgb(p.fg).alpha(if selected { 0.09 } else { 0.0 })).hover(rgb(p.fg).alpha(0.1))
-            .child(el().w(21.0 * s).h(21.0 * s).center().child(harness_mark(app, item.id, 17.0 * s).unwrap_or_else(el)))
-            .child(text(item.name).font(sans(13.0 * s, if selected { 600.0 } else { 500.0 })).color(rgb(p.fg)).grow(1.0).truncate())
-            .child(el().w(3.0 * s).h(16.0 * s).radius(1.5 * s).fill(rgb(p.blue).alpha(if selected { 1.0 } else { 0.0 })))
+            .child_if(subagents && super::subagent_models::is_current_harness(app, &id), || el().w(2.0 * s).h(15.0 * s).radius(1.0 * s).fill(rgb(p.green)).absolute(2.0 * s, 9.0 * s))
+            .child(el().w(21.0 * s).h(21.0 * s).center().child(if id == "neoism" { crate::ui::neoism_mark(app, 17.0 * s, "subagent-neoism-mark") } else { harness_mark(app, &id, 17.0 * s).unwrap_or_else(el) }))
+            .child_if(!subagents, || text(row.title.clone()).font(sans(13.0 * s, if selected { 600.0 } else { 500.0 })).color(rgb(p.fg)).grow(1.0).truncate())
+            .child_if(!subagents, || el().w(3.0 * s).h(16.0 * s).radius(1.5 * s).fill(rgb(p.blue).alpha(if selected { 1.0 } else { 0.0 })))
             .on_press(move |a: &mut App| {
-                if let Some(picker) = a.composer.picker.as_mut().filter(|picker| picker.kind == Kind::AgentConnections) {
+                if let Some(picker) = a.composer.picker.as_mut().filter(|picker| matches!(picker.kind, Kind::AgentConnections | Kind::SubagentModels)) {
                     picker.selected = index;
                 }
+                if subagents { a.load_subagent_models(&id); }
             }));
     }
     if rows.is_empty() {
         list = list.child(text("No matching harnesses").font(sans(12.0 * s, 400.0)).color(rgb(p.muted)).px(7.0 * s).wrap());
     }
     let rail = rune::col().w(side).h(body).gap(7.0 * s)
+        .py(if subagents { 8.0 * s } else { 0.0 })
         .border_sides([0.0, 1.0, 0.0, 0.0], rgb(p.fg).alpha(0.1))
         .on_wheel(move |a: &mut App, event: rune::WheelEvent, _: &mut Tx| {
             if let Some(picker) = a.composer.picker.as_mut() {
@@ -253,17 +267,20 @@ pub(super) fn view(app: &App, picker: &Picker, composer: [f32; 4]) -> El {
                 } else { if event.dy < 0.0 { 1 } else { -1 } };
                 if rows != 0 { picker.scroll(rows); }
             }
+            if subagents { a.sync_subagent_models(); }
             true
         })
-        .child(el().w(side).h(42.0 * s)
+        .child_if(!subagents, || el().w(side).h(42.0 * s)
             .child(text(glyph::SEARCH_LINE).font(rune::tok::TextStyle::new(14.0 * s, 400.0).family(NERD)).color(rgb(p.muted)).absolute(13.0 * s, 13.0 * s))
             .child(query_row(app, picker, (side - 42.0 * s).max(1.0)).absolute(33.0 * s, 11.0 * s))
             .child(el().w((side - 24.0 * s).max(1.0)).h(1.5 * s).fill(rgb(p.blue).alpha(0.65)).absolute(12.0 * s, 40.0 * s)))
-        .child(list);
+        .child(if subagents { el().w_full().grow(1.0).min_h(0.0).clip_rounded(0.0).child(list) } else { list })
+        .child_if(subagents, || super::subagent_models::rail_actions(app, true));
 
-    let mut details = rune::col().key("connect-agent-details").w(detail_w).h(body).px(17.0 * s).py(12.0 * s).gap(4.0 * s)
-        .scroll(rune::ScrollSpec { stick_bottom: false });
-    if let Some(item) = picker.selected_row().and_then(|row| harness(&row.value)) {
+    let mut details = rune::col().key("connect-agent-details").w(detail_w).h(body).px(17.0 * s).py(12.0 * s).gap(4.0 * s);
+    if subagents {
+        if let Some(row) = picker.selected_row() { details = super::subagent_models::details(app, &row.value, details); }
+    } else if let Some(item) = picker.selected_row().and_then(|row| harness(&row.value)) {
         let readiness = &app.composer.harness_status;
         let status = readiness.get(item.id);
         let installed = status.is_some_and(|status| status.installed);
@@ -288,7 +305,7 @@ pub(super) fn view(app: &App, picker: &Picker, composer: [f32; 4]) -> El {
             .child(text(if signed_in { "Signed in" } else if !installed { "Install first" } else { match item.id { "codex" => "ChatGPT", "antigravity" => "Google", _ => "Sign in" } })
                 .font(sans(12.0 * s, 600.0)).color(rgb(if blocked { p.muted } else { p.blue })).truncate());
         if !blocked { sign_in = sign_in.hover(rgb(p.blue).alpha(0.22)).on_press(move |a: &mut App| start_sign_in(a, item.id)); }
-        details = details
+        details = details.scroll(rune::ScrollSpec { stick_bottom: false })
             .child(rune::row().gap(9.0 * s).center_y()
                 .child(el().w(32.0 * s).h(32.0 * s).radius(8.0 * s).fill(rgb(p.fg).alpha(0.07)).center().child(harness_mark(app, item.id, 20.0 * s).unwrap_or_else(el)))
                 .child(text(item.name).font(sans(18.0 * s, 600.0)).color(rgb(p.fg)).truncate()))
@@ -300,7 +317,8 @@ pub(super) fn view(app: &App, picker: &Picker, composer: [f32; 4]) -> El {
         .border(1.0, rgb(p.fg).alpha(0.12)).shadow(8.0 * s, 28.0 * s, Color::BLACK.alpha(0.45)).clip_rounded(12.0 * s)
         .transition(rune::Transition::scale(0.94).combined(rune::Transition::offset(0.0, 14.0 * s)))
         .on_press(|_: &mut App| {})
-        .child(title).child(rune::row().w_full().h(body).child(rail).child(details));
+        .child(title).child(rune::row().w_full().h(body).child(rail).child(details)
+            .child_if(subagents, || super::subagent_models::reasoning(app, picker.selected_row().map_or("neoism", |row| row.value.as_str()), reasoning_w, body)));
     el().key("prompt-picker-layer").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
         .child(el().key("prompt-picker-scrim").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).fill(if modal { Color::BLACK.alpha(0.4) } else { Color::TRANSPARENT })
             .on_press(|a: &mut App| a.dismiss_prompt_picker()))

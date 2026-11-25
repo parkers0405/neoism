@@ -544,8 +544,9 @@ impl App {
             return;
         }
         let Opening { id, title, cwd, target, link } = opening;
+        if self.mobile && target.is_none() { return; }
         let server = link.current.as_ref().map(|s| s.id.clone());
-        let mut fresh = App::new();
+        let mut fresh = if self.mobile { App::new_surface(cwd.clone(), true) } else { App::new() };
         fresh.workspace_id = id;
         fresh.cwd = cwd;
         fresh.workspace_name = title;
@@ -555,7 +556,11 @@ impl App {
         fresh.tabs.clear();
         fresh.layout = Default::default();
         fresh.terminals.clear();
-        fresh.open_tab(TabKind::Home);
+        fresh.open_tab(if self.mobile { TabKind::Agent { session: None } } else { TabKind::Home });
+        if self.mobile {
+            fresh.conv_all = true;
+            fresh.tabs[0].draft.focused = false;
+        }
         self.next_tab = fresh.next_tab;
         if let Some(wake) = self
             .waker
@@ -638,9 +643,11 @@ impl App {
             }
             self.agent_connected();
             if std::mem::take(&mut self.agent_resync_due) { self.agent_resync(true); }
-            self.terminals_connected();
-            self.watch_git();
-            self.lsp_reconnect();
+            if !self.mobile {
+                self.terminals_connected();
+                self.watch_git();
+                self.lsp_reconnect();
+            }
         }
         if self.workspace_closing == Some(request_id) {
             self.workspace_closing = None;
@@ -815,6 +822,20 @@ impl App {
             eprintln!("[inbox] events={applied} remaining={remaining} elapsed_us={}", started.elapsed().as_micros());
         }
         (changed, remaining > 0)
+    }
+
+    /// Give a completion access to its parked workspace without changing the visible selection
+    /// or running the workspace-switch hooks. The callback must not change the workspace list.
+    pub(crate) fn with_workspace(&mut self, id: &str, apply: impl FnOnce(&mut Self)) {
+        if self.workspace_id == id {
+            apply(self);
+        } else if let Some(index) = self.workspace_index(id) {
+            let Some(mut state) = self.workspaces[index].state.take() else { return };
+            state.swap(self);
+            apply(self);
+            state.swap(self);
+            self.workspaces[index].state = Some(state);
+        }
     }
 
     fn workspace_index(&self, id: &str) -> Option<usize> {

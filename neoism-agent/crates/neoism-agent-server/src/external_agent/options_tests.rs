@@ -647,6 +647,26 @@ done
 }
 
 #[tokio::test]
+async fn subagent_picker_confirms_model_dependent_acp_reasoning() {
+    let root = tempfile::tempdir().unwrap();
+    let (script, _) = fake(root.path());
+    let mut services = crate::standard_services();
+    services.executables = Arc::new(
+        crate::executable::test_support::FakeExecutableService::with("cursor-agent", script),
+    );
+    let state = AppState::open_database_with_services(&root.path().join("agent.db"), services)
+        .await.unwrap();
+    let directory = root.path().to_str().unwrap();
+    let selectors = validate_subagent_selection(
+        &state, ExternalRuntime::Cursor, directory, Some("fast"), Some("shallow"),
+    ).await.unwrap();
+    assert_eq!(selectors, (Some("model".into()), Some("thought".into())));
+    assert!(validate_subagent_selection(
+        &state, ExternalRuntime::Cursor, directory, Some("base"), Some("shallow"),
+    ).await.is_err());
+}
+
+#[tokio::test]
 async fn options_http_confirms_complete_state_and_reapplies_after_reload() {
     for provider in ["opencode", "codex", "claude"] {
         let root = std::env::temp_dir().join(format!(

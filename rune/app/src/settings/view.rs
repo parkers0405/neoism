@@ -54,6 +54,46 @@ pub fn view(app: &App) -> El {
     scrim
 }
 
+pub(crate) fn mobile_back(app: &mut App) {
+    if let Some(settings) = app.settings.as_mut().filter(|s| matches!(s.category, Category::Themes | Category::Backgrounds)) {
+        settings.category = Category::General;
+        settings.theme_hover = None;
+        settings.background_hover = None;
+    } else { app.settings = None; }
+}
+
+const MOBILE_SETTINGS_MAX_W: f32 = 740.0;
+
+pub(crate) fn mobile_view(app: &App, horizontal_inset: f32) -> El {
+    let Some(settings) = &app.settings else { return el() };
+    let p = app.pal;
+    let s = app.ty.scale().clamp(0.75, 2.0);
+    let subpage = matches!(settings.category, Category::Themes | Category::Backgrounds);
+    let body = if subpage { content_with_inset(app, settings, s, horizontal_inset).w_full().h(0.0).grow(1.0) } else {
+        let item = |key, category: Category| row().key(key).label(category.label()).w_full().h(58.0).px(14.0).center_y().gap(12.0)
+            .radius(10.0).fill(rgb(p.surface)).border(1.0, rgb(p.border)).hover(rgb(p.hover))
+            .child(icon(category.icon(), 17.0, p.fg))
+            .child(text(category.label()).font(app.ty.sans(15.0, 550.0)).color(rgb(p.fg)).grow(1.0))
+            .child(crate::ui::feather::view(app, crate::ui::feather::Icon::Right, 15.0, p.dim))
+            .on_press(move |a: &mut App| if let Some(s) = a.settings.as_mut() { s.category = category; });
+        col().w_full().padding(20.0).gap(10.0)
+            .child(text("Appearance").font(app.ty.sans(12.0, 550.0)).color(rgb(p.dim)))
+            .child(item("mobile-settings-themes", Category::Themes))
+            .child(item("mobile-settings-backgrounds", Category::Backgrounds))
+    };
+    col().key("mobile-settings-page").w_full().min_h(0.0)
+        .child(row().key("settings-header").w_full().h(54.0).px(10.0).gap(6.0).center_y()
+            .child(row().key("mobile-settings-back").label(if subpage { "Back to Settings" } else { "Back to Chats" }).h(44.0).px(8.0).gap(5.0).center_y().radius(8.0).hover(rgb(p.hover))
+                .child(crate::ui::feather::view(app, crate::ui::feather::Icon::Left, 17.0, p.fg))
+                .child(text(if subpage { "Settings" } else { "Chats" }).font(app.ty.sans(14.0, 500.0)).color(rgb(p.fg)))
+                .on_press(mobile_back))
+            .child(text("/").font(app.ty.sans(14.0, 400.0)).color(rgb(p.muted)))
+            .child(text(if subpage { settings.category.label() } else { "Settings" }).font(app.ty.sans(14.0, 650.0)).color(rgb(p.fg))))
+        .child(el().w_full().h(1.0).fill(rgb(p.border)))
+        .child(col().w_full().min_h(0.0).grow(1.0).items_center()
+            .child(body.max_w(MOBILE_SETTINGS_MAX_W)))
+}
+
 trait ChildIf {
     fn child_if(self, condition: bool, f: impl FnOnce() -> El) -> Self;
 }
@@ -176,21 +216,30 @@ fn summary(category: Category) -> &'static str {
 }
 
 fn content(app: &App, settings: &Settings, s: f32) -> El {
+    content_with_inset(app, settings, s, 0.0)
+}
+
+fn content_with_inset(app: &App, settings: &Settings, s: f32, horizontal_inset: f32) -> El {
     let p = app.pal;
-    let mut page = col().w_full().px(28.0 * s).pt(24.0 * s).pb(28.0 * s);
+    let mut page = col().w_full().px(if app.mobile { 18.0 } else { 28.0 * s }).pt(24.0 * s).pb(28.0 * s);
     let visible = settings.visible();
     if settings.searching() {
         page = page.child(page_title(app, "Search", &format!("{} matching settings", visible.len()), s));
     } else {
-        page = page.child(page_title(app, settings.category.label(), summary(settings.category), s));
+        let note = match (app.mobile, settings.category) {
+            (true, Category::Themes) => "Choose a theme for Neoism on this device.",
+            (true, Category::Backgrounds) => "Choose a picture for your chats on this device.",
+            _ => summary(settings.category),
+        };
+        page = page.child(page_title(app, settings.category.label(), note, s));
     }
     if settings.loading {
         page = page.child(text("Loading settings\u{2026}").font(app.ty.chat_sized(12.5)).color(rgb(p.dim)));
     }
     if settings.category == Category::Themes && !settings.searching() {
-        page = page.child(themes(app, settings, s));
+        page = page.child(themes(app, settings, s, horizontal_inset));
     } else if settings.category == Category::Backgrounds && !settings.searching() {
-        page = page.child(backgrounds(app, settings, s));
+        page = page.child(backgrounds(app, settings, s, horizontal_inset));
     } else if settings.searching() {
         if !visible.is_empty() {
             let rows = visible.iter().enumerate().map(|(position, &index)| setting_row(app, settings, index, position == settings.focused, s)).collect();
@@ -238,11 +287,15 @@ fn content(app: &App, settings: &Settings, s: f32) -> El {
 
 /// The theme gallery: the hovered (else current) theme's syntax sample large on top, then
 /// every theme as a card of its own colours. A click applies and saves it.
-fn themes(app: &App, settings: &Settings, s: f32) -> El {
+fn themes(app: &App, settings: &Settings, s: f32, horizontal_inset: f32) -> El {
     let p = app.pal;
     let shown = settings.theme_hover.map(crate::ui::theme::palette).unwrap_or(p);
     let gap = 12.0 * s;
-    let (columns, card_w) = gallery(app, s, gap);
+    let (columns, card_w) = if app.mobile {
+        let width = ((app.window[0] - horizontal_inset).min(MOBILE_SETTINGS_MAX_W) - 36.0).max(1.0);
+        let columns = ((width + gap) / (132.0 * s)).floor().clamp(1.0, 5.0);
+        (columns as usize, ((width - gap * (columns - 1.0)) / columns).floor())
+    } else { gallery(app, s, gap) };
     let tile = |t: &'static crate::ui::theme::Palette| {
         let current = t.name == p.name;
         // Three lines of "code" in the theme's syntax colours.
@@ -274,8 +327,20 @@ fn themes(app: &App, settings: &Settings, s: f32) -> El {
         grid = grid.child(cards);
     }
     col().w_full().gap(18.0 * s)
-        .child(mock_window(app, shown, None, s))
+        .child(if app.mobile && app.window[0] < 640.0 { mock_phone(app, shown, s) } else { mock_window(app, shown, None, s) })
         .child(grid)
+}
+
+fn mock_phone(app: &App, t: &crate::ui::theme::Palette, s: f32) -> El {
+    let ink = rgb(t.fg);
+    col().w_full().padding(12.0 * s).gap(10.0 * s).radius(12.0 * s).fill(rgb(t.bg)).border(1.0, ink.alpha(0.14))
+        .child(row().w_full().justify_end().child(el().padding(8.0 * s).radius(10.0 * s).fill(rgb(t.surface))
+            .child(text("What should we work on?").font(app.ty.sans(12.0, 500.0)).color(ink).wrap())))
+        .child(text("Let's start with a plan.").font(app.ty.sans(12.0, 500.0)).color(rgb(t.blue)))
+        .child(row().w_full().h(32.0 * s).px(8.0 * s).gap(8.0 * s).center_y().radius(16.0 * s).border(1.0, rgb(t.border))
+            .child(text("+").font(app.ty.sans(15.0, 500.0)).color(ink))
+            .child(text("Ask anything").font(app.ty.sans(11.5, 400.0)).color(rgb(t.muted)).grow(1.0))
+            .child(el().w(20.0 * s).h(20.0 * s).radius(10.0 * s).fill(ink)))
 }
 
 /// The page's scroll view key (one per category, so each opens at its top).
@@ -347,37 +412,46 @@ fn gallery(app: &App, s: f32, gap: f32) -> (usize, f32) {
 
 /// The Backgrounds page: the window as it will look, the picture's adjustments, then
 /// every installed picture.
-fn backgrounds(app: &App, settings: &Settings, s: f32) -> El {
+fn backgrounds(app: &App, settings: &Settings, s: f32, horizontal_inset: f32) -> El {
     use crate::palette::backgrounds::{Choice, Effects, MAX_DITHER, MAX_PIXEL_SIZE};
     let p = app.pal;
     let current = settings.background();
     let image = &settings.values["ui"]["window"]["background-image"];
-    let opacity = image["opacity"].as_f64().map_or(if app.wallpaper.active() { app.wallpaper.opacity } else { 1.0 }, |o| o as f32).clamp(0.0, 1.0);
+    let opacity = image["opacity"].as_f64().map_or(if app.wallpaper.active() { app.wallpaper.opacity } else if app.mobile { 0.35 } else { 1.0 }, |o| o as f32).clamp(0.0, 1.0);
     let cover = image["fit"].as_str() != Some("contain");
     let effects = Effects::from_image(image);
     let blur = f32::from(effects.blur);
     let pixel_size = f32::from(effects.pixel_size);
     let dither = f32::from(effects.dither);
-    let has_image = matches!(current, Choice::Image(_));
+    let has_image = if app.mobile { image["path"].is_string() } else { matches!(current, Choice::Image(_)) };
     // The preview shows the hovered picture, else the chosen one.
     let shown = settings.background_hover.and_then(|i| settings.backgrounds.get(i)).map(|b| b.choice.clone()).unwrap_or_else(|| current.clone());
     let picture = match &shown { Choice::Image(path) => app.background_image(path, effects).or_else(|| app.background_preview(path)), _ => None };
-    let preview = mock_window(app, p, picture.as_ref().map(|image| (image, opacity, cover)), s);
+    let wallpaper = picture.as_ref().map(|image| (image, opacity, cover));
+    let preview = if app.mobile { mobile_background_preview(app, wallpaper, s) } else { mock_window(app, p, wallpaper, s) };
 
     let words = |title: &'static str, note: &'static str| col().grow(1.0).shrink().min_w(0.0).gap(3.0 * s)
         .child(text(title).font(app.ty.sans(13.5, 500.0).lh(19.0 * s)).color(rgb(p.fg)))
         .child(text(note).font(app.ty.chat_sized(12.0).lh(17.0 * s)).color(rgb(p.muted)).wrap());
-    let line = |title: &'static str, note: &'static str, control: El| row().w_full().px(16.0 * s).py(13.0 * s).gap(24.0 * s).center_y()
-        .opacity(if has_image { 1.0 } else { 0.45 }).child(words(title, note)).child(control);
+    let line = |title: &'static str, note: &'static str, control: El| {
+        if app.mobile {
+            return row().w_full().min_h(44.0).px(12.0).gap(8.0).center_y().help(note)
+                .child(text(title).font(app.ty.sans(13.5, 550.0)).color(rgb(p.fg)).grow(1.0).shrink().wrap())
+                .child(control);
+        }
+        row().gap(24.0 * s).center_y().w_full().px(16.0 * s).py(13.0 * s).opacity(if has_image { 1.0 } else { 0.45 })
+            .child(words(title, note)).child(control)
+    };
     // A track to drag: the window follows it, and the setting is written when it is let go.
-    let track_w = 200.0 * s;
+    let width = ((app.window[0] - horizontal_inset).min(MOBILE_SETTINGS_MAX_W) - 36.0).max(1.0);
+    let track_w = if app.mobile { (width * 0.42).clamp(48.0, 200.0 * s) } else { 200.0 * s };
     let knob = 16.0 * s;
     let slider = |key: &'static str, at: f32, reading: String, field: &'static str, value_at: fn(f32) -> f64| row().center_y().gap(12.0 * s)
         .child(text(reading).font(app.ty.sized(12.0)).color(rgb(p.dim)).w(44.0 * s))
-        .child(el().key(key).w(track_w).h(24.0 * s).cursor(rune::Cursor::Pointer)
-            .child(el().w(track_w).h(4.0 * s).radius(2.0 * s).fill(rgb(p.fg).alpha(0.12)).absolute(0.0, 10.0 * s))
-            .child(el().w(track_w * at).h(4.0 * s).radius(2.0 * s).fill(rgb(p.blue)).absolute(0.0, 10.0 * s))
-            .child(el().w(knob).h(knob).radius(knob / 2.0).fill(rgb(p.fg)).absolute((track_w - knob) * at, 4.0 * s))
+        .child(el().key(key).w(track_w).h(if app.mobile { 44.0 } else { 24.0 * s }).cursor(rune::Cursor::Pointer)
+            .child(el().w(track_w).h(4.0 * s).radius(2.0 * s).fill(rgb(p.fg).alpha(0.12)).absolute(0.0, if app.mobile { 22.0 - 2.0 * s } else { 10.0 * s }))
+            .child(el().w(track_w * at).h(4.0 * s).radius(2.0 * s).fill(rgb(p.blue)).absolute(0.0, if app.mobile { 22.0 - 2.0 * s } else { 10.0 * s }))
+            .child(el().w(knob).h(knob).radius(knob / 2.0).fill(rgb(p.fg)).absolute((track_w - knob) * at, if app.mobile { 22.0 - knob / 2.0 } else { 4.0 * s }))
             .on_drag(move |a: &mut App, d: &mut rune::Drag, tx: &mut Tx| {
                 a.set_background_field(field, serde_json::json!(value_at((d.x / d.w.max(1.0)).clamp(0.0, 1.0))), d.phase == rune::Phase::Up);
                 tx.instant();
@@ -406,7 +480,10 @@ fn backgrounds(app: &App, settings: &Settings, s: f32) -> El {
     ], s);
 
     let gap = 12.0 * s;
-    let (columns, card_w) = gallery(app, s, gap);
+    let (columns, card_w) = if app.mobile {
+        let columns = ((width + gap) / (146.0 * s)).floor().clamp(1.0, 4.0);
+        (columns as usize, ((width - gap * (columns - 1.0)) / columns).floor())
+    } else { gallery(app, s, gap) };
     let tile = |index: usize, b: &crate::palette::backgrounds::Background| {
         let chosen = b.choice == current;
         let choice = b.choice.clone();
@@ -440,13 +517,52 @@ fn backgrounds(app: &App, settings: &Settings, s: f32) -> El {
         for (index, b) in chunk { cards = cards.child(tile(*index, b)); }
         grid = grid.child(cards);
     }
-    col().w_full()
-        .child(preview)
+    col().w_full().child(preview)
+        .child_if(app.mobile, || mobile_picture_controls(app, matches!(current, Choice::Image(_)), has_image, s))
         .child(section_heading(app, "Picture", false, s))
         .child(options)
         .child(section_heading(app, "Gallery", false, s))
         .child(grid)
-        .child(text("Add pictures to the bg folder in Neoism's config directory to see them here.").font(app.ty.chat_sized(12.0)).color(rgb(p.muted)).mt(14.0 * s))
+        .child_if(!app.mobile, || text("Add pictures to the bg folder in Neoism's config directory to see them here.").font(app.ty.chat_sized(12.0)).color(rgb(p.muted)).mt(14.0 * s))
+}
+
+fn mobile_picture_controls(app: &App, enabled: bool, has_image: bool, s: f32) -> El {
+    let p = app.pal;
+    let busy = app.mobile_backgrounds.busy;
+    let action = |key: &'static str, label: &'static str| row().key(key).label(label).h(44.0).px(12.0).radius(10.0).center()
+        .fill(rgb(p.surface)).border(1.0, rgb(p.border)).hover(rgb(p.hover))
+        .child(text(label).font(app.ty.sans(13.0, 550.0)).color(rgb(p.fg)).truncate());
+    let actions = row().w_full().gap(8.0).opacity(if busy { 0.5 } else { 1.0 });
+    let choose_label = if cfg!(target_os = "ios") { "Choose from Photos" } else { "Choose picture…" };
+    let actions = actions.child(action("background-choose", choose_label).grow(1.0).shrink()
+        .on_press_tx(move |a: &mut App, tx| if !busy { super::mobile_backgrounds::choose_picture(a, tx); }));
+    let actions = actions.child(action("background-paste", "Paste picture").grow(1.0).shrink()
+        .on_press_tx(move |a: &mut App, tx| if !busy { super::mobile_backgrounds::paste_picture(a, tx); }));
+    col().w_full().mt(12.0).gap(10.0)
+        .child(actions)
+        .child_if(busy, || text("Importing picture…").font(app.ty.chat_sized(12.0)).color(rgb(p.dim)))
+        .child_if(app.mobile_backgrounds.error.is_some(), || text(app.mobile_backgrounds.error.as_deref().unwrap().to_owned())
+            .font(app.ty.chat_sized(12.0)).color(rgb(p.red)).wrap())
+        .child_if(has_image, || row().key("background-enabled").label(if enabled { "Turn chat background off" } else { "Turn chat background on" })
+            .w_full().h(54.0).px(14.0).gap(8.0).center_y().radius(10.0).fill(rgb(p.surface)).border(1.0, rgb(p.border)).hover(rgb(p.hover))
+            .child(text("Show in chats").font(app.ty.sans(14.0, 550.0)).color(rgb(p.fg)).grow(1.0))
+            .child(switch(app, enabled, s)).on_press(App::toggle_mobile_background))
+}
+
+fn mobile_background_preview(app: &App, wallpaper: Option<(&rune::Image, f32, bool)>, s: f32) -> El {
+    let p = app.pal;
+    let pane = col().key("background-chat-preview").w_full().h(136.0 * s).padding(10.0 * s).gap(6.0 * s)
+        .radius(12.0).clip_rounded(12.0).fill(rgb(p.bg)).border(1.0, rgb(p.border));
+    let pane = if let Some((image, opacity, cover)) = wallpaper {
+        pane.child(el().key("background-preview-picture").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+            .pixels_fit(image.pixels(), if cover { rune::SurfaceFit::Fill } else { rune::SurfaceFit::Fit }).opacity(opacity))
+    } else { pane };
+    pane.child(row().w_full().justify_end().child(el().px(12.0 * s).py(8.0 * s).radius(13.0 * s).fill(rgb(p.blue))
+        .child(text("How does this look?").font(app.ty.chat_sized(13.0)).color(Color::WHITE))))
+        .child(text("Your picture shows behind the conversation.").font(app.ty.chat_sized(13.0)).color(rgb(p.fg)).wrap())
+        .child(el().grow(1.0))
+        .child(row().w_full().h(38.0 * s).px(14.0 * s).center_y().radius(19.0 * s).fill(rgb(p.surface)).border(1.0, rgb(p.border))
+            .child(text("Ask anything").font(app.ty.chat_sized(12.0)).color(rgb(p.dim))))
 }
 
 /// One setting: its name and what it does on the left, its control on the right.

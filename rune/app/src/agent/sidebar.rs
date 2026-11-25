@@ -60,8 +60,8 @@ pub fn catalog_scope(root: &str) -> Option<String> {
 
 pub(crate) fn project_name(directory: &str) -> String {
     if directory.is_empty() { return "Other chats".into(); }
-    let trimmed = directory.trim_end_matches('/');
-    trimmed.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or(directory).to_owned()
+    let trimmed = directory.trim_end_matches(['/', '\\']);
+    trimmed.rsplit(['/', '\\']).next().filter(|n| !n.is_empty()).unwrap_or(directory).to_owned()
 }
 
 fn header_rect_key(header: ConvHeader) -> &'static str {
@@ -305,6 +305,11 @@ impl App {
 
     /// `Alt+C`, the rail button and the splash "Agent panel" entry.
     pub fn toggle_conversations(&mut self) {
+        if self.mobile {
+            if self.sidebar == Some(crate::app::Sidebar::Conversations) { crate::mobile::close_history(self); }
+            else { crate::mobile::open_history(self); }
+            return;
+        }
         // From the file or notes tree it switches to the agent panel; only the agent panel
         // itself toggles closed.
         self.sidebar = if self.sidebar == Some(crate::app::Sidebar::Conversations) { None } else { Some(crate::app::Sidebar::Conversations) };
@@ -362,7 +367,8 @@ pub fn conversations(app: &App) -> El {
         let id = t.session_id.clone();
         // A title cut short slides to show the rest while the pointer is on its row.
         let (title_key, title_w) = (format!("thread:{}", t.session_id), crate::ui::marquee::natural(&t.title, title_font) * 0.86);
-        let open = matches!(&app.active_tab().kind, TabKind::Agent { session: Some(s) } if *s == t.session_id);
+        let open = matches!(&app.active_tab().kind, TabKind::Agent { session: Some(s) }
+            if *s == t.session_id || (app.mobile && app.families.root_of(s) == t.session_id));
         let keyboard = focused && app.conv_header.is_none() && index == app.conv_selected;
         let directory = t.directory.as_deref().unwrap_or_default().trim_end_matches('/');
         let home = crate::startup::home();
@@ -372,8 +378,8 @@ pub fn conversations(app: &App) -> El {
         let item = keyboard_row(index, item);
         // A conversation at work turns the loader beside its age: the theme's ink while it
         // runs, red for background work, yellow while it waits on a permission.
-        let status = Status::for_session(app, &t.session_id, app.activity_of(t));
-        let status = if status == Status::Idle && app.finished.contains(&t.session_id) { Status::Finished } else { status };
+        let status = if app.mobile { Status::for_conversation(app, &t.session_id, Some(app.activity_of(t))) }
+            else { Status::for_session(app, &t.session_id, app.activity_of(t)) };
         item.fill(if open { rgb(p.surface).alpha(0.45) } else if keyboard { rgb(p.hover) } else { Color::TRANSPARENT })
             .hover(if open { rgb(p.surface).alpha(0.45) } else { rgb(p.hover).alpha(0.7) })
             .child(row().w_full().center_y().gap(6.0 * s)
@@ -475,20 +481,29 @@ pub fn conversations(app: &App) -> El {
         .on_edit(|a: &mut App| &mut a.conv_query)
         .on_input_change(|a: &mut App, _: &mut rune::Tx| { a.conv_selected = 0; })
         .on_input_key(|a: &mut App, e: &rune::KeyEvent, tx: &mut rune::Tx| crate::keys::shortcut(a, e, tx) || a.conversation_search_key(e));
-    col().key("sidebar").h_full().fill(rgb(p.bg)).border_sides([0.0, 1.0, 0.0, 0.0], rgb(p.border))
-        .child(row().key("sidebar-heading").w_full().h(46.0 * s).pl(16.0 * s).pr(10.0 * s).center_y().gap(2.0 * s)
-            .child(text(glyph::SEARCH_LINE).font(app.ty.icon_sized(13.0)).color(rgb(p.muted)).mr(8.0 * s))
-            .child(search)
-            .child(header_button(app, ConvHeader::Projects, glyph::FILTER, 15.0, app.project_menu.is_some()).key("project-directory")
-                // A click opens it where the pointer is; only the keyboard moves the cursor here.
-                .on_press(|s: &mut App| {
-                    s.conv_query.focused = false;
-                    if s.project_menu.is_some() { s.close_project_menu(); } else { s.open_project_menu(); }
-                }))
-            .child(header_button(app, ConvHeader::AddProject, glyph::FOLDER_PLUS_LINE, 14.5, app.project_add.is_some()).key("add-project")
-                .on_press(|s: &mut App| { s.conv_query.focused = false; s.open_project_add(); }))
-            .child(header_button(app, ConvHeader::NewChat, glyph::COMPOSE, 12.5, false).key("new-chat")
-                .on_press(|s: &mut App| { s.conv_query.focused = false; s.open_tab(TabKind::Agent { session: None }); s.focus = crate::app::Focus::Content; })))
+    let header = row().key("sidebar-heading").w_full().h(if app.mobile { 48.0 } else { 46.0 * s }).pl(16.0 * s).pr(10.0 * s).center_y().gap(2.0 * s)
+        .child(text(glyph::SEARCH_LINE).font(app.ty.icon_sized(13.0)).color(rgb(p.muted)).mr(8.0 * s))
+        .child(search);
+    let header = header
+        .child(header_button(app, ConvHeader::Projects, glyph::FILTER, 15.0, app.project_menu.is_some()).key("project-directory")
+            .on_press(|s: &mut App| {
+                s.conv_query.focused = false;
+                if s.project_menu.is_some() { s.close_project_menu(); } else { s.open_project_menu(); }
+            }))
+        .child(header_button(app, ConvHeader::AddProject, glyph::FOLDER_PLUS_LINE, 14.5, app.project_add.is_some()).key("add-project")
+            .on_press(|s: &mut App| { s.conv_query.focused = false; s.open_project_add(); }));
+    let header = header
+        .child(header_button(app, ConvHeader::NewChat, glyph::COMPOSE, 12.5, false).key("new-chat")
+            .on_press(|s: &mut App| {
+                s.conv_query.focused = false;
+                if s.mobile { crate::mobile::new_chat(s); }
+                else { s.open_tab(TabKind::Agent { session: None }); s.focus = crate::app::Focus::Content; }
+            }));
+    let sidebar = col().key("sidebar");
+    let sidebar = if app.mobile { sidebar.min_h(0.0) } else { sidebar.h_full().fill(rgb(p.bg)).border_sides([0.0, 1.0, 0.0, 0.0], rgb(p.border)) };
+    sidebar
+        .child(header)
+        .children(app.mobile.then(|| crate::mobile::device_trigger(app)))
         .child(col().key(LIST_KEY).w_full().grow(1.0).shrink().scroll(ScrollSpec { stick_bottom: false })
             .on_scroll_offset(move |pos| mirror.set((pos.offset[1], pos.max[1], pos.viewport[1])))
             .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert(LIST_KEY.into(), r); })
@@ -511,6 +526,7 @@ impl Status {
             "running" => Self::Running,
             "background" => Self::Background,
             "permission" => Self::NeedsYou,
+            _ if app.finished.contains(id) => Self::Finished,
             _ => Self::Idle,
         }
     }
@@ -519,11 +535,15 @@ impl Status {
         let TabKind::Agent { session: Some(id) } = kind else { return Self::Idle };
         let activity = app.thread_activity.get(id).map(String::as_str)
             .or_else(|| app.threads.iter().find(|t| t.session_id == *id).map(|t| app.activity_of(t)));
+        Self::for_conversation(app, id, activity)
+    }
+
+    fn for_conversation(app: &App, id: &str, activity: Option<&str>) -> Self {
         let activity = match activity {
             // A just-started turn or a sub-agent may only have a local session status.
             None | Some("idle") if app.session_live(id) => "running",
+            None | Some("idle") if app.background_count(id) > 0 => "background",
             Some(activity) => activity,
-            None if app.background_count(id) > 0 => "background",
             None => "idle",
         };
         Self::for_session(app, id, activity)
@@ -579,6 +599,7 @@ impl App {
     /// that shows the family, else a new one. The sub-agent already showing goes back to the
     /// conversation (`openThread` on the viewed child).
     pub fn open_child(&mut self, root: &str, child: &str) {
+        crate::mobile::select_chat_from_history(self);
         let family = |kind: &TabKind| matches!(kind, TabKind::Agent { session: Some(id) } if self.families.root_of(id) == root || id == root);
         let tab = self.tabs.iter().find(|t| family(&t.kind)).map(|t| t.id);
         match tab {

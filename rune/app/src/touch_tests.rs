@@ -8,6 +8,42 @@ use rune::{Cx, El, Env, Runtime, TouchPhase};
 enum Surface { Code, MarkdownFile, Prose, FencedCode }
 
 #[test]
+fn touch_edit_double_tap_and_long_press_select_a_word() {
+    use rune::TouchPhase::*;
+    for (gesture, expected) in [("double", "first"), ("hold", "first"), ("drag", "first line"),
+        ("slow-taps", ""), ("pan", ""), ("cancel", ""), ("secure", "")]
+    {
+        let mut edit = rune::TextEdit::new("first line here\nsecond line there");
+        edit.set_secure(gesture == "secure");
+        let mut rt = Runtime::new(edit, |edit: &rune::TextEdit, _: &mut Cx<rune::TextEdit>| {
+            rune::text_input(edit, rune::TextStyle::new(18.0, 400.0).lh(24.0))
+                .size(280.0, 80.0).touch_edit_menu().on_edit(|e: &mut rune::TextEdit| e)
+        }, (320.0, 300.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        let (x, y, next) = (13.0, 12.0, 53.0);
+        rt.touch(1, Started, x, y, 1.0);
+        rt.frame(0.0);
+        match gesture {
+            "double" | "slow-taps" => {
+                rt.touch(1, Ended, x, y, 1.05);
+                rt.frame(0.0);
+                let t = if gesture == "double" { 1.15 } else { 2.0 };
+                rt.touch(2, Started, x + 5.0, y, t);
+                rt.touch(2, Ended, x + 5.0, y, t + 0.05);
+            }
+            "drag" | "pan" => {
+                rt.touch(1, Moved, next, y, if gesture == "drag" { 1.6 } else { 1.05 });
+                rt.touch(1, Ended, next, y, 1.7);
+            }
+            "cancel" => rt.touch(1, Cancelled, x, y, 1.7),
+            _ => rt.touch(1, Ended, x, y, 1.7),
+        }
+        rt.frame(0.0);
+        assert_eq!(rt.state.selected(), expected, "{gesture}");
+    }
+}
+
+#[test]
 fn finger_tab_close_requires_a_tap_not_a_drag_or_cancel() {
     for (workspace, gesture) in [false, true].into_iter().flat_map(|workspace| {
         ["tap", "close-drag", "tab-drag", "cancel"].map(|gesture| (workspace, gesture))

@@ -225,7 +225,21 @@ impl<S: 'static> Host<S> {
         // from it (Windows promotes touches) would press a second time.
         if matches!(event, WindowEvent::CursorMoved { .. } | WindowEvent::CursorLeft { .. } | WindowEvent::MouseInput { .. })
             && (rt.touching() || touch_promoted()) { return; }
+        #[cfg(target_os = "ios")]
+        if matches!(event, WindowEvent::Touch(winit::event::Touch { phase: winit::event::TouchPhase::Started, .. })
+            | WindowEvent::Focused(false) | WindowEvent::Occluded(true)
+            | WindowEvent::MouseInput { state: ElementState::Pressed, .. }
+            | WindowEvent::KeyboardInput { .. } | WindowEvent::Ime(WIme::Commit(_) | WIme::Preedit(..)))
+        {
+            rt.dismiss_touch_edit_menu(&l.window);
+        }
         match event {
+            #[cfg(target_os = "ios")]
+            WindowEvent::IosEditAction(action) => {
+                rt.touch_edit_action(action);
+                rt.dismiss_touch_edit_menu(&l.window);
+                l.request_redraw();
+            }
             WindowEvent::Moved(_) => {
                 // winit queues `ScaleFactorChanged` in `kCFRunLoopDefaultMode`, which waits
                 // until a window drag ends; resize the surface now when a drag crosses displays
@@ -362,18 +376,7 @@ impl<S: 'static> Host<S> {
                 } else if rt.stale() {
                     rt.ime_reset = true;
                 } else {
-                    let ime_allowed = rt.ime_area.is_some() && !rt.has_secure_focus();
-                    if std::mem::take(&mut rt.ime_reset) || ime_allowed != self.ime_allowed {
-                        l.window.set_ime_allowed(false);
-                        l.window.set_ime_allowed(ime_allowed);
-                        self.ime_allowed = ime_allowed;
-                    }
-                    if let Some(a) = rt.ime_area {
-                        l.window.set_ime_cursor_area(
-                            LogicalPosition::new(a[0] as f64, a[1] as f64),
-                            LogicalSize::new(a[2] as f64, a[3] as f64),
-                        );
-                    }
+                    super::platform_sync::sync_ime(l, rt, &mut self.ime_allowed, true);
                     l.apply_cursor(rt, true);
                 }
                 if rt.stale() { l.request_redraw(); }

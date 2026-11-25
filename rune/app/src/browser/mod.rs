@@ -275,7 +275,7 @@ impl App {
         match picked {
             // Opened from the add-project card: the pick is where the project goes.
             Picked::Directory(path) => if !self.project_location_picked(&path) { self.change_directory(&path) },
-            Picked::Image(path) => { self.attach_images(vec![path]); }
+            Picked::Image(path) => self.attach_images(&[path.into()]),
         }
     }
 
@@ -349,4 +349,3 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
-

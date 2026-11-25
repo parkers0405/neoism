@@ -36,6 +36,7 @@ async fn fake_acp_child_streams_interleaved_transcript_before_completion() {
             json!({"sessionUpdate":"tool_call_update","toolCallId":"exec-1","title":"Command done"}),
             json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Found "}}),
             json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"it."}}),
+            json!({"sessionUpdate":"tool_call","toolCallId":"task-1","kind":"task","title":"Unfinished task","status":"in_progress"}),
         ];
         let wire = updates.into_iter().map(|update| {
             format!("'{}'", json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fake","update":update}}))
@@ -49,6 +50,7 @@ while IFS= read -r line; do
       printf '%s\n' {wire}
       while test ! -f '{release}'; do sleep 0.01; done
       printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}'
+      exit 0
       ;;
   esac
 done
@@ -230,6 +232,16 @@ done
         state.shutdown().await.unwrap();
         drop(state);
         let reopened = AppState::open_database(&db).await.unwrap();
+        let nested = reopened
+            .inner
+            .store
+            .list_sessions()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|session| session.parent_id.as_ref() == Some(&child.id))
+            .expect("task tool should have created a nested ACP session");
+        assert_eq!(nested.extra["externalAgent"]["status"], "error");
         let saved = reopened
             .inner
             .store

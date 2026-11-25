@@ -1035,6 +1035,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38"
 dependencies = [
  "bitflags 2.13.2",
+ "block2 0.6.2",
+ "libc",
  "objc2 0.6.5",
 ]
 
@@ -2594,7 +2596,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-agent-service-api"
-version = "0.7.169"
+version = "0.7.170"
 dependencies = [
  "base64 0.22.1",
  "dirs",
@@ -2614,7 +2616,7 @@ dependencies = [
 
 [[package]]
 name = "neoism-protocol"
-version = "0.7.169"
+version = "0.7.170"
 dependencies = [
  "serde",
  "serde_json",
@@ -2629,6 +2631,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "block2 0.5.1",
  "dirs",
  "futures",
  "image",
@@ -2637,13 +2640,19 @@ dependencies = [
  "merman",
  "neoism-agent-service-api",
  "neoism-protocol",
+ "objc2 0.5.3",
+ "objc2-foundation 0.2.2",
+ "objc2-photos-ui",
+ "objc2-ui-kit",
  "opentunnel",
  "png 0.17.16",
  "pulldown-cmark",
+ "qrcode",
  "reqwest 0.12.28",
  "resvg 0.47.0",
  "rune",
  "rune-kit",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -2665,6 +2674,7 @@ dependencies = [
  "uuid",
  "web-time",
  "wgpu",
+ "winres",
  "yrs",
 ]
 
@@ -2798,6 +2808,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d49e936b501e5c5bf01fda3a9452ff86dc3ea98ad5f283e1455153142d97518c"
 dependencies = [
  "bitflags 2.13.2",
+ "block2 0.6.2",
  "objc2 0.6.5",
  "objc2-core-graphics",
  "objc2-foundation 0.3.2",
@@ -3022,6 +3033,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-map-kit"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca30f6a66e39947b495622ae162d121c4e727e98c379bbed5c1b255904506368"
+dependencies = [
+ "bitflags 2.13.2",
+ "block2 0.5.1",
+ "objc2 0.5.3",
+ "objc2-app-kit 0.2.2",
+ "objc2-contacts",
+ "objc2-core-location",
+ "objc2-foundation 0.2.2",
+]
+
+[[package]]
 name = "objc2-metal"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3045,6 +3071,38 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
+]
+
+[[package]]
+name = "objc2-photos"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8387e20da3c585432134766c87428112181f7d9081e8418b8508aa46b1262f2f"
+dependencies = [
+ "bitflags 2.13.2",
+ "block2 0.5.1",
+ "objc2 0.5.3",
+ "objc2-app-kit 0.2.2",
+ "objc2-core-image",
+ "objc2-core-location",
+ "objc2-foundation 0.2.2",
+ "objc2-uniform-type-identifiers",
+]
+
+[[package]]
+name = "objc2-photos-ui"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f95783bdae66b53b220cf85ac2c854551ab6295603c12d610a7f272f0c7deb24"
+dependencies = [
+ "bitflags 2.13.2",
+ "block2 0.5.1",
+ "objc2 0.5.3",
+ "objc2-app-kit 0.2.2",
+ "objc2-core-location",
+ "objc2-foundation 0.2.2",
+ "objc2-map-kit",
+ "objc2-photos",
 ]
 
 [[package]]
@@ -3169,7 +3227,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite 0.30.0",
- "toml",
+ "toml 1.2.1+spec-1.1.0",
  "tracing",
  "webpki-root-certs",
 ]
@@ -3692,6 +3750,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
+
+[[package]]
 name = "quick-error"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4047,6 +4111,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "rfd"
+version = "0.17.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20dafead71c16a34e1ff357ddefc8afc11e7d51d6d2b9fbd07eaa48e3e540220"
+dependencies = [
+ "block2 0.6.2",
+ "dispatch2",
+ "js-sys",
+ "libc",
+ "log",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
+ "percent-encoding",
+ "raw-window-handle",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "rgb"
 version = "0.8.53"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4142,6 +4229,7 @@ dependencies = [
  "raw-window-handle",
  "raw-window-metal",
  "resvg 0.45.1",
+ "rfd",
  "rune-motion",
  "rune-staging",
  "rune-taffy",
@@ -5249,6 +5337,15 @@ dependencies = [
  "libc",
  "pin-project-lite",
  "tokio",
+]
+
+[[package]]
+name = "toml"
+version = "0.5.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f4f7f0dd8d50a853a531c426359045b1998f04219d88799810762cd4ad314234"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -6432,6 +6529,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c3b93199df0ab874cdf0c6a94f0a0dc3423fe41f1cafb62b8bd7b1deb277aef"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "winres"
+version = "0.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b68db261ef59e9e52806f688020631e987592bd83619edccda9c47d42cde4f6c"
+dependencies = [
+ "toml 0.5.11",
 ]
 
 [[package]]

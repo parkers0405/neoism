@@ -827,6 +827,17 @@ pub fn config_descriptors() -> Vec<D> {
             Control::Select,
         ),
         d(
+            "agent.defaultSubagentHarness",
+            "Default subagent harness",
+            "Harness for new tasks without an explicit subagent. Neoism keeps the built-in default.",
+            Kind::String,
+            json!("neoism"),
+            &["neoism", "claude", "codex", "antigravity", "opencode", "cursor", "grok", "kiro", "fx"],
+            false,
+            C::Agent,
+            Control::Select,
+        ),
+        d(
             "agent.reasoning-effort",
             "Reasoning effort",
             "How much supported models reason.",

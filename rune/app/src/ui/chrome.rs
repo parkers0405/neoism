@@ -19,11 +19,12 @@ pub const TITLEBAR_H: f32 = 30.0;
 
 pub fn root(app: &App, cx: &mut Cx<App>) -> El {
     let p = app.pal;
+    let top_chrome = titlebar(app, cx);
     let body = row().w_full().grow(1.0).shrink()
         .child(rail(app))
         .child_if(app.sidebar.is_some(), || sidebar(app))
         .child(col().grow(1.0).shrink().h_full()
-            .child(workspace_tabs(app))
+            .child(workspace_tabs(app, top_chrome.is_none()))
             .child(crate::panes::view(app, cx)))
         .child_if(app.git_panel.open, || super::sidebar::view(app, "git", crate::git::view(app), crate::git::WIDTH * app.ty.scale(), 180.0, super::sidebar::chrome_max(app), true));
     track_caret(app, cx);
@@ -36,7 +37,7 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
     };
     shell
         .child(super::wallpaper::view(app))
-        .children(titlebar(app, cx))
+        .children(top_chrome)
         .child(body)
         .child(super::status::view(app))
         .child(super::tab_drag::overlay(app))
@@ -45,7 +46,7 @@ pub fn root(app: &App, cx: &mut Cx<App>) -> El {
         // The cursor sits with what it marks: on a tab, a tree row or a caret it goes under the
         // popups (LSP cards, the slash picker, modals) instead of showing through them.
         .child_if(app.cursor.placed() && !app.cursor.native_glass && !cursor_in_overlay(app), || cursor_quad(app))
-        .child(agent::overlay(app))
+        .child(agent::overlay(app, [0.0; 4]))
         .child(crate::editor::lsp_view::overlay(app))
         .child(crate::home::block_menu_overlay(app))
         .child_if(app.project_menu.is_some(), || agent::project_menu(app))
@@ -224,10 +225,11 @@ fn titlebar(app: &App, cx: &mut Cx<App>) -> Option<El> {
     cx.caption_color(rgb(p.fg));
     Some(row().key("titlebar").w_full().h(insets.height).fill(rgb(p.bg)).center_y().window_drag()
         .border_sides([0.0, 0.0, 1.0, 0.0], rgb(p.border))
-        .pl(insets.leading + 12.0).pr(insets.trailing + 12.0)
+        .pl(insets.leading + 12.0).pr(insets.trailing + 48.0)
         .child(el().grow(1.0))
         .child(text(app.workspace_name.clone()).font(app.ty.sans(12.0, 500.0)).color(rgb(p.muted)).truncate().shrink())
-        .child(el().grow(1.0)))
+        .child(el().grow(1.0))
+        .child(super::phone_share::button(app, insets.height).pin(None, Some(0.0), Some(insets.trailing + 8.0), None)))
 }
 
 fn rail(app: &App) -> El {
@@ -344,10 +346,10 @@ pub fn strip_wheel(app: &mut App, key: &str, e: &rune::WheelEvent, tx: &mut rune
     true
 }
 
-fn workspace_tabs(app: &App) -> El {
+fn workspace_tabs(app: &App, show_qr: bool) -> El {
     let p = app.pal;
     let mirror = app.chrome_scroll.clone();
-    let mut strip = row().key("workspace-tabs").w_full().h(TAB_ROW_H).scroll_x()
+    let mut strip = row().key("workspace-tabs").grow(1.0).min_w(0.0).shrink().h(TAB_ROW_H).scroll_x()
         .on_scroll_offset(move |pos| { mirror.borrow_mut().insert("workspace-tabs".into(), [pos.offset[0],pos.max[0]]); })
         .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("workspace-tabs".into(), r); }).fill(rgb(p.surface)).items_end()
         .on_wheel(|a: &mut App, e: rune::WheelEvent, tx: &mut rune::Tx| strip_wheel(a, "workspace-tabs", &e, tx));
@@ -385,10 +387,13 @@ fn workspace_tabs(app: &App) -> El {
             });
         strip = strip.child(app.tab_slide(super::tab_drag::Source::Workspace(entry.id.clone()), tab));
     }
-    strip.child(el().key("workspace-new").w(32.0).h(TAB_ROW_H).center()
+    let strip = strip.child(el().key("workspace-new").w(32.0).h(TAB_ROW_H).center()
         .child(icon(app, glyph::PLUS, 0.8, rgb(p.muted)))
         .on_press(|a: &mut App| a.new_workspace())
-        .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("workspace-new".into(), r); }))
+        .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("workspace-new".into(), r); }));
+    // The action stays visible even when the workspace tabs overflow horizontally.
+    row().w_full().h(TAB_ROW_H).fill(rgb(p.surface)).child(strip)
+        .child_if(show_qr, || super::phone_share::button(app, TAB_ROW_H))
 }
 
 /// Keeps Rune drawing every vblank while the app steps a motion itself (`App::keep_vsync`).

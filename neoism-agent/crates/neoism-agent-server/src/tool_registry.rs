@@ -473,7 +473,7 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
                     },
                     "subagent_type": {
                         "type": "string",
-                        "description": "Configured subagent name. Use \"general\" for independent implementation or multi-step work, \"explore\" for self-contained read-only discovery, or \"opencode\", \"codex\", \"claude\", \"grok\", \"kiro\", \"antigravity\", \"fx\", or \"cursor\" when the user requests that provider or authorizes external-agent delegation. Neoism remains the orchestrator; external children use their own tools, models, and host credentials. Use direct tools for ordinary implementation context. Do not invent names like \"research\" unless the user configured that agent."
+                        "description": "For a new task without a requested provider or role, omit this or use \"default\" to honor the configured default subagent harness. Explicit choices override the default: \"general\" or \"explore\" select built-in agents; \"opencode\", \"codex\", \"claude\", \"grok\", \"kiro\", \"antigravity\", \"fx\", and \"cursor\" select authorized external harnesses. Use the original name when resuming. Do not invent agent names."
                     },
                     "task_id": {
                         "type": "string",
@@ -482,7 +482,7 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
                     "external_options": {
                         "type": "object",
                         "additionalProperties": {"type": "string"},
-                        "description": "Optional explicit native provider selection for a new or resumed external task. Keys and values must be advertised by that provider (model selects its native model); never infer these from the Neoism API model. Unsupported selections fail."
+                        "description": "Optional explicit native provider selection for a new or resumed external task. Use subagent_options to discover the provider's exact option IDs and values before selecting a model. Never infer them from the Neoism API model. Unsupported selections fail."
                     },
                     "background": {
                         "type": "boolean",
@@ -493,7 +493,24 @@ pub(super) fn definitions(owner: ToolOwner) -> Vec<BuiltinTool> {
                         "description": "The command or user-facing label that triggered this task."
                     }
                 },
-                "required": ["description", "prompt", "subagent_type"]
+                "required": ["description", "prompt"]
+            }),
+            stateful_handler,
+        ),
+        tool(
+            ToolOwner::Subagents, owner,
+            "subagent_options",
+            "Preview the models and other selectors advertised by an external subagent provider for the current session's directory. Does not start a task or change any selection. Use configOptions IDs and advertised values in task.external_options. If the preview fails or does not advertise the requested model, report that rather than guessing or silently using a default.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "subagent_type": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "External harness name, as in task (for example codex or claude). Omit or use default to inspect the configured default, if it is external."
+                    }
+                },
+                "additionalProperties": false
             }),
             stateful_handler,
         ),

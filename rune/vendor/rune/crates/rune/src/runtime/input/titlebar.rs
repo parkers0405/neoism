@@ -98,6 +98,14 @@ impl<S: 'static> Runtime<S> {
         self.titlebar.insets
     }
 
+    #[cfg(target_os = "ios")]
+    pub(crate) fn set_safe_area(&mut self, insets: [f32; 4]) -> bool {
+        if self.safe_area == insets { return false; }
+        self.safe_area = insets;
+        self.dirty = true;
+        true
+    }
+
     /// The caption buttons to draw over the view, and their hover and press state; `None`
     /// draws none. A change re-runs the view.
     pub(crate) fn set_caption(&mut self, caption: Option<crate::titlebar::Caption>) {

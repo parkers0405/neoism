@@ -6,6 +6,14 @@ use super::*;
 pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
     let inner = session.inner.clone();
     match msg {
+        // The socket owns workspace admission and outer request correlation.
+        request @ (AgentClientMessage::GetSubagentModels { .. }
+        | AgentClientMessage::GetSubagentDefault { .. }
+        | AgentClientMessage::SetSubagentDefault { .. }) => {
+            let _ = inner.tx.send(super::subagent_picker::failure(
+                request, "A workspace-scoped agent envelope is required".into(),
+            ));
+        }
         // -- Layer 1: direct Claude proxy --------------------------
         AgentClientMessage::SendMessage { text, attachments } => {
             session.send_message(text, attachments);
@@ -43,13 +51,14 @@ pub fn dispatch(session: &AgentSession, msg: AgentClientMessage) {
                     connection_id,
                     thinking,
                     external_provider,
+                    true,
                 )
                 .await;
             });
         }
         AgentClientMessage::SwitchThread { session_id } => {
             tokio::spawn(async move {
-                handle_switch_thread(inner, session_id).await;
+                handle_switch_thread(inner, session_id, true).await;
             });
         }
         AgentClientMessage::DeleteThread { session_id } => {

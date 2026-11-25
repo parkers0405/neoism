@@ -194,6 +194,10 @@ fn load_snapshot_with_project_disabled(
     // A workspace may define the transport, but cannot mask a global GUI toggle.
     value["mcpEnabled"] = mcp_enabled;
     let mut document: AgentConfigDocument = serde_json::from_value(value)?;
+    if let Some(selection) = &document.default_subagent {
+        // Permission checks and task dispatch must resolve the same harness.
+        document.default_subagent_harness = Some(selection.provider.clone());
+    }
     normalize(&mut document);
     document.apply_mcp_enabled_preferences();
     Ok((document, roots))
@@ -365,6 +369,12 @@ fn merge(target: &mut Value, source: Value) {
     match (target, source) {
         (Value::Object(target), Value::Object(source)) => {
             for (key, value) in source {
+                // Harness, model and selector are one choice. Never inherit a
+                // model/selector from a lower layer for a different harness.
+                if key == "defaultSubagent" {
+                    target.insert(key, value);
+                    continue;
+                }
                 if key == "instructions" {
                     merge_unique_array(
                         target.entry(key).or_insert(Value::Array(Vec::new())),

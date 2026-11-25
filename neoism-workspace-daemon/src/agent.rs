@@ -753,13 +753,21 @@ impl AgentSession {
                 reason: "set NEOISM_AGENT_API_KEY".to_string(),
             });
         }
+        Self::with_endpoint(api_key, model, tx, configured_agent_server())
+    }
+
+    fn with_endpoint(
+        api_key: Option<String>,
+        model: String,
+        tx: AgentReplySender,
+        agent_server: String,
+    ) -> AgentSession {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .redirect(reqwest::redirect::Policy::none())
             .pool_idle_timeout(Some(std::time::Duration::from_secs(30)))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        let agent_server = configured_agent_server();
         let agent_http = agent_http_client(&agent_server)
             .cloned()
             .unwrap_or_else(|_| http.clone());
@@ -839,6 +847,8 @@ pub(crate) mod dispatcher;
 pub(crate) mod events;
 mod goals;
 pub(crate) mod handlers;
+pub(crate) mod mobile;
+pub(crate) mod subagent_picker;
 pub(crate) mod http;
 pub(crate) mod turn;
 

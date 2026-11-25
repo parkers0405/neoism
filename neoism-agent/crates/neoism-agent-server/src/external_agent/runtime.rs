@@ -86,7 +86,8 @@ impl ExternalRuntime {
         ]
         .iter()
         .any(|marker| message.contains(marker))
-            || (self == Self::Claude && message.contains("claude code authentication_failed"))
+            || (self == Self::Claude && (message.contains("claude code authentication_failed")
+                || message.contains("oauth session expired and could not be refreshed")))
     }
 
     pub(super) fn task_failure_message(self, error: String) -> String {
@@ -274,6 +275,7 @@ mod tests {
             "adapter turn failed: Claude Code authentication_failed; authentication remains native-owned".into(),
         );
         assert!(claude.contains("Claude Code sign-in required"));
+        assert!(ExternalRuntime::Claude.is_sign_in_error("OAuth session expired and could not be refreshed"));
         assert!(claude.contains("claude auth login"));
         assert!(!claude.contains("native-owned"));
         let codex = ExternalRuntime::Codex.task_failure_message("Not logged in".into());

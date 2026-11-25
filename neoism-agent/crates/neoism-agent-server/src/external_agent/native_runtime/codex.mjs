@@ -156,7 +156,7 @@ export function createAdapter(context, injectedTransport) {
       const agent = item.agentsStates?.[id];
       // A completed spawn/wait tool is not evidence that the child has finished.
       const status = agent?.status;
-      send(turn, { type: 'child.updated', scope, status: ['completed', 'shutdown'].includes(status) ? 'completed' : ['errored', 'failed', 'notFound'].includes(status) ? 'error' : status === 'interrupted' ? 'interrupted' : 'running', ...(agent?.message ? { summary: agent.message } : {}) }, params);
+      send(turn, { type: 'child.updated', scope, status: status === 'completed' ? 'completed' : ['errored', 'failed', 'notFound'].includes(status) ? 'error' : ['interrupted', 'shutdown'].includes(status) ? 'interrupted' : 'running', ...(agent?.message ? { summary: agent.message } : {}) }, params);
     }
     if (completed) {
       const failed = item.status === 'failed' || item.status === 'declined' || item.success === false || item.error != null || (typeof item.exitCode === 'number' && item.exitCode !== 0);
@@ -249,7 +249,11 @@ export function createAdapter(context, injectedTransport) {
       const finish = params.turn.status;
       send(turn, { type: 'runtime.status', status: finish, ...(params.turn.error ? { message: params.turn.error.message } : {}) }, params);
       turn.finished = true;
-      turn.done.resolve(defined({ finish, model: turn.model, usage: turn.usage }));
+      if (finish === 'completed' || finish === 'interrupted') {
+        turn.done.resolve(defined({ finish, model: turn.model, usage: turn.usage }));
+      } else {
+        turn.done.reject(new Error(`Codex turn ${finish ?? 'missing terminal status'}${params.turn.error?.message ? `: ${params.turn.error.message}` : ''}`));
+      }
     }
   }
   async function interaction(method, params, id) {

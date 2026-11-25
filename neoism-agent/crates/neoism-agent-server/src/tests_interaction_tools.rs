@@ -1898,6 +1898,42 @@ async fn task_tool_resumes_existing_child_session() {
 }
 
 #[tokio::test]
+async fn v2_prompt_accepts_image_data_above_the_default_json_limit() {
+    use base64::Engine as _;
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::open_database(dir.path().join("agent.sqlite3"))
+        .await
+        .unwrap();
+    let app = app(state);
+    let session: SessionInfo = response_json(
+        app.clone()
+            .oneshot(request(
+                Method::POST,
+                &format!("/v2/sessions?directory={}", dir.path().display()),
+                Some(json!({ "model": { "providerId": "neoism", "id": "stub" } })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let data = base64::engine::general_purpose::STANDARD.encode(vec![0; 2 * 1024 * 1024]);
+    let response = app
+        .oneshot(request(
+            Method::POST,
+            &format!("/v2/sessions/{}/prompt", session.id),
+            Some(json!({
+                "noReply": true,
+                "parts": [{ "type": "text", "text": "Inspect this" }, {
+                    "type": "file", "mime": "image/png", "filename": "large.png", "url": format!("data:image/png;base64,{data}"),
+                }],
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
 async fn v2_prompt_accepts_subtask_parts_and_children_page() {
     let root = std::env::temp_dir().join(format!(
         "neoism-agent-v2-subtask-{}",

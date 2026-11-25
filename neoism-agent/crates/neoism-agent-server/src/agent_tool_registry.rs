@@ -226,6 +226,13 @@ pub(crate) async fn available_tools_for_snapshot(
             {
                 continue
             }
+            "subagent_options"
+                if state.services().hosted
+                    || state.services().workspace_worker.is_some()
+                    || !crate::caller::native_execution_allowed(execution) =>
+            {
+                continue
+            }
             "workflow" if !crate::workflow::agent_tool_available(state, snapshot, execution) => {
                 continue
             }
@@ -320,6 +327,7 @@ pub(crate) async fn composition_tools_for_agent(
     Ok(tools
         .into_iter()
         .filter(|tool| !disabled.contains(&tool.id))
+        .filter(|tool| tool.id != "subagent_options" || !disabled.contains("task"))
         .filter(|tool| !tool.id.starts_with("mcp__") || !gateway_disabled)
         .filter(|tool| {
             tool_allowed_for_model(

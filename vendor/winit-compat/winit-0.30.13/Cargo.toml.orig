@@ -183,6 +183,7 @@ features = [
     "block2",
     "dispatch",
     "NSArray",
+    "NSBundle",
     "NSEnumerator",
     "NSGeometry",
     "NSObjCRuntime",
@@ -198,16 +199,22 @@ version = "0.2.2"
 features = [
     "UIApplication",
     "UIDevice",
+    "UIEditMenuInteraction",
     "UIEvent",
     "UIGeometry",
     "UIGestureRecognizer",
+    "UIInteraction",
     "UITextInput",
     "UITextInputTraits",
     "UIOrientation",
     "UIPanGestureRecognizer",
+    "UIPasteboard",
     "UIPinchGestureRecognizer",
     "UIResponder",
     "UIRotationGestureRecognizer",
+    "UIScene",
+    "UISceneOptions",
+    "UISceneSession",
     "UIScreen",
     "UIScreenMode",
     "UITapGestureRecognizer",
@@ -216,6 +223,7 @@ features = [
     "UIView",
     "UIViewController",
     "UIWindow",
+    "UIWindowScene",
 ]
 
 [target.'cfg(target_os = "windows")'.dependencies]

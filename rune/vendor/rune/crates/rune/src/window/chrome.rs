@@ -35,6 +35,11 @@ pub(super) fn frame_chrome(chrome: Chrome, titlebar: Option<crate::Titlebar>, se
 /// Places the traffic lights, and tells the runtime what the window's controls take of the
 /// titlebar and which caption buttons to draw over it. A change re-runs the view.
 pub(super) fn sync_chrome<S: 'static>(rt: &mut Runtime<S>, w: &Win, chrome: Chrome, titlebar: Option<crate::Titlebar>) {
+    #[cfg(target_os = "ios")]
+    {
+        use winit::platform::ios::WindowExtIOS;
+        if rt.set_safe_area(w.window.safe_area_insets()) { w.request_redraw(); }
+    }
     let leading = place_chrome(&w.window, frame_chrome(chrome, titlebar, rt.titlebar_set()));
     rt.set_titlebar_inset(leading);
     let height = titlebar.map(|t| rt.titlebar_set().over(t).height());

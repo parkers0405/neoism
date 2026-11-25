@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -34,7 +35,12 @@ def verify_windows_payload(bundle):
     return module.verify_windows_bundle(bundle, ROOT / 'target/release')
 
 def run(*args):
-    return subprocess.check_output([str(arg) for arg in args], text=True, stderr=subprocess.STDOUT).strip()
+    try:
+        return subprocess.check_output([str(arg) for arg in args], text=True, stderr=subprocess.STDOUT).strip()
+    except subprocess.CalledProcessError as error:
+        if error.output:
+            print(error.output, file=sys.stderr, end='' if error.output.endswith('\n') else '\n')
+        raise
 
 # macOS signing. Without an identity the bundle is ad-hoc signed, as local builds always were.
 # NEOISM_CODESIGN_IDENTITY names a Developer ID Application certificate in the keychain;
@@ -178,6 +184,15 @@ with tempfile.TemporaryDirectory(prefix='neoism-package-') as temporary:
     installed = extracted / NAME / 'Neoism.app/Contents/MacOS' if SYSTEM == 'darwin' else extracted / NAME
     if SYSTEM == 'windows':
         verify_windows_payload(installed)
+    elif SYSTEM == 'darwin':
+        contents = installed.parent
+        with (contents / 'Info.plist').open('rb') as source:
+            icon = plistlib.load(source)['CFBundleIconFile']
+        assert icon == 'neoism', 'The macOS bundle does not point to the shipping Neoism icon'
+        assert (contents / 'Resources' / f'{icon}.icns').read_bytes() == (ROOT / 'misc/macos/neoism.icns').read_bytes()
+    elif SYSTEM == 'linux':
+        assert 'Icon=neoism' in (installed / 'neoism.desktop').read_text().splitlines()
+        assert (installed / 'neoism.png').read_bytes() == (ROOT / 'neoism-frontend/shared/assets/icons/neoism.png').read_bytes()
     docs = installed.parent / 'Resources/resources/docs' if SYSTEM == 'darwin' else installed / 'resources/docs'
     run('node', ROOT / 'scripts/build-docs.mjs', '--verify', docs)
     assert VERSION in run(installed / ('neoism' + SUFFIX), '--version')

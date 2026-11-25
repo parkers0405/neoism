@@ -616,8 +616,7 @@ async fn execute_stateful_tool_call(
             Ok(Some(result))
         }
         "task" => {
-            let agent_name = string_arg(&input, "subagent_type")
-                .ok_or_else(|| "tool argument subagent_type is required".to_string())?;
+            let agent_name = crate::plugins::subagents::task_agent_name(snapshot.config().default_subagent_harness.as_deref(), &input)?;
             ensure_tool_permission(permissions, "task", &agent_name)?;
             crate::plugins::subagents::start_task_tool(
                 state,
@@ -629,6 +628,11 @@ async fn execute_stateful_tool_call(
             .await
             .map(Some)
         }
+        "subagent_options" => preview_subagent_options(
+            state, session_id, permissions, input, cancel, snapshot,
+        )
+        .await
+        .map(Some),
         "task_result" => {
             ensure_tool_permission(permissions, "task_result", "*")?;
             let result = crate::plugins::subagents::task_result_tool(
@@ -846,6 +850,260 @@ fn dangerously_skip_permissions_enabled(
     config: &neoism_agent_core::AgentConfigDocument,
 ) -> bool {
     config.dangerously_skip_permissions
+}
+
+async fn preview_subagent_options(
+    state: &AppState,
+    session_id: &Id,
+    permissions: &[PermissionRule],
+    input: Value,
+    cancel: Option<Arc<AtomicBool>>,
+    snapshot: &crate::workspace_runtime::PluginGenerationLease,
+) -> Result<tool::ToolExecutionResult, String> {
+    use axum::extract::{Query, State};
+    use axum::http::HeaderMap;
+    use crate::external_agent::options;
+
+    snapshot.ensure_active().map_err(|error| error.to_string())?;
+    let session = state
+        .inner
+        .store
+        .get_session(session_id.as_str())
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "subagent_options requires an active session".to_string())?;
+    let services = state.services();
+    // The HTTP preview requires live caller claims on a worker; do not mint
+    // request credentials from persisted session metadata.
+    if services.hosted
+        || services.workspace_worker.is_some()
+        || !crate::caller::native_execution_allowed(
+            &crate::caller::session_execution_policy(services, &session),
+        )
+    {
+        return Err("external subagent options are unavailable for this session".into());
+    }
+    let directory =
+        crate::windows_process::canonicalize_path(std::path::Path::new(&session.directory))
+            .map_err(|error| format!("cannot resolve the current session directory: {error}"))?;
+    if !crate::caller::services_allow_session_path(services, &session, &directory) {
+        return Err("external subagent options directory is outside the session scope".into());
+    }
+    let runtime =
+        subagent_options_runtime(snapshot.config().default_subagent_harness.as_deref(), &input)?;
+    let provider = runtime.provider_id();
+    // Preview has its own approval. It must not inspect a denied harness or
+    // grant a task approval that would later be reused to start a child.
+    if permission::evaluate("task", runtime.agent_name(), permissions).action
+        == PermissionAction::Deny
+    {
+        return Err(format!("task permission denies external harness {provider}"));
+    }
+    ensure_tool_permission(permissions, "subagent_options", provider)?;
+
+    // Reuse the existing preview (including provider discovery and cache
+    // semantics), not the session selection or task-spawn APIs.
+    let query = serde_json::from_value(json!({"provider": provider, "directory": directory}))
+        .map_err(|error| format!("invalid external options preview request: {error}"))?;
+    let preview = options::preview(State(state.clone()), Query(query), HeaderMap::new(), None);
+    let response = match cancel {
+        Some(cancel) => tokio::select! {
+            biased;
+            _ = crate::session_loop::wait_for_cancellation(cancel) => return Err("tool call aborted".into()),
+            response = preview => response,
+        },
+        None => preview.await,
+    }
+    .map_err(|error| format!("{provider} options preview failed: {error}"))?;
+    let response = serde_json::to_value(response.0).map_err(|error| error.to_string())?;
+    subagent_options_result(provider, response)
+}
+
+fn subagent_options_runtime(
+    configured: Option<&str>,
+    input: &Value,
+) -> Result<crate::external_agent::ExternalRuntime, String> {
+    let args = input
+        .as_object()
+        .ok_or("subagent_options requires an object")?;
+    if args.keys().any(|key| key != "subagent_type") {
+        return Err("subagent_options only accepts subagent_type".into());
+    }
+    if args.contains_key("subagent_type") && string_arg(input, "subagent_type").is_none() {
+        return Err("subagent_type must be a non-empty string".into());
+    }
+    let name = crate::plugins::subagents::task_agent_name(configured, input)?;
+    crate::external_agent::ExternalRuntime::resolve(&name).ok_or_else(|| {
+        format!("{name:?} is not an external subagent harness; specify an external subagent_type")
+    })
+}
+
+fn subagent_options_result(
+    provider: &str,
+    mut response: Value,
+) -> Result<tool::ToolExecutionResult, String> {
+    if response["catalogStale"] == true {
+        return Err(format!(
+            "{provider} returned a stale options catalog; retry before selecting a model"
+        ));
+    }
+    Ok(tool::ToolExecutionResult {
+        title: format!("{provider} subagent options"),
+        output: json!({
+            "provider": provider,
+            "configOptions": response["configOptions"].take(),
+            "selectedOptions": response["selectedOptions"].take(),
+        })
+        .to_string(),
+        metadata: None,
+    })
+}
+
+#[cfg(test)]
+mod subagent_options_tests {
+    use super::*;
+
+    #[test]
+    fn resolves_only_external_harnesses_and_rejects_scope_arguments() {
+        let resolve = |input| {
+            subagent_options_runtime(Some("claude-code"), &input).map(|runtime| runtime.provider_id())
+        };
+        assert_eq!(resolve(json!({})).unwrap(), "claude");
+        assert_eq!(
+            resolve(json!({"subagent_type": "default"})).unwrap(),
+            "claude"
+        );
+        assert_eq!(
+            resolve(json!({"subagent_type": "openai-codex"})).unwrap(),
+            "codex"
+        );
+        for input in [
+            json!({"subagent_type": "explore"}),
+            json!({"subagent_type": "unknown"}),
+            json!({"subagent_type": " "}),
+            json!({"directory": "/elsewhere"}),
+            json!({"session_id": "another"}),
+            json!({"external_options": {"model": "unverified"}}),
+        ] {
+            assert!(resolve(input).is_err());
+        }
+        assert!(subagent_options_runtime(None, &json!({})).is_err());
+    }
+
+    #[test]
+    fn exposes_exact_advertised_models_but_refuses_stale_catalogs() {
+        let options = json!([{
+            "id": "provider-model", "type": "select", "category": "model",
+            "currentValue": "base", "options": [{"value": "fast", "name": "Fast"}]
+        }]);
+        let mut response = json!({
+            "configOptions": options,
+            "selectedOptions": {},
+            "externalSessionId": "not-for-the-agent",
+        });
+        let result = subagent_options_result("codex", response.clone()).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&result.output).unwrap(),
+            json!({"provider": "codex", "configOptions": options, "selectedOptions": {}})
+        );
+        response["catalogStale"] = json!(true);
+        assert!(subagent_options_result("codex", response)
+            .unwrap_err()
+            .contains("stale"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn previews_current_session_without_starting_a_task() {
+        use axum::{body::Body, http::Request};
+        use std::os::unix::fs::PermissionsExt;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let directory = root.to_str().unwrap();
+        let adapter = root.join("fx");
+        std::fs::write(
+            &adapter,
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> requests.log
+  id=${line#*\"id\":}; id=${id%%,*}
+  case "$line" in
+    *'"method":"initialize"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1}}\n' "$id" ;;
+    *'"method":"session/new"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"preview-only","configOptions":[{"id":"model","name":"Model","category":"model","type":"select","currentValue":"fast","options":[{"value":"fast","name":"Fast"}]}]}}\n' "$id" ;;
+  esac
+done
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut services = crate::standard_services();
+        services.executables = Arc::new(
+            crate::executable::test_support::FakeExecutableService::with("fx", &adapter),
+        );
+        let state = AppState::open_database_with_services(root.join("agent.sqlite3"), services)
+            .await
+            .unwrap();
+        let response = crate::app(state.clone())
+            .oneshot(
+                Request::post("/v2/sessions")
+                    .header("x-neoism-directory", directory)
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        let bytes = axum::body::to_bytes(response.into_body(), 64_000).await.unwrap();
+        let session: SessionInfo = serde_json::from_slice(&bytes).unwrap();
+        let snapshot = state.plugin_snapshot(directory).await;
+        let input = json!({"subagent_type": "fx"});
+        let mut permissions = vec![PermissionRule {
+            permission: "subagent_options".into(),
+            pattern: "fx".into(),
+            action: PermissionAction::Allow,
+        }];
+        permissions.push(PermissionRule {
+            permission: "task".into(),
+            pattern: "fx".into(),
+            action: PermissionAction::Deny,
+        });
+        let denied = preview_subagent_options(
+            &state,
+            &session.id,
+            &permissions,
+            input.clone(),
+            None,
+            &snapshot,
+        )
+        .await
+        .unwrap_err();
+        drop(snapshot);
+        assert!(denied.contains("task permission denies"));
+        assert!(!root.join("requests.log").exists());
+        permissions.pop();
+        let result = execute_tool_call_with_permission_wait(
+            &state,
+            &session.id,
+            &Id::ascending(IdKind::Message),
+            directory,
+            permissions,
+            "options-preview",
+            "subagent_options",
+            input,
+        )
+        .await
+        .unwrap();
+        let output: Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(output["configOptions"][0]["options"][0]["value"], "fast");
+        let calls = std::fs::read_to_string(root.join("requests.log")).unwrap();
+        assert!(calls.contains(directory));
+        assert!(!calls.contains("session/prompt"));
+        assert!(!calls.contains("session/set_config_option"));
+        state.shutdown().await.unwrap();
+    }
 }
 
 pub(crate) fn ensure_tool_permission(

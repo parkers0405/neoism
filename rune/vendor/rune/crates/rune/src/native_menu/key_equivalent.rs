@@ -21,9 +21,9 @@ pub(crate) struct KeyEquivalent {
 }
 
 impl KeyEquivalent {
-    /// Shift stays in the mask with the unshifted character: "cmd+shift+z" is "z" with ⇧⌘
-    /// and "cmd+shift+=" is "=" with ⇧⌘ (shown ⇧⌘=), as the accelerator names them. AppKit
-    /// matches either on any layout, where the shifted symbol ("+") would depend on the layout.
+    /// Shift stays in the mask for letters: "cmd+shift+z" is "z" with ⇧⌘. For the zoom
+    /// convention "cmd+shift+=", AppKit expects the literal "+" with ⌘: it doesn't match
+    /// "=" with ⇧⌘ against a key event that types "+" with Shift held.
     pub(crate) fn new(shortcut: &Shortcut) -> Self {
         use PhysicalKeyCode::*;
         let scalar = match shortcut.physical_key() {
@@ -37,7 +37,10 @@ impl KeyEquivalent {
         let key = char::from_u32(scalar).filter(|_| scalar != 0).map_or_else(
             || shortcut.menu_keycaps().pop().unwrap_or_default().to_lowercase(), String::from);
         let mods = shortcut.modifiers();
-        let mask = [(mods.ctrl, CONTROL), (mods.alt, OPTION), (mods.shift, SHIFT), (mods.logo, COMMAND)]
+        let (key, shift) = if mods.shift && shortcut.physical_key() == Equal {
+            ("+".into(), false)
+        } else { (key, mods.shift) };
+        let mask = [(mods.ctrl, CONTROL), (mods.alt, OPTION), (shift, SHIFT), (mods.logo, COMMAND)]
             .into_iter().filter(|(on, _)| *on).fold(0, |mask, (_, bit)| mask | bit);
         Self { key, mask }
     }

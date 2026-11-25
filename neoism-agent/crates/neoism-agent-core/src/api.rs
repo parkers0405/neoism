@@ -40,6 +40,12 @@ pub struct AgentConfigDocument {
     pub video_model: Option<String>,
     #[serde(default)]
     pub default_agent: Option<String>,
+    /// Harness used for new tasks without an explicit subagent selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_subagent_harness: Option<String>,
+    /// Picker override, saved as one selection so the model cannot migrate to a different harness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_subagent: Option<SubagentDefaultConfig>,
     #[serde(default)]
     pub agent: BTreeMap<String, AgentConfig>,
     #[serde(default)]
@@ -104,6 +110,8 @@ impl Default for AgentConfigDocument {
             image_model: Default::default(),
             video_model: Default::default(),
             default_agent: Default::default(),
+            default_subagent_harness: Default::default(),
+            default_subagent: Default::default(),
             agent: Default::default(),
             mode: Default::default(),
             command: Default::default(),
@@ -126,6 +134,19 @@ impl Default for AgentConfigDocument {
             compaction: Default::default(),
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentDefaultConfig {
+    pub provider: String,
+    pub model: Option<String>,
+    /// The provider's selector ID (ACP does not require it to be `model`).
+    pub option_id: Option<String>,
+    /// A native model variant or the exact external selector value.
+    pub reasoning: Option<String>,
+    /// The external harness's validated reasoning selector ID, if any.
+    pub reasoning_option_id: Option<String>,
 }
 
 impl AgentConfigDocument {

@@ -31,6 +31,21 @@ extern "C" fn send_event(app: &NSApplication, sel: Sel, event: &NSEvent) {
     // but that doesn't really matter here.
     let event_type = unsafe { event.r#type() };
     let modifier_flags = unsafe { event.modifierFlags() };
+    #[cfg(debug_assertions)]
+    if event_type == NSEventType::KeyDown && zoom_trace_enabled() {
+        let keycode = unsafe { event.keyCode() };
+        let is_zoom_key = matches!(keycode, 24 | 27 | 29 | 69 | 78 | 81 | 82)
+            || unsafe { event.charactersIgnoringModifiers() }.is_some_and(|key| {
+                matches!(key.to_string().as_str(), "+" | "=" | "-" | "_" | "0")
+            });
+        if is_zoom_key {
+            eprintln!("zoom trace: AppKit keycode={keycode} cmd={} ctrl={} option={} shift={}",
+                modifier_flags.contains(NSEventModifierFlags::NSEventModifierFlagCommand),
+                modifier_flags.contains(NSEventModifierFlags::NSEventModifierFlagControl),
+                modifier_flags.contains(NSEventModifierFlags::NSEventModifierFlagOption),
+                modifier_flags.contains(NSEventModifierFlags::NSEventModifierFlagShift));
+        }
+    }
     if event_type == NSEventType::KeyUp
         && modifier_flags.contains(NSEventModifierFlags::NSEventModifierFlagCommand)
     {
@@ -48,6 +63,12 @@ extern "C" fn send_event(app: &NSApplication, sel: Sel, event: &NSEvent) {
     let _ = mtm;
     let original = unsafe { ORIGINAL.get().expect("no existing sendEvent: handler set") };
     original(app, sel, event)
+}
+
+#[cfg(debug_assertions)]
+fn zoom_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("NEOISM_TRACE_MAC_ZOOM").is_some())
 }
 
 /// Override the [`sendEvent:`][NSApplication::sendEvent] method on the given application class.

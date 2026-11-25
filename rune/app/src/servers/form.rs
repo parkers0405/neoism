@@ -24,6 +24,7 @@ const FIELD_H: f32 = 32.0;
 pub enum Kind {
     Server(Draft),
     System,
+    PairPhone,
 }
 
 /// `ServerDraft`: Host or Join, Fast tunnel, and every field's last value.
@@ -72,6 +73,15 @@ fn field(id: &'static str, label: &'static str, value: &str, placeholder: &'stat
 }
 
 impl Form {
+    pub(crate) fn pair_phone() -> Self {
+        let mut form = Self { kind: Kind::PairPhone, title: "Pair a phone",
+            description: Some("Pair over Tailscale to read and continue this Mac's Neoism chats across projects. Agents run on this Mac. Use a separate pairing password."),
+            fields: vec![field("token", "Pairing password", "", "Enter a pairing password", true)],
+            submit: "Generate QR Code", focus: Focus::Field(0), error: None };
+        form.set_focus(Focus::Field(0));
+        form
+    }
+
     /// `server-form`: the target field by mode (project folder to host, address or invite to
     /// join, address when editing), then the optional name and the password.
     pub fn server(draft: Draft) -> Form {
@@ -129,7 +139,7 @@ impl Form {
         Some(draft)
     }
 
-    fn has_tabs(&self) -> bool { matches!(&self.kind, Kind::Server(d) if d.server_id.is_none()) }
+    fn has_tabs(&self) -> bool { self.title != "Open on phone" && matches!(&self.kind, Kind::Server(d) if d.server_id.is_none()) }
 
     /// Rebuild for another mode, keeping what was typed (`form-mode`).
     fn remode(&mut self, host: bool, fast: bool) {
@@ -215,6 +225,9 @@ pub fn view(app: &App) -> El {
     let mut body = col().w_full().mt(10.0 * s).gap(10.0 * s);
     if let Some(description) = form.description {
         body = body.child(text(description).font(app.ty.sized(BODY).lh(LINE_H * s)).color(rgb(p.dim)).wrap().w_full());
+    }
+    if form.title == "Open on phone" && let Kind::Server(draft) = &form.kind {
+        body = body.child(text(format!("Workspace: {}", draft.directory)).font(app.ty.sized(BODY)).color(rgb(p.fg)).wrap().w_full());
     }
     if let Kind::Server(draft) = &form.kind && form.has_tabs() {
         // Host | Join, and the Fast tunnel switch.

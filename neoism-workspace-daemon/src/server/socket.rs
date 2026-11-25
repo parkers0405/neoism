@@ -266,6 +266,7 @@ pub(crate) async fn handle_socket(
     let editor_query_tx = push_tx.clone();
     let git_blame_tx = push_tx.clone();
     let mut harness_jobs = tokio::task::JoinSet::new();
+    let mut subagent_picker_jobs = tokio::task::JoinSet::new();
     // Bounded FIFO; SQLite reads/writes cannot stall PTY forwarding or spawn
     // unbounded workers. Replies use a separate bounded lane for backpressure.
     let (database_tx, mut database_requests) = tokio::sync::mpsc::channel::<(u64, Option<String>, neoism_protocol::database::DatabaseRequest)>(8);
@@ -428,6 +429,14 @@ pub(crate) async fn handle_socket(
         // receiver could starve `stream.next()` indefinitely, leaving a
         // joined workspace's ListDir request waiting unread on the socket.
         let frame = tokio::select! {
+            Some(result) = subagent_picker_jobs.join_next(), if !subagent_picker_jobs.is_empty() => {
+                if let Ok((request_id, message)) = result {
+                    if send_json(&mut sink, &ServiceServerMessage::AgentReply { request_id, message }).await.is_err() {
+                        return;
+                    }
+                }
+                continue;
+            }
             Some(result) = harness_jobs.join_next(), if !harness_jobs.is_empty() => {
                 if let Ok(reply) = result {
                     if send_json(&mut sink, &reply).await.is_err() { return; }
@@ -1887,8 +1896,48 @@ pub(crate) async fn handle_socket(
                 }
                 ServiceClientMessage::Agent {
                     request_id,
+                    workspace_root,
                     message,
                 } => {
+                    use neoism_protocol::agent::AgentClientMessage;
+                    use crate::agent::subagent_picker;
+                    if matches!(&message, AgentClientMessage::GetSubagentDefault { .. }
+                        | AgentClientMessage::GetSubagentModels { .. }
+                        | AgentClientMessage::SetSubagentDefault { .. })
+                    {
+                        let write = matches!(&message, AgentClientMessage::SetSubagentDefault { .. });
+                        let denied = check_permission(&device, Permission::AgentUse).is_err()
+                            || (write && check_permission(&device, Permission::WriteFiles).is_err());
+                        let error = if denied {
+                            Some(if write { "Changing the subagent default requires AgentUse and WriteFiles" }
+                                else { "Using the subagent picker requires AgentUse" })
+                        } else if subagent_picker_jobs.len() >= 4 {
+                            Some("The subagent picker is busy; retry shortly")
+                        } else { None };
+                        if let Some(error) = error {
+                            let reply = ServiceServerMessage::AgentReply {
+                                request_id, message: subagent_picker::failure(message, error.into()),
+                            };
+                            if send_json(&mut sink, &reply).await.is_err() { return; }
+                            continue;
+                        }
+                        let workspace_id = device.as_ref().and_then(|device| device.workspace_id.clone());
+                        let active_workspace = connection_workspace.active_workspace.clone();
+                        let workspaces = workspace_manager.clone();
+                        let session = agent_session.clone();
+                        subagent_picker_jobs.spawn(async move {
+                            let resolved = tokio::task::spawn_blocking(move || {
+                                subagent_picker_root(&workspaces, workspace_id.as_deref(), active_workspace.as_deref(), workspace_root.as_deref())
+                            }).await;
+                            let reply = match resolved {
+                                Ok(Ok(root)) => subagent_picker::run(session, message, &root).await,
+                                Ok(Err(error)) => subagent_picker::failure(message, error),
+                                Err(_) => subagent_picker::failure(message, "Could not resolve the picker workspace".into()),
+                            };
+                            (request_id, reply)
+                        });
+                        continue;
+                    }
                     // Agent envelopes piggy-back on the `ReadFiles`
                     // permission today — every paired device that can
                     // read files can also drive the agent. Once we
@@ -2273,6 +2322,27 @@ pub(crate) async fn handle_socket(
 
     poll_task.abort();
     tracing::debug!("websocket connection closed");
+}
+
+fn subagent_picker_root(
+    workspaces: &WorkspaceManager,
+    bound_id: Option<&str>,
+    active_id: Option<&str>,
+    requested_root: Option<&str>,
+) -> Result<std::path::PathBuf, String> {
+    let requested = requested_root.filter(|root| !root.trim().is_empty())
+        .map(|root| resolve_request_workspace_root(Some(root))).transpose()?;
+    if let Some(id) = bound_id {
+        let root = agent_workspace_root(workspaces, id)
+            .ok_or("The paired workspace is unavailable")?;
+        if requested.as_ref().is_some_and(|requested| *requested != root) {
+            return Err("The picker workspace is outside this device's scope".into());
+        }
+        Ok(root)
+    } else {
+        requested.or_else(|| active_id.and_then(|id| agent_workspace_root(workspaces, id)))
+            .ok_or_else(|| "Open a workspace or send an explicit workspace_root for the subagent picker".into())
+    }
 }
 
 /// Paired workspace-bound devices must not use a root override (or the

@@ -40,6 +40,8 @@ lines.on('line', line => {
     send({ id: message.id, error: { code: -32000, message: 'native failure' } });
   } else if (message.method === 'die') {
     process.stderr.write('fixture process died\n', () => process.exit(7));
+  } else if (message.method === 'invalid-frame') {
+    process.stdout.write('not-json\n');
   } else if (message.method === 'runtime.close') {
     send({ id: message.id, result: {} });
     lines.close(); process.stdin.destroy();

@@ -16,6 +16,7 @@ pub mod mermaid;
 pub mod wallpaper;
 pub mod orb;
 pub mod palettes;
+pub mod phone_share;
 pub mod rows;
 pub mod scroll;
 pub mod sidebar;

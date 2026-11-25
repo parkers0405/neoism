@@ -864,6 +864,7 @@ pub fn apply_agent_event_to_pane_with_history_kind(
         AgentServerMessage::SessionHistoryEdited { .. } => {}
         // The current-goal panel is owned by the Rune client.
         AgentServerMessage::GoalSnapshot { .. } => {}
+        AgentServerMessage::SubagentModels { .. } | AgentServerMessage::SubagentDefault { .. } => {}
         AgentServerMessage::Pong => {
             // Connection-health probe — no UI mutation needed.
         }
@@ -1477,6 +1478,8 @@ pub fn agent_event_session_id(
         | AgentServerMessage::ProviderCatalog { .. }
         | AgentServerMessage::ConfigDefaults { .. }
         | AgentServerMessage::ConfigDefaultsFailed { .. }
+        | AgentServerMessage::SubagentModels { .. }
+        | AgentServerMessage::SubagentDefault { .. }
         | AgentServerMessage::AgentCatalog { .. }
         | AgentServerMessage::SkillCatalog { .. }
         | AgentServerMessage::McpCatalog { .. }

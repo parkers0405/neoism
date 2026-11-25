@@ -1,6 +1,6 @@
 # winit compatibility patches
 
-`winit-0.30.13` is the crates.io release with two changes, used by the Rune frontend
+`winit-0.30.13` is the crates.io release with local changes, used by the Rune frontend
 (`rune/app/Cargo.toml`, `[patch.crates-io]`).
 
 ## Wayland: an unchanged IME cursor rectangle is not committed again
@@ -30,3 +30,7 @@ all, so those chords could not be heard. With this default the key arrives as th
 Alt held, on every layout. The cost is the one terminals with "Option as Alt" accept: Option no
 longer types accented or special characters inside Neoism. Rune has no setting for it at the
 pinned revision; `WindowExtMacOS::set_option_as_alt` still changes it per window.
+
+## iOS: standard edit menu for Rune text fields
+
+`WindowExtIOS::present_edit_menu` presents `UIEditMenuInteraction` (iOS 16+) on the existing keyboard responder. UIKit supplies the localized standard actions; Rune owns the draft, selection, and edit history. The responder reads plain text from `UIPasteboard` only inside the Paste action and sends it back to Rune's normal paste path. This is not a `UITextInput` implementation: UIKit selection handles, the loupe, and rich pasteboard items are not provided by this bridge.

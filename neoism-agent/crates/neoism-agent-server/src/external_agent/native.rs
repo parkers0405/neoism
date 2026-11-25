@@ -226,7 +226,7 @@ impl NativeSession {
                         session.retired.store(true, Ordering::SeqCst);
                         let operations = session.operations.lock().await.drain().map(|(_, entry)| entry).collect::<Vec<_>>();
                         for entry in operations {
-                            let cancelled = entry.cancellation.swap(true, Ordering::SeqCst);
+                            let cancelled = entry.cancellation.load(Ordering::SeqCst);
                             let _ = entry.projector.finish(if cancelled { "interrupted" } else { "error" }).await;
                         }
                         tracing::debug!(provider=session.runtime.provider_id(), %error, "native provider host closed");
@@ -409,13 +409,12 @@ pub(crate) async fn run_native_prompt(
             }
             result = &mut wait => result,
         };
-        let result = match connection.client.fence().await {
-            Ok(()) => result,
-            Err(error) => Err(error),
-        };
-        if result.is_err() { connection.close().await; }
+        let result = connection.client.settle_turn(result).await;
         let status = if cancellation.load(Ordering::SeqCst) || result.as_ref().is_ok_and(|value| matches!(value["finish"].as_str(), Some("cancelled" | "interrupted"))) { "interrupted" } else if result.is_ok() { "completed" } else { "error" };
-        projector.finish(status).await?;
+        if let Err(error) = projector.finish(status).await {
+            if result.is_ok() { return Err(error); }
+            tracing::warn!(%error, "failed to finalize projection after native turn failure");
+        }
         if let Some(entry) = connection.operations.lock().await.get_mut(&operation) { entry.finished = true; }
         if !projector.has_background_work().await { connection.operations.lock().await.remove(&operation); }
         let result = result?;

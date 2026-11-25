@@ -83,20 +83,7 @@ impl NeoismConfigSourceService {
     }
 
     fn write(path: &Path, document: &Value) -> Result<(), ServiceError> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let temp = path.with_extension("tmp");
-        std::fs::write(
-            &temp,
-            format!(
-                "{}\n",
-                serde_json::to_string_pretty(document)
-                    .map_err(|error| ServiceError::new(error.to_string()))?
-            ),
-        )?;
-        std::fs::rename(temp, path)?;
-        Ok(())
+        neoism_agent_service_api::write_config_document(path, document)
     }
 
     fn migrate_project_config(workspace: &Path) -> Result<(), ServiceError> {
@@ -218,6 +205,7 @@ fn canonicalize_gui_agent(agent: &mut serde_json::Map<String, Value>) {
         ("text-verbosity", "textVerbosity"),
         ("small-model", "smallModel"),
         ("default-agent", "defaultAgent"),
+        ("default-subagent-harness", "defaultSubagentHarness"),
         ("dangerously-skip-permissions", "dangerouslySkipPermissions"),
     ] {
         move_legacy_key(agent, legacy, canonical);

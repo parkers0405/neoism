@@ -19,6 +19,9 @@ pub struct ScrollPos {
     pub max: [f32; 2],
     pub viewport: [f32; 2],
     pub drawn: [f32; 2],
+    /// Whether vertical scrolling is following the bottom, even if the drawn offset is
+    /// temporarily separated from the end by a layout spring.
+    pub following_bottom: bool,
 }
 
 impl El {

@@ -69,10 +69,39 @@ pub fn on_key(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     }
 }
 
+/// A typed '+' includes Shift on most layouts; it is still the zoom-in chord.
+pub(crate) fn zoom_shortcut(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
+    let m = event.mods;
+    if !(m.ctrl || m.cmd || m.logo) || m.alt { return false; }
+    let ch = match &event.key {
+        Key::Command(c) => Some(*c),
+        Key::Text(text) => { let mut chars = text.chars(); chars.next().filter(|_| chars.next().is_none()) }
+        _ => return false,
+    };
+    let base = if cfg!(target_os = "macos") && m.cmd && !m.ctrl { tx.key_base() } else { None };
+    let Some(action) = zoom_action(ch, base) else { return false };
+    app.run_action(action, tx);
+    true
+}
+
+fn zoom_action(logical: Option<char>, cmd_base: Option<char>) -> Option<crate::palette::commands::Action> {
+    use crate::palette::commands::Action;
+    let step = |ch| match ch {
+        Some('=' | '+') => Some(Action::IncreaseFontSize),
+        Some('-') => Some(Action::DecreaseFontSize),
+        _ => None,
+    };
+    if logical == Some('0') { return Some(Action::ResetFontSize); }
+    // AppKit's logical key still includes Shift: ⌘⇧Minus can arrive as '_'. Prefer the
+    // typed symbol, then the active layout's base key, not a US hardware position.
+    step(logical).or_else(|| step(cmd_base))
+}
+
 /// Window shortcuts, shared with text fields through `on_input_key`. App panel commands
 /// use Alt on every platform. Option+arrows retain the app-wide focus ladder, and Option+Shift
 /// arrows reorder the active tab unless the workspace strip has focus.
 pub fn shortcut(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
+    if app.mobile { return zoom_shortcut(app, event, tx); }
     if app.modal.is_some() { return crate::ui::modal::keys(app, event, tx); }
     if app.workflows.is_some() {
         app.workflows_key(event, tx);
@@ -101,21 +130,7 @@ pub fn shortcut(app: &mut App, event: &KeyEvent, tx: &mut Tx) -> bool {
     if app.menu.is_some() && app.menu_key(event) { return true; }
     if app.bound_shortcut(event, tx) { return true; }
     // Keep the app-wide zoom aliases even when the saved font bindings use Super.
-    // A typed '+' includes Shift on most layouts; it is still the zoom-in chord.
-    if (m.ctrl || m.cmd || m.logo) && !m.alt {
-        let key = match &event.key {
-            Key::Command(c) => c.to_string(),
-            Key::Text(text) => text.clone(),
-            _ => String::new(),
-        };
-        let action = match key.as_str() {
-            "=" | "+" => Some(crate::palette::commands::Action::IncreaseFontSize),
-            "-" => Some(crate::palette::commands::Action::DecreaseFontSize),
-            "0" => Some(crate::palette::commands::Action::ResetFontSize),
-            _ => None,
-        };
-        if let Some(action) = action { app.run_action(action, tx); return true; }
-    }
+    if zoom_shortcut(app, event, tx) { return true; }
     let m = event.mods;
     let mac = cfg!(target_os = "macos");
     let alt_only = m.alt && !m.ctrl && !m.shift && !m.logo;
@@ -465,7 +480,9 @@ impl App {
         }
         let overlay = covered || picker_owns_focus || self.block_filter_focused();
         let prompt_changed = self.sync_prompt_focus(self.focus == Focus::Content && !overlay);
-        let want = self.focus == Focus::Content && !overlay && !self.question_prompt() && !matches!(self.active_tab().kind, TabKind::Editor { .. } | TabKind::Image { .. } | TabKind::Database { .. } | TabKind::GitDiff);
+        // On iOS, content focus alone must not summon or reopen the software keyboard.
+        let want = self.focus == Focus::Content && !overlay && !self.question_prompt() && !matches!(self.active_tab().kind, TabKind::Editor { .. } | TabKind::Image { .. } | TabKind::Database { .. } | TabKind::GitDiff)
+            && (!cfg!(target_os = "ios") || self.active_tab().draft.focused);
         let active = self.active;
         let mut changed = prompt_changed | refocused;
         for (index, tab) in self.tabs.iter_mut().enumerate() {
@@ -518,6 +535,16 @@ mod tests {
             assert_eq!(buffer.doc.text_for_disk(), "# Zoom heading\neditable text\n");
             assert!(!buffer.dirty());
         }
+    }
+
+    #[test]
+    fn command_zoom_prefers_the_symbol_then_the_layout_base() {
+        use crate::palette::commands::Action;
+        assert!(matches!(zoom_action(Some('_'), Some('-')), Some(Action::DecreaseFontSize)));
+        assert!(matches!(zoom_action(Some('+'), Some('-')), Some(Action::IncreaseFontSize)));
+        assert!(matches!(zoom_action(Some('0'), None), Some(Action::ResetFontSize)));
+        assert!(zoom_action(Some('_'), None).is_none());
+        assert!(zoom_action(Some(')'), Some('0')).is_none());
     }
 
     #[test]

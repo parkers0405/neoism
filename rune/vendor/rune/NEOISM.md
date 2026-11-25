@@ -4,11 +4,15 @@ These packages are imported unchanged from `anomalyco/rune` at `e970367bd7d2a51e
 
 Local changes separate touch panning from mouse selection/dragging and cancel read-only selection tracking when a finger starts panning. File-tree rows opt into hold-to-drag; editor text opts into touch scrolling. Ordinary sliders and scrollbars retain their existing touch-drag behavior. Regression tests live in `rune/app/src/touch_tests.rs`.
 
+The phone composer opts into touch word selection and the UIKit edit menu. Double tap selects the word; a stationary hold selects on lift, and holding before dragging extends by word. A short drag still pans when a scroller is available. Selection and edits stay in `TextEdit`; iOS presents Cut, Copy, Paste, and Select All as available. The bridge is in `runtime/input/touch/edit_menu.rs` and the vendored winit iOS view.
+
 The macOS host also needs actual touch events. `vendor/winit-compat/winit-0.30.13/MACOS-DIRECT-TOUCH.md` documents the AppKit bridge, which admits direct-screen contacts without intercepting indirect trackpad touches. A mouse-only display driver cannot be distinguished from a real mouse by this layer.
 
 When updating Rune, carry or upstream these patches rather than modifying the Cargo checkout. The app patches these five Git-source packages to local paths; `rune-kit` and its other dependencies retain their original Git pin.
 
 Virtual-only scroll remounts accept live text without rebuilding the view or staying rows. Before the first content-changing live sample, the runtime retains the authored text spec for intrinsic measurement; retained nodes therefore never measure the sampled label, even after a layout-cache miss. Paint layout uses the same uncached live-run path as normal sampling, including when an unchanged source keeps its seen token. Subscription rebuilding and end-of-frame sampling remain unchanged. Focused regressions for stable and updated text, placeholder measurement, glyph geometry/clipping, entering/staying rows and later live wakes run from the repository root with `rune/app/build.sh test --manifest-path ../vendor/rune/Cargo.toml -p rune --test live_remount`. This public-runtime target does not require the omitted upstream shader and font fixtures that currently prevent compiling the vendored unit-test target.
+
+`ScrollPos::following_bottom` reports the scroller's vertical pin state independently of its animated offset. Neoism uses it to keep the agent status pinned while a folded transcript changes height.
 
 The bundled `.metallib` and `.dxbc` files are upstream GPU shader libraries embedded with `include_bytes!`, not local app executables or stray build outputs. Font files and binary rendering-test fixtures are also required upstream assets. Keep these versioned for reproducible fresh checkouts; root `.gitattributes` identifies the dependency as vendored and the shader/data blobs as binary. Local app builds and packaged releases belong in the already-ignored `target/` and `dist/` directories or external build caches.
 

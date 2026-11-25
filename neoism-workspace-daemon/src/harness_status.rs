@@ -3,9 +3,9 @@ use std::{path::PathBuf, process::Stdio, time::Duration};
 use tokio::{io::AsyncReadExt, process::Command};
 
 pub(crate) async fn probe() -> Vec<HarnessStatus> {
-    let (claude, codex) = tokio::join!(status("claude", "claude"), status("codex", "codex"));
-    let mut rows = vec![claude, codex];
-    for (id, executable) in [("antigravity", "agy"), ("cursor", "cursor-agent"), ("opencode", "opencode"),
+    let (claude, codex, antigravity) = tokio::join!(status("claude", "claude"), status("codex", "codex"), status("antigravity", "agy"));
+    let mut rows = vec![claude, codex, antigravity];
+    for (id, executable) in [("cursor", "cursor-agent"), ("opencode", "opencode"),
         ("grok", "grok"), ("kiro", "kiro-cli"), ("fx", "fx")] {
         rows.push(HarnessStatus { id: id.into(), installed: executable_on_path(executable).is_some(), auth: HarnessAuth::Unknown });
     }
@@ -40,7 +40,11 @@ async fn status(id: &str, name: &str) -> HarnessStatus {
 }
 
 async fn auth_status(id: &str, program: &std::path::Path) -> Option<HarnessAuth> {
-    let args: &[&str] = if id == "claude" { &["auth", "status", "--json"] } else { &["login", "status"] };
+    let args: &[&str] = match id {
+        "claude" => &["auth", "status", "--json"],
+        "antigravity" => &["models"],
+        _ => &["login", "status"],
+    };
     let mut command = Command::new(program);
     command.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     // Avoid project-local configuration and hooks, but keep the daemon account's auth environment.
@@ -56,6 +60,20 @@ async fn auth_status(id: &str, program: &std::path::Path) -> Option<HarnessAuth>
 }
 
 fn parse_auth_status(id: &str, exit: Option<i32>, stdout: &[u8], stderr: &[u8]) -> HarnessAuth {
+    if id == "antigravity" {
+        // `agy models` does not prompt. Its catalog requires an authenticated account.
+        if exit == Some(0) && String::from_utf8_lossy(stdout).lines().any(|line| {
+            line.split_once('\t').is_some_and(|(model, label)| !model.trim().is_empty() && !label.trim().is_empty())
+        }) {
+            return HarnessAuth::SignedIn;
+        }
+        if exit == Some(1) && String::from_utf8_lossy(stderr).lines().any(|line| {
+            line.trim().starts_with("Error: Please sign in to view available models.")
+        }) {
+            return HarnessAuth::SignedOut;
+        }
+        return HarnessAuth::Unknown;
+    }
     if id == "claude" {
         return match (exit, serde_json::from_slice::<serde_json::Value>(stdout).ok().and_then(|v| v["loggedIn"].as_bool())) {
             (Some(0), Some(true)) => HarnessAuth::SignedIn,
@@ -86,5 +104,13 @@ mod tests {
         assert_eq!(parse_auth_status("codex", Some(0), b"", b"Logged in using ChatGPT\n"), HarnessAuth::SignedIn);
         assert_eq!(parse_auth_status("codex", Some(1), b"", b"Not logged in\n"), HarnessAuth::SignedOut);
         assert_eq!(parse_auth_status("codex", Some(1), b"", b"Auth status unavailable"), HarnessAuth::Unknown);
+    }
+
+    #[test]
+    fn antigravity_harness_status_distinguishes_login_from_catalog_failure() {
+        assert_eq!(parse_auth_status("antigravity", Some(0), b"gemini-example\tGemini Example\n", b"Fetching available models..."), HarnessAuth::SignedIn);
+        assert_eq!(parse_auth_status("antigravity", Some(1), b"", b"Error: Please sign in to view available models. Launch the CLI without arguments to sign in.\n"), HarnessAuth::SignedOut);
+        assert_eq!(parse_auth_status("antigravity", Some(1), b"", b"Error: connection refused"), HarnessAuth::Unknown);
+        assert_eq!(parse_auth_status("antigravity", Some(0), b"", b""), HarnessAuth::Unknown);
     }
 }

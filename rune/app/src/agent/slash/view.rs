@@ -77,7 +77,11 @@ fn layout(picker: &Picker, width: f32, s: f32) -> Layout {
 }
 
 /// The picker card, placed in window coordinates over the composer card.
-pub fn picker_card(app: &App) -> El {
+pub(crate) fn composer_transition(scale: f32) -> rune::Transition {
+    rune::Transition::scale(0.94).combined(rune::Transition::offset(0.0, 14.0 * scale))
+}
+
+pub fn picker_card(app: &App, safe_area: [f32; 4]) -> El {
     let (Some(picker), Some(&composer)) = (app.composer.picker.as_ref(), app.rects.get(&format!("composer-card:{}", app.active_tab().id))) else { return el() };
     let p = app.pal;
     let s = app.ty.scale();
@@ -95,8 +99,8 @@ pub fn picker_card(app: &App) -> El {
     if picker.kind == Kind::Tasks { return super::tasks::view(app, anchored); }
     if picker.kind == Kind::Context { return super::context::view(app, anchored); }
     if picker.kind == Kind::Goals { return super::goals::view(app, anchored); }
-    if picker.kind == Kind::Model && picker.activity.is_none() { return model_card(app, picker, anchored); }
-    if picker.kind == Kind::AgentConnections { return super::agent_connections::view(app, picker, anchored); }
+    if picker.kind == Kind::Model && picker.activity.is_none() { return model_card(app, picker, anchored, safe_area); }
+    if matches!(picker.kind, Kind::AgentConnections | Kind::SubagentModels) { return super::agent_connections::view(app, picker, anchored); }
     // As many rows as fit between the agent pane's top (8 pt under its tab row, never over the
     // chrome) and 6 pt above the composer.
     let top = if modal { 24.0 } else { app.rects.get(&format!("agent-area:{}", app.active_tab().id)).map_or(0.0, |r| r[1]) + 8.0 * s };
@@ -111,10 +115,10 @@ pub fn picker_card(app: &App) -> El {
     let mut card = el().key("prompt-picker").w(cw).h(height).fill(panel).radius(RADIUS * s).border(1.0, rgb(p.fg).alpha(0.1))
         .shadow(8.0 * s, 28.0 * s, Color::BLACK.alpha(0.45))
         // The menu grows up out of the composer when it first appears, and shrinks back.
-        .transition(rune::Transition::scale(0.94).combined(rune::Transition::offset(0.0, 14.0 * s)))
+        .transition(composer_transition(s))
         .clip_rounded(RADIUS * s)
         .on_press(|_: &mut App| {})
-        .on_drag(drag_rows(ROW_H * s))
+        .preserve_focus_on_press(app.mobile).on_drag(drag_rows(ROW_H * s))
         .on_wheel(move |a: &mut App, e: WheelEvent, tx: &mut Tx| {
             // Notches step a row each; trackpad distance adds up to whole rows. Either way the
             // window slides on the list spring.
@@ -149,7 +153,7 @@ pub fn picker_card(app: &App) -> El {
         header = header.child(el().key("picker-expand").w(22.0 * s).h(22.0 * s).radius(6.0 * s).center().hover(rgb(p.fg).alpha(0.1))
             .absolute(cw - 62.0 * s, 5.0 * s)
             .child(text(if modal { "\u{f0615}" } else { "\u{f0616}" }).font(TextStyle::new(13.0 * s, 400.0).family(NERD)).color(rgb(p.dim)))
-            .on_press(|a: &mut App| a.composer.card_modal = !a.composer.card_modal));
+            .on_press_tx(App::toggle_picker_modal));
     }
     if let Some(a) = &picker.activity {
         let x = if a.busy { 32.0 } else { 14.0 } * s;
@@ -280,6 +284,9 @@ fn drag_rows(row_h: f32) -> impl Fn(&mut App, &mut rune::Drag, &mut Tx) + 'stati
         let Some(picker) = a.composer.picker.as_mut() else { return };
         if d.phase == rune::Phase::Down { d.data = 0.0; picker.dragged = false; return; }
         if d.dy.abs() > 4.0 { picker.dragged = true; }
+        if a.mobile && d.phase == rune::Phase::Up && !d.cancelled() && picker.dragged {
+            tx.blur();
+        }
         let steps = ((d.dy - d.data) / row_h.max(1.0)).trunc();
         if steps == 0.0 { return; }
         d.data += steps * row_h;
@@ -299,26 +306,39 @@ fn swallow_drag(_: &mut App, _: &mut rune::Drag, _: &mut Tx) {}
 /// The model card: providers down the left as their marks (an add button under them opens the
 /// connect flow), a Favourites tab above them, a search field over the shown provider's models
 /// (each with a star), and the thinking levels in a column on the right.
-fn model_card(app: &App, picker: &Picker, composer: [f32; 4]) -> El {
-    const STRIP: f32 = 56.0;
+fn model_card(app: &App, picker: &Picker, composer: [f32; 4], [safe_top, safe_right, safe_bottom, safe_left]: [f32; 4]) -> El {
+    const STRIP: f32 = super::subagent_models::RAIL_WIDTH;
     const SEARCH_H: f32 = 46.0;
     const SIDE: f32 = 190.0;
     let (p, s) = (app.pal, app.ty.scale());
     // Opened out, the card is a modal in the middle of the window with room for more models.
     let modal = app.composer.card_modal;
+    let footer_h = if app.mobile { (58.0 * s).max(50.0) } else { 0.0 };
     let [cx, cy, cw, _] = if modal {
-        let w = (820.0 * s).min((app.window[0] - 48.0).max(1.0));
-        [(app.window[0] - w) / 2.0, app.window[1], w, 0.0]
+        let width = app.window[0] - safe_left - safe_right;
+        let w = (820.0 * s).min((width - 48.0).max(1.0));
+        [safe_left + (width - w) / 2.0, app.window[1] - safe_bottom, w, 0.0]
     } else { composer };
-    let top = if modal { 24.0 } else { app.rects.get(&format!("agent-area:{}", app.active_tab().id)).map_or(0.0, |r| r[1]) + 8.0 * s };
-    let fit = ((cy - top - 6.0 * s - SEARCH_H * s) / (MODEL_H * s)).floor().max(2.0) as usize;
+    let top = if modal { safe_top + 24.0 } else { app.rects.get(&format!("agent-area:{}", app.active_tab().id)).map_or(safe_top, |r| r[1].max(safe_top)) + 8.0 * s };
+    let usable_bottom = app.window[1] - safe_bottom - 12.0;
+    let anchored_bottom = (cy - 6.0 * s).min(usable_bottom);
+    // A centered New Chat composer can leave almost no room above it when the keyboard is up.
+    let bottom = if app.mobile && !modal && anchored_bottom - top < SEARCH_H * s + footer_h + 3.0 * MODEL_H * s {
+        usable_bottom
+    } else { anchored_bottom };
+    let list_space = bottom - top - SEARCH_H * s - footer_h;
+    let fit = ((if app.mobile { list_space - 8.0 * s } else { cy - top - 6.0 * s - SEARCH_H * s }) / (MODEL_H * s)).floor().max(2.0) as usize;
     let visible = fit.min(if modal { 11 } else { 7 });
-    picker.limit.set(visible);
     let list_h = visible as f32 * MODEL_H * s + 8.0 * s;
+    let list_h = if app.mobile { list_h.min(list_space.max(0.0)) } else { list_h };
+    picker.limit.set(if app.mobile { ((list_h - 8.0 * s) / (MODEL_H * s)).floor().max(1.0) as usize } else { visible });
     let body_h = SEARCH_H * s + list_h;
-    let height = body_h;
+    let height = body_h + footer_h;
     let favorites = app.favorite_models();
-    let y = if modal { ((app.window[1] - height) / 2.0).max(top) } else { (cy - height - 6.0 * s).max(top) };
+    let y = if app.mobile && modal { (top + (bottom - top - height) / 2.0).max(top) }
+        else if modal { ((app.window[1] - height) / 2.0).max(top) }
+        else if app.mobile { (bottom - height).max(top) }
+        else { (cy - height - 6.0 * s).max(top) };
     let glyph = |g: &'static str, size: f32, color: u32| text(g).font(TextStyle::new(size * s, 400.0).family(NERD)).color(rgb(color));
 
     // Providers: a mark each, the shown one filled with an accent bar; add at the foot.
@@ -348,25 +368,32 @@ fn model_card(app: &App, picker: &Picker, composer: [f32; 4]) -> El {
     let strip = rune::col().key("model-providers").w(STRIP * s).h(body_h).py(8.0 * s).gap(4.0 * s).items_center()
         .border_sides([0.0, 1.0, 0.0, 0.0], rgb(p.fg).alpha(0.08))
         .child(rune::col().key("model-provider-scroll").w_full().grow(1.0).min_h(0.0)
-            .scroll(rune::ScrollSpec { stick_bottom: false }).child(strip))
-        .child(el().key("model-connect").w(38.0 * s).h(38.0 * s).radius(10.0 * s).center()
-        .border(1.0, rgb(p.fg).alpha(0.12)).hover(rgb(p.fg).alpha(0.1))
-        .child(glyph("\u{f0415}", 16.0, p.dim))
-        .on_press(|a: &mut App| a.connect_from_model_card()));
+            .scroll(rune::ScrollSpec { stick_bottom: false }).blur_after_touch_scroll().child(strip))
+        .child(super::subagent_models::rail_actions(app, false));
 
-    let side_w = (SIDE * s).min(cw * 0.34);
-    let list_w = cw - STRIP * s - side_w;
-    let search = el().key("picker-header").w(list_w).h(SEARCH_H * s).instant_changes()
+    let side_w = if app.mobile { 0.0 } else { (SIDE * s).min(cw * 0.34) };
+    let list_w = (cw - STRIP * s - side_w).max(1.0);
+    let close_w = if app.mobile { 32.0 * s } else { 0.0 };
+    let expand_w = close_w;
+    let search = el().key("picker-header").w(list_w).h(SEARCH_H * s).min_h(SEARCH_H * s).instant_changes()
         .child(glyph(crate::ui::theme::glyph::SEARCH_LINE, 14.0, p.muted).absolute(16.0 * s, 15.0 * s))
-        .child(query_row(app, picker, list_w - 60.0 * s).absolute(40.0 * s, 13.0 * s))
+        .child(query_row(app, picker, (list_w - 60.0 * s - close_w - expand_w).max(1.0)).absolute(40.0 * s, 13.0 * s))
+        .child_if(app.mobile, || el().key("model-card-expand").role("button").label(if modal { "Collapse model selector" } else { "Expand model selector" })
+            .w(expand_w).h(SEARCH_H * s).center().absolute(list_w - close_w - expand_w, 0.0)
+            .child(glyph(if modal { "\u{f0615}" } else { "\u{f0616}" }, 14.0, p.dim))
+            .on_press_tx(App::toggle_picker_modal))
+        .child_if(app.mobile, || el().key("model-card-close").label("Close model selector")
+            .w(close_w).h(SEARCH_H * s).center().absolute(list_w - close_w, 0.0)
+            .child(glyph("\u{f0156}", 15.0, p.dim)).on_press(|a: &mut App| a.close_prompt_picker()))
         .child(el().w(list_w - 28.0 * s).h(1.5 * s).fill(rgb(p.blue).alpha(0.75)).absolute(14.0 * s, SEARCH_H * s - 2.0 * s));
 
     // The provider's models, or every match while searching.
     let scroll_key = picker.model_scroll_key();
-    let initial_top = picker.top.min(picker.rows().len().saturating_sub(visible));
+    let initial_top = picker.top.min(picker.rows().len().saturating_sub(picker.limit.get()));
     let mount_key = scroll_key.clone();
     let mut list = rune::col().key(scroll_key).w(list_w).h(list_h).transition(rune::Transition::none()).motion(rune::Spring::NONE)
         .scroll(rune::ScrollSpec { stick_bottom: false })
+        .blur_after_touch_scroll()
         .on_layout_tx(move |a: &mut App, _, tx: &mut Tx| {
             tx.live_only();
             let Some(picker) = &mut a.composer.picker else { return };
@@ -393,10 +420,36 @@ fn model_card(app: &App, picker: &Picker, composer: [f32; 4]) -> El {
             // The corner arrows: open the card out into a modal, or fold it back over the composer.
             .child(el().key("model-card-expand").w(24.0 * s).h(24.0 * s).radius(6.0 * s).center().hover(rgb(p.fg).alpha(0.1))
                 .child(glyph(if modal { "\u{f0615}" } else { "\u{f0616}" }, 14.0, p.dim))
-                .on_press(|a: &mut App| a.composer.card_modal = !a.composer.card_modal))
+                .on_press_tx(App::toggle_picker_modal))
             .child(el().w(22.0 * s).h(22.0 * s).radius(6.0 * s).center().hover(rgb(p.red).alpha(0.15)).child(text("\u{f0156}").font(rune::tok::TextStyle::new(14.0 * s, 400.0).family(crate::ui::theme::NERD)).color(rgb(p.red))).key("model-card-close").on_press(|a: &mut App| a.close_prompt_picker())))
         .child(el().h(1.0).mx(8.0 * s).mb(6.0 * s).fill(rgb(p.fg).alpha(0.08)));
     let mut options = rune::col().w_full();
+    let footer = app.mobile.then(|| {
+        let selected = levels.iter().position(|level| level.current).unwrap_or(0);
+        let label = levels.get(selected).filter(|_| levels.len() > 1).map(|level| thinking_label(&level.title))
+            .unwrap_or_else(|| "Unavailable".into());
+        let mut track = rune::row().key("model-reasoning-slider").label("Reasoning level").w_full().grow(1.0).center_y().gap(4.0);
+        if levels.len() > 1 {
+            for index in 0..levels.len() {
+                track = track.child(el().grow(1.0).h(4.0).radius(2.0)
+                    .fill(if index <= selected { rgb(p.blue) } else { rgb(p.fg).alpha(0.12) }));
+            }
+            let values: Vec<_> = levels.iter().map(|level| level.value.clone()).collect();
+            track = track.cursor(rune::Cursor::Pointer).on_drag(move |a: &mut App, d: &mut rune::Drag, tx: &mut Tx| {
+                let index = ((d.x / d.w.max(1.0)).clamp(0.0, 1.0) * (values.len() - 1) as f32).round() as usize;
+                if a.composer.selection.thinking != values[index] {
+                    a.set_thinking(values[index].clone());
+                    tx.instant();
+                }
+            });
+        }
+        rune::col().key("model-reasoning-bar").w(cw).h(footer_h).px(14.0 * s).pt(8.0 * s)
+            .border_sides([1.0, 0.0, 0.0, 0.0], rgb(p.fg).alpha(0.08))
+            .child(rune::row().w_full().center_y()
+                .child(text(if model.to_ascii_lowercase().contains("claude") { "Thinking" } else { "Reasoning" }).font(sans(12.0 * s, 550.0)).color(rgb(p.dim)).grow(1.0))
+                .child(text(label).font(sans(12.0 * s, 550.0)).color(rgb(p.fg))))
+            .child(track)
+    });
     if model.is_empty() {
         options = options.child(text("Pick a model first").font(sans(12.5 * s, 400.0)).color(rgb(p.muted)).mx(8.0 * s).mt(8.0 * s));
     } else if levels.len() < 2 {
@@ -404,11 +457,7 @@ fn model_card(app: &App, picker: &Picker, composer: [f32; 4]) -> El {
     } else {
         for level in levels {
             let value = level.value.clone();
-            let name = match level.title.as_str() { "xhigh" => "Extra High".to_owned(), "none" | "default" => "Default".to_owned(), title => {
-                let mut name = title.to_owned();
-                if let Some(first) = name.get_mut(0..1) { first.make_ascii_uppercase(); }
-                name
-            } };
+            let name = thinking_label(&level.title);
             options = options.child(rune::row().key(format!("think:{}", level.title)).h(MODEL_H * s - 4.0 * s).px(10.0 * s).radius(8.0 * s).center_y()
                 .hover(rgb(p.fg).alpha(0.07))
                 .child(text(name).font(sans(14.0 * s, if level.current { 500.0 } else { 400.0 })).color(rgb(if level.current { p.fg } else { p.dim })).grow(1.0))
@@ -426,12 +475,26 @@ fn model_card(app: &App, picker: &Picker, composer: [f32; 4]) -> El {
         // over the other columns from reaching the conversation behind it.
         .on_drag(swallow_drag)
         .on_wheel(|_: &mut App, _, tx: &mut Tx| { tx.live_only(); true })
-        .child(rune::row().w(cw).h(body_h).child(strip).child(rune::col().w(list_w).h(body_h).child(search).child(list)).child(side));
+        .child(rune::row().w(cw).h(body_h).child(strip).child(rune::col().w(list_w).h(body_h).child(search).child(list))
+            .child_if(!app.mobile, || side))
+        .children(footer);
     let scrim = el().key("prompt-picker-scrim").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
         .fill(if modal { Color::BLACK.alpha(0.4) } else { Color::TRANSPARENT })
         .on_drag(swallow_drag)
         .on_press(|a: &mut App| a.dismiss_prompt_picker());
     el().key("prompt-picker-layer").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).child(scrim).child(card.absolute(cx, y))
+}
+
+fn thinking_label(title: &str) -> String {
+    match title {
+        "xhigh" => "Extra High".into(),
+        "none" | "default" => "Default".into(),
+        title => {
+            let mut name = title.to_owned();
+            if let Some(first) = name.get_mut(0..1) { first.make_ascii_uppercase(); }
+            name
+        }
+    }
 }
 
 pub(super) fn model_mark(app: &App, provider: &str, name: &str, size: f32) -> El {
@@ -453,10 +516,14 @@ fn model_row(app: &App, index: usize, width: f32, favorites: &[String]) -> El {
     let glyph = |g: &'static str, size: f32, color: u32| text(g).font(TextStyle::new(size * s, 400.0).family(NERD)).color(rgb(color));
     let selected = index == picker.selected;
     let provider = row.value.split_once('/').map(|(provider, _)| provider).unwrap_or_default();
+    // Leave the title room up to the trailing controls, not a fixed desktop-sized gutter.
+    let title_right = if app.mobile { if row.current { 72.0 } else { 48.0 } } else { 146.0 };
     let mut item = item.child_if(selected, || el().key("picker-highlight").w(width - 16.0 * s).h((MODEL_H - 4.0) * s)
         .radius(8.0 * s).fill(rgb(p.fg).alpha(0.07)).absolute(8.0 * s, 2.0 * s))
         .child(model_mark(app, provider, &row.section, 16.0).absolute(18.0 * s, (MODEL_H - 16.0) * 0.5 * s))
-        .child(text(row.title.clone()).font(sans(14.0 * s, 500.0)).color(rgb(p.fg)).truncate().max_w((width - 190.0 * s).max(60.0)).absolute(44.0 * s, 10.0 * s));
+        .child(text(row.title.clone()).font(sans(14.0 * s, 500.0)).color(rgb(p.fg)).truncate()
+            .max_w(if app.mobile { (width - (44.0 + title_right) * s).max(1.0) } else { (width - 190.0 * s).max(60.0) })
+            .absolute(44.0 * s, 10.0 * s));
     if row.current {
         item = item.child(glyph(crate::ui::theme::glyph::CHECK, 12.0, p.dim).absolute(width - 66.0 * s, 13.0 * s));
     }
@@ -500,10 +567,12 @@ pub(super) fn query_row(app: &App, picker: &Picker, width: f32) -> El {
         .on_edit(|a: &mut App| &mut a.composer.picker.as_mut().expect("picker open").query)
         .on_input_change(|a: &mut App, _: &mut Tx| {
             if let Some(picker) = a.composer.picker.as_mut() { let q = picker.query.text.clone(); picker.set_query(&q); }
+            a.sync_subagent_models();
             a.directory_query_changed();
         })
         .on_input_key(|a: &mut App, e: &rune::KeyEvent, tx: &mut Tx| a.picker_key(e, tx))
         .on_submit(|a: &mut App, tx: &mut Tx| a.accept_picker_row(None, tx));
+    if app.mobile && picker.kind == Kind::Model { input = input.single_line(); }
     if picker.kind == Kind::ConnectSecret { input = input.secure(); }
     input
 }

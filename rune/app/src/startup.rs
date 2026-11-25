@@ -127,7 +127,7 @@ pub fn daemon_executable() -> Option<PathBuf> {
     let beside = std::env::current_exe().ok().and_then(|p| p.canonicalize().ok()).and_then(|p| p.parent().map(|d| d.join(&name)));
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let built = ["target/activation", "target/release", "target/debug", "neoism-frontend/gpuix/artifacts"].map(|dir| repo.join(dir).join(&name));
-    beside.into_iter().chain(built).find(|p| p.exists())
+    beside.into_iter().chain(built).find(|p| p.is_file())
 }
 
 /// Where the local daemon's output goes (`$XDG_STATE_HOME/neoism/daemon.log`).

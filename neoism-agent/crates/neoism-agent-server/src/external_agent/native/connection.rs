@@ -87,13 +87,18 @@ impl NativeClient {
         let read_pending = pending.clone();
         let read_events = events.clone();
         let read_lifetime = Arc::downgrade(&lifetime);
-        tokio::spawn(async move {
+        let read = tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if line.len() > 16 * 1024 * 1024 { break; }
+            let problem = loop {
+                let line = match lines.next_line().await {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break None,
+                    Err(error) => break Some(format!("could not read native host output: {error}")),
+                };
+                if line.len() > 16 * 1024 * 1024 { break Some("native host output exceeded the frame limit".into()); }
                 let value: Value = match serde_json::from_str(&line) {
                     Ok(value) => value,
-                    Err(_) => break,
+                    Err(error) => break Some(format!("invalid JSON from native host at line {}, column {}", error.line(), error.column())),
                 };
                 if let Some(method) = value.get("method").and_then(Value::as_str) {
                     let params = value.get("params").cloned().unwrap_or(Value::Null);
@@ -103,7 +108,7 @@ impl NativeClient {
                     } else if method == "runtime.event" {
                         WireEvent::Event { operation, event: params.get("event").cloned().unwrap_or(Value::Null) }
                     } else { continue; };
-                    if read_events.send(event).await.is_err() { break; }
+                    if read_events.send(event).await.is_err() { break Some("native event receiver closed".into()); }
                 } else if let Some(id) = value.get("id").and_then(Value::as_u64) {
                     if let Some(sender) = read_pending.lock().await.remove(&id) {
                         let result = if let Some(error) = value.get("error") {
@@ -112,12 +117,13 @@ impl NativeClient {
                         let _ = sender.send(result);
                     }
                 }
-            }
+            };
             if let Some(lifetime) = read_lifetime.upgrade() { lifetime.stop(); }
+            problem
         });
         let tail = Arc::new(StdMutex::new(VecDeque::<String>::new()));
         let stderr_tail = tail.clone();
-        tokio::spawn(async move {
+        let read_stderr = tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 if let Ok(mut tail) = stderr_tail.lock() {
@@ -130,15 +136,30 @@ impl NativeClient {
             let status = tokio::select! {
                 result = child.wait() => result.ok(),
                 _ = stop => {
-                    crate::tool::process::kill_process_group(pid);
-                    let _ = child.start_kill();
-                    child.wait().await.ok()
+                    if let Ok(Some(status)) = child.try_wait() { Some(status) } else {
+                        crate::tool::process::kill_process_group(pid);
+                        let _ = child.start_kill();
+                        child.wait().await.ok()
+                    }
                 }
             };
             crate::tool::process::kill_process_group(pid);
+            // A process can exit with its final RPC reply still buffered in stdout.
+            let mut read = read;
+            let mut read_stderr = read_stderr;
+            let (output, stderr) = tokio::join!(
+                tokio::time::timeout(Duration::from_secs(2), &mut read),
+                tokio::time::timeout(Duration::from_secs(2), &mut read_stderr),
+            );
+            if output.is_err() { read.abort(); }
+            if stderr.is_err() { read_stderr.abort(); }
             closed.store(true, Ordering::SeqCst);
             let diagnostic = tail.lock().map(|tail| tail.iter().cloned().collect::<Vec<_>>().join("\n")).unwrap_or_default();
-            let error = format!("native agent host exited ({status:?}){separator}{diagnostic}", separator = if diagnostic.is_empty() { "" } else { ":\n" });
+            let problem = output.ok().and_then(Result::ok).flatten();
+            let status = status.map_or_else(|| "unknown exit status".into(), |status| status.to_string());
+            let mut error = format!("native agent host exited ({status})");
+            if let Some(problem) = problem { error.push_str(&format!(": {problem}")); }
+            if !diagnostic.is_empty() { error.push_str(&format!("\n{diagnostic}")); }
             for (_, sender) in pending.lock().await.drain() { let _ = sender.send(Err(error.clone())); }
             done.notify_waiters();
             let _ = events.send(WireEvent::Closed(error)).await;
@@ -190,6 +211,19 @@ impl NativeClient {
         tokio::time::timeout(Duration::from_secs(10), receiver).await
             .map_err(|_| "native event projection timed out".to_string())?
             .map_err(|_| "native event projection closed".to_string())
+    }
+
+    pub(super) async fn settle_turn(&self, result: Result<Value, String>) -> Result<Value, String> {
+        // Flush projected output even after a provider error, but never replace that error
+        // with a secondary failure caused by the same disconnect.
+        let projection = self.fence().await;
+        let value = result?;
+        match value["finish"].as_str() {
+            Some("completed" | "stop") => projection.map(|()| value),
+            Some("interrupted" | "cancelled") => Ok(value),
+            Some(other) => Err(format!("Native provider did not confirm turn completion (status: {other})")),
+            None => Err("Native provider did not return a terminal turn status".into()),
+        }
     }
 
     pub(super) async fn close(&self) {
@@ -250,9 +284,33 @@ mod tests {
         let (client, mut events) = fixture();
         let error = client.call("die", json!({}), Duration::from_secs(5)).await.unwrap_err();
         assert!(error.contains("native agent host exited"));
+        assert!(error.contains("fixture process died"));
         assert!(client.is_closed());
         assert!(client.reserve().await.is_err());
         assert!(matches!(events.recv().await, Some(WireEvent::Closed(_))));
+        drop(events);
+        assert_eq!(client.settle_turn(Err(error.clone())).await.unwrap_err(), error);
+        assert_eq!(client.settle_turn(Ok(json!({"finish":"completed"}))).await.unwrap_err(), "native event stream closed");
         client.close().await;
+    }
+
+    #[tokio::test]
+    async fn projected_reply_requires_an_explicit_success_or_interruption_status() {
+        let (client, mut events) = fixture();
+        let pump = tokio::spawn(async move {
+            while let Some(WireEvent::Barrier(sender)) = events.recv().await { let _ = sender.send(()); }
+        });
+        assert!(client.settle_turn(Ok(json!({"finish":"failed"}))).await.unwrap_err().contains("status: failed"));
+        assert!(client.settle_turn(Ok(json!({}))).await.unwrap_err().contains("terminal turn status"));
+        assert!(client.settle_turn(Ok(json!({"finish":"completed"}))).await.is_ok());
+        client.close().await;
+        pump.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn malformed_stdout_preserves_the_protocol_error() {
+        let (client, _events) = fixture();
+        let error = client.call("invalid-frame", json!({}), Duration::from_secs(5)).await.unwrap_err();
+        assert!(error.contains("invalid JSON from native host"), "{error}");
     }
 }

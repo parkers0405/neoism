@@ -1,7 +1,7 @@
 //! The app's icon from image bytes (the Dock's on macOS, its windows' and the taskbar's on
-//! Windows), so an app needs no platform glue of its own.
+//! Windows, the window's on X11), so an app needs no platform glue of its own.
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use std::sync::Mutex;
 #[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,9 +19,11 @@ static LAUNCHED: AtomicBool = AtomicBool::new(false);
 /// - **macOS:** `bytes` is an `.icns`, PNG, TIFF or anything else `NSImage` reads, shown as the
 ///   Dock and app-switcher icon. Before `run`, Rune sets it once the app finishes launching; a
 ///   later call replaces it. (`AppHandle::set_dock_icon` shows or hides the Dock icon instead.)
-/// - **Windows:** `bytes` is a PNG or JPEG, best square and 256 px or more. Each window opened
+/// - **Windows:** `bytes` is an ICO, PNG or JPEG, best square and 256 px or more. Each window opened
 ///   after the call shows it in its title bar, on the taskbar and in Alt+Tab, so call it before
 ///   `run`.
+/// - **Linux/X11:** `bytes` is a PNG or JPEG used for new windows. Wayland compositors use
+///   the package's desktop entry and theme icon instead.
 /// - Does nothing elsewhere.
 pub fn set_app_icon(bytes: impl Into<Vec<u8>>) -> Result<(), String> {
     #[cfg(target_os = "macos")]
@@ -37,9 +39,29 @@ pub fn set_app_icon(bytes: impl Into<Vec<u8>>) -> Result<(), String> {
         let size = |px: u32| image::imageops::resize(&image, px, px, image::imageops::FilterType::Lanczos3).into_raw();
         *WINDOWS.lock().unwrap_or_else(|e| e.into_inner()) = Some(WindowsIcon { small: size(SMALL), big: size(BIG) });
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "linux")]
+    {
+        let image = image::load_from_memory(&bytes.into()).map_err(|e| format!("set_app_icon: {e}"))?.into_rgba8();
+        let (width, height) = image.dimensions();
+        let icon = winit::window::Icon::from_rgba(image.into_raw(), width, height)
+            .map_err(|e| format!("set_app_icon: {e}"))?;
+        *LINUX.lock().unwrap_or_else(|e| e.into_inner()) = Some(icon);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     let _ = bytes;
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+static LINUX: Mutex<Option<winit::window::Icon>> = Mutex::new(None);
+
+#[cfg(target_os = "linux")]
+pub(crate) fn with_icon(attrs: winit::window::WindowAttributes) -> winit::window::WindowAttributes {
+    let icon = LINUX.lock().unwrap_or_else(|e| e.into_inner());
+    match icon.as_ref() {
+        Some(icon) => attrs.with_window_icon(Some(icon.clone())),
+        None => attrs,
+    }
 }
 
 /// Windows: the icon's pixels at the two sizes a window shows, so each new window makes its own

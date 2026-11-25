@@ -296,6 +296,23 @@ test('native auth and result errors remain explicit; no provider fallback or log
   assert.equal(h2.events.at(-1).type, 'usage.updated');
 });
 
+test('the next turn resumes after an expired native login without replaying the failed prompt', async t => {
+  const h = harness(); t.after(() => h.adapter.close());
+  await h.adapter.open();
+  const failed = assert.rejects(h.start({ text: 'original prompt' }), /OAuth session expired/);
+  await tick();
+  h.result({ subtype: 'error_during_execution', is_error: true, errors: ['OAuth session expired and could not be refreshed'] });
+  await failed;
+  assert.equal(h.queries.length, 1);
+  const next = h.start({ sessionId: sid, text: 'new prompt' });
+  await tick();
+  assert.equal(h.queries.length, 2);
+  assert.equal(h.queries[1].args.options.resume, sid);
+  assert.deepEqual(h.queries[1].inputs.map(input => input.message.content), ['new prompt']);
+  h.result();
+  assert.equal((await next).finish, 'completed');
+});
+
 test('initialization failure closes the SDK query and preserves a readable native error', async t => {
   const h = harness(); t.after(() => h.adapter.close());
   const query = h.sdk.query;

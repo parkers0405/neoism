@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -37,7 +37,7 @@ function executableMain() {
 }
 
 async function fixture(t, { scenario = 'normal' } = {}) {
-  const dir = await mkdtemp(join(tmpdir(), 'neoism opencode '));
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'neoism opencode ')));
   const executable = join(dir, 'fake-opencode');
   await writeFile(executable, `#!${process.execPath}\n(${executableMain.toString()})();\n`, { mode: 0o700 });
   const requests = [], sessions = new Map(), histories = new Map(), streams = new Set();
@@ -143,6 +143,11 @@ async function fixture(t, { scenario = 'normal' } = {}) {
         assert.ok(streams.size > 0, 'subscription exists before prompt');
         current = sid; prompt = body;
         if (scenario === 'disconnect') { res.writeHead(204).end(); for (const s of streams) s.end(); return; }
+        if (scenario === 'idle-without-result') {
+          send('message.updated', { info: { id: prompt.messageID, role: 'user', sessionID: current } });
+          send('session.status', { sessionID: current, status: { type: 'idle' } });
+          return res.writeHead(204).end();
+        }
         await begin(); res.writeHead(204).end(); return;
       }
       if (op === 'abort') {
@@ -279,6 +284,12 @@ test('SSE disconnect fails rather than claiming completion', async t => {
   const f = await fixture(t, { scenario: 'disconnect' });
   const { sessionId } = await f.adapter.open();
   await assert.rejects(f.adapter.start({ sessionId, text: 'fail', emit() {}, request() {} }), /SSE disconnected/);
+});
+
+test('idle after prompt admission is not proof of a completed response', async t => {
+  const f = await fixture(t, { scenario: 'idle-without-result' });
+  const { sessionId } = await f.adapter.open();
+  await assert.rejects(f.adapter.start({ sessionId, text: 'fail', emit() {}, request() {} }), /before recording a completed assistant response/);
 });
 
 test('abort acknowledgement alone never reports an unconfirmed cancellation', async t => {

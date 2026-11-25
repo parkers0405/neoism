@@ -3,6 +3,30 @@ use super::*;
 use super::super::picker::Row;
 use rune::{Cx, Env, Runtime};
 
+fn picker_card(app: &App) -> rune::El { super::picker_card(app, [0.0; 4]) }
+
+#[test]
+fn mobile_model_picker_keeps_reasoning_above_the_keyboard() {
+    let mut app = App::new_surface(String::new(), true);
+    app.window = [440.0, 956.0];
+    app.ty.size = 16.0;
+    app.rects.insert(format!("composer-card:{}", app.active_tab().id), [14.0, 230.0, 412.0, 140.0]);
+    app.composer.picker = Some(picker(Kind::Model));
+    for expanded in [false, true] {
+        app.composer.card_modal = expanded;
+        let mut rt = Runtime::new(app, |a, _| super::picker_card(a, [62.0, 0.0, 320.0, 0.0]), (440.0, 956.0), Env::default());
+        rt.frame(DT);
+        let elements = rt.elements();
+        let footer = elements.iter().find(|e| e.key.as_deref() == Some("model-reasoning-bar")).unwrap();
+        let header = elements.iter().find(|e| e.key.as_deref() == Some("picker-header")).unwrap();
+        assert!(header.rect[1] >= 62.0);
+        assert!(footer.rect[1] + footer.rect[3] <= 636.0);
+        assert!(footer.visible[3] >= footer.rect[3] - 1.0);
+        assert!(footer.rect[1] - header.rect[1] - header.rect[3] >= 2.0 * MODEL_H * rt.state.ty.scale());
+        app = rt.state;
+    }
+}
+
 const DT: f64 = 1.0 / 120.0;
 
 fn picker(kind: Kind) -> Picker {
@@ -261,6 +285,33 @@ fn agent_connections_skips_install_and_sign_in_for_an_existing_login() {
         assert!(rt.state.composer.picker.is_some());
     }
     assert!(requests().is_empty());
+}
+
+#[test]
+fn subagent_models_toggle_opens_setup_and_returns_without_changing_chat_model() {
+    let mut app = App::new();
+    app.window = [900.0, 674.0];
+    let tab = app.active_tab().id;
+    app.rects.insert(format!("composer-card:{tab}"), [100.0, 600.0, 700.0, 60.0]);
+    app.open_selection(Kind::Model);
+    let original = app.composer.selection.model.clone();
+    let mut rt = Runtime::new(app, |a: &App, _: &mut Cx<App>| el().w_full().h_full().child(picker_card(a)), (900.0, 674.0), Env::new(true, 1.0));
+    settle(&mut rt);
+    let click = |rt: &mut Runtime<App>, key| {
+        let (x, y) = rt.find(key).unwrap();
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        settle(rt);
+    };
+    click(&mut rt, "model-subagents-toggle");
+    assert_eq!(rt.state.composer.picker.as_ref().unwrap().kind, Kind::SubagentModels);
+    click(&mut rt, "subagent-connect");
+    assert_eq!(rt.state.composer.picker.as_ref().unwrap().kind, Kind::AgentConnections);
+    click(&mut rt, "connect-agent-close");
+    assert_eq!(rt.state.composer.picker.as_ref().unwrap().kind, Kind::SubagentModels);
+    click(&mut rt, "model-subagents-toggle");
+    assert_eq!(rt.state.composer.picker.as_ref().unwrap().kind, Kind::Model);
+    assert_eq!(rt.state.composer.selection.model, original);
 }
 
 #[test]

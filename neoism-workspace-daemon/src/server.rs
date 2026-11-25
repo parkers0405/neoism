@@ -14,6 +14,7 @@
 //! is unchanged. We document each addition with the route comment above.
 
 pub mod fast;
+pub(crate) mod mobile_device;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;

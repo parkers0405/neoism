@@ -23,10 +23,28 @@ pub struct Config {
     pub variant: Option<String>,
 }
 
-/// The config directory the daemon, the agent and the server list all use: `~/.config/neoism`
-/// (`%USERPROFILE%\AppData\Local\neoism` on Windows), or `NEOISM_CONFIG_HOME`.
+/// The shared desktop config directory, or the app's private Application Support on iOS.
 pub fn dir() -> std::path::PathBuf {
-    neoism_agent_service_api::server_registry::registry_directory()
+    #[cfg(not(target_os = "ios"))]
+    { neoism_agent_service_api::server_registry::registry_directory() }
+    #[cfg(target_os = "ios")]
+    {
+        use std::{ffi::{CStr, c_char, c_void}, os::unix::ffi::OsStrExt, path::Path};
+        #[link(name = "Foundation", kind = "framework")]
+        unsafe extern "C" { fn NSHomeDirectory() -> *mut c_void; }
+        #[link(name = "objc")]
+        unsafe extern "C" {
+            fn sel_registerName(name: *const c_char) -> *const c_void;
+            fn objc_msgSend();
+        }
+        // Foundation returns this application's sandbox, not the system user's home.
+        unsafe {
+            let send: unsafe extern "C" fn(*mut c_void, *const c_void) -> *const c_char = std::mem::transmute(objc_msgSend as *const ());
+            let home = send(NSHomeDirectory(), sel_registerName(c"fileSystemRepresentation".as_ptr()));
+            assert!(!home.is_null(), "iOS app sandbox path is unavailable");
+            Path::new(std::ffi::OsStr::from_bytes(CStr::from_ptr(home).to_bytes())).join("Library/Application Support/Neoism")
+        }
+    }
 }
 
 pub fn read() -> Value {

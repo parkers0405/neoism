@@ -15,6 +15,7 @@ const BODY: f32 = 12.0;
 const LINE_H: f32 = 19.0;
 const ACTION: f32 = 13.0;
 const ACTION_H: f32 = 32.0;
+const FAST_INVITE_PROMPT: &str = "Invite a collaborator with this link and your password:";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -45,7 +46,7 @@ pub struct Modal {
 impl Modal {
     pub fn fast_server_ready(name: &str, invite: &str) -> Self {
         Self { title: "Fast Server ready".into(),
-            body: format!("{name}\n\nInvite a collaborator with this link and your password:\n\n{invite}\n\nClick the link to copy the invite.\nStop hosting ends this temporary session; project files are kept."),
+            body: format!("{name}\n\n{FAST_INVITE_PROMPT}\n\n{invite}\n\nClick the link to copy the invite.\nStop hosting ends this temporary session; project files are kept."),
             buttons: vec![Button { label: "Copy invite".into(), key: "Enter".into(), action: Action::CopyServerInvite },
                 Button { label: "Close".into(), key: "Esc".into(), action: Action::Close }], selected: 0 }
     }
@@ -94,6 +95,7 @@ impl App {
 
     pub fn run_modal_action(&mut self, action: Action) {
         self.modal = None;
+        self.device_qr = None;
         match action {
             Action::Close => {},
             Action::DiscardTab(id) => { if let Some(i) = self.tabs.iter().position(|t| t.id == id) { self.close_tab_now(i); } }
@@ -134,10 +136,19 @@ pub fn view(app: &App) -> El {
     let Some(modal) = &app.modal else { return el() };
     let p = app.pal;
     let s = app.ty.scale();
+    let can_copy_invite = modal.buttons.iter().any(|b| b.action == Action::CopyServerInvite);
+    let desktop_qr = !app.mobile && can_copy_invite;
     let mut body = col().w_full().mt(10.0 * s);
+    if modal.title == "Pair this Mac" && let Some(invite) = &app.device_qr {
+        body = body.child(super::phone_share::qr_view(app, invite));
+    }
     for line in modal.body.lines() {
-        let invite = modal.buttons.iter().any(|b| b.action == Action::CopyServerInvite) && app.server.ready_invite.as_deref() == Some(line);
+        let line = if desktop_qr && line == FAST_INVITE_PROMPT {
+            "Scan with your phone’s camera, then enter the Fast Server password."
+        } else { line };
+        let invite = can_copy_invite && app.server.ready_invite.as_deref() == Some(line);
         if invite {
+            if desktop_qr { body = body.child(super::phone_share::qr_view(app, line)); }
             body = body.child(el().w_full().min_h(LINE_H * s).center_y()
                 .child(text(line.to_owned()).font(app.ty.sized(BODY).lh(LINE_H * s)).color(rgb(p.accent)).wrap().w_full())
                 .on_press_tx(|a: &mut App, tx: &mut Tx| a.activate_modal_action(Action::CopyServerInvite, tx)));
@@ -161,14 +172,15 @@ pub fn view(app: &App) -> El {
         .fill(rgb(p.bg)).border(1.0, rgb(p.border))
         .on_press(|_: &mut App| {})
         .child(row().w_full().center_y().justify_between()
-            .child(text(modal.title.clone()).font(app.ty.sized_bold(TITLE)).color(rgb(p.fg)))
+            .child(text(if desktop_qr { "Open on phone".into() } else { modal.title.clone() }).font(app.ty.sized_bold(TITLE)).color(rgb(p.fg)))
             .child(el().w(24.0 * s).h(24.0 * s).center()
                 .child(text("\u{00d7}").font(app.ty.sized(18.0)).color(rgb(p.muted)))
                 .on_press(|a: &mut App| a.dismiss_modal())))
         .child(body)
         .child(actions);
     col().key("modal-scrim").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).items_center()
-        .pt(MARGIN_TOP * s)
+        .fill(if desktop_qr { Color::BLACK.alpha(0.5) } else { Color::TRANSPARENT })
+        .pt(if desktop_qr { (MARGIN_TOP * s).min(app.window[1] * 0.08) } else { MARGIN_TOP * s })
         .on_press(|a: &mut App| a.dismiss_modal())
         .child(card)
 }

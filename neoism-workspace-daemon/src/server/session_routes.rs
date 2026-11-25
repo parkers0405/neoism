@@ -7,6 +7,9 @@ pub(crate) async fn session_upgrade(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Response {
+    // Rune sends each prompt in one frame. Match the message cap so an attachment
+    // encoded as a JSON byte array doesn't hit the smaller default frame cap.
+    let ws = ws.max_frame_size(64 * 1024 * 1024);
     // `ConnectInfo<SocketAddr>` is only injected when the router is served via
     // `into_make_service_with_connect_info` — the TCP/Tailscale path. The
     // desktop's in-process embedded daemon serves this SAME router over a UNIX

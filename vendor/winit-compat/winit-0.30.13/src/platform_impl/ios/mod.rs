@@ -4,6 +4,7 @@ mod app_state;
 mod event_loop;
 mod monitor;
 mod notification_center;
+mod scene;
 mod view;
 mod view_controller;
 mod window;
@@ -43,10 +44,14 @@ pub(crate) const DEVICE_ID: RootDeviceId = RootDeviceId(DeviceId);
 pub struct KeyEventExtra {}
 
 #[derive(Debug)]
-pub enum OsError {}
+pub enum OsError {
+    WindowSceneUnavailable,
+}
 
 impl fmt::Display for OsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "os error")
+        match self {
+            Self::WindowSceneUnavailable => f.write_str("no connected UIWindowScene"),
+        }
     }
 }

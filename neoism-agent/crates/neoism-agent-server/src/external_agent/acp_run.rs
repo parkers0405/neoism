@@ -5,6 +5,27 @@ pub(crate) struct ExternalRunResult {
     pub(crate) provider_response: ProviderGenerationResponse,
 }
 
+fn prompt_outcome(runtime: ExternalRuntime, response: &Value) -> Result<(), (&'static str, String)> {
+    let adapter = runtime.display_name();
+    let message = match response.get("stopReason").and_then(Value::as_str) {
+        Some("end_turn") => return Ok(()),
+        Some("cancelled") => {
+            return Err(("interrupted", format!("{adapter} ACP adapter cancelled the turn")));
+        }
+        Some("refusal") if runtime == ExternalRuntime::Antigravity => {
+            "Antigravity refused the turn; check your provider quota and account status.".into()
+        }
+        Some("refusal") => format!("{adapter} ACP adapter refused the turn"),
+        Some("max_tokens") => format!("{adapter} ACP turn reached its token limit (max_tokens)"),
+        Some("max_turn_requests") => format!("{adapter} ACP turn reached its request limit (max_turn_requests)"),
+        Some(reason) => {
+            format!("{adapter} ACP session/prompt returned an unknown stopReason: {reason:?}")
+        }
+        None => format!("{adapter} ACP session/prompt did not return a valid stopReason"),
+    };
+    Err(("error", message))
+}
+
 #[derive(Default)]
 pub(crate) struct AcpRunCollector {
     pub(crate) text: String,
@@ -114,7 +135,7 @@ impl AcpUsage {
 }
 
 #[cfg(test)]
-mod usage_tests {
+mod tests {
     use super::*;
 
     #[test]
@@ -144,6 +165,27 @@ mod usage_tests {
         assert_eq!(total_only.tokens().input, 0);
         assert_eq!(total_only.tokens().output, 0);
         assert!(total_only.observed());
+    }
+
+    #[test]
+    fn acp_prompt_requires_an_explicit_successful_stop_reason() {
+        let runtime = ExternalRuntime::Codex;
+        assert!(prompt_outcome(runtime, &json!({"stopReason":"end_turn", "_meta":{}})).is_ok());
+        for (reason, status) in [
+            ("cancelled", "interrupted"),
+            ("refusal", "error"),
+            ("max_tokens", "error"),
+            ("max_turn_requests", "error"),
+            ("unknown", "error"),
+        ] {
+            let (actual, message) = prompt_outcome(runtime, &json!({"stopReason": reason})).unwrap_err();
+            assert_eq!(actual, status, "{message}");
+        }
+        for response in [Value::Null, json!({}), json!({"stopReason": 1})] {
+            let (status, message) = prompt_outcome(runtime, &response).unwrap_err();
+            assert_eq!(status, "error");
+            assert!(message.contains("valid stopReason"));
+        }
     }
 }
 
@@ -318,13 +360,14 @@ async fn settle_acp_run(
         }
     }
     for nested_id in snapshot.nested_sessions.values() {
-        let output = if status == "completed" {
-            ""
-        } else {
-            "ACP task ended without a terminal tool update"
-        };
+        // A successful parent turn is not evidence that an individual task completed.
+        let status = if status == "completed" { "error" } else { status };
         if let Err(error) = super::events::finish_nested_external_session(
-            state, runtime, nested_id, status, output,
+            state,
+            runtime,
+            nested_id,
+            status,
+            "ACP task ended without a terminal tool update",
         )
         .await
         {
@@ -484,20 +527,20 @@ pub(crate) async fn run_acp_prompt(
         collector.usage_seen |=
             prompt_response.get("usage").is_some_and(Value::is_object);
     }
-    if tokio::time::timeout(Duration::from_secs(5), client.drain_events())
-        .await
-        .is_err()
-    {
+    if !matches!(
+        tokio::time::timeout(Duration::from_secs(5), client.drain_events()).await,
+        Ok(Ok(()))
+    ) {
         event_task.abort();
         settle_acp_run(state, runtime, child.id.as_str(), step, &collector, "error")
             .await;
         return Err(format!(
-            "{} ACP final event drain timed out; response may be incomplete",
+            "{} ACP final events could not be drained; response may be incomplete",
             runtime.display_name()
         ));
     }
-    let stop_reason = prompt_response.get("stopReason").and_then(Value::as_str);
-    if runtime == ExternalRuntime::Antigravity && stop_reason == Some("end_turn") {
+    let outcome = prompt_outcome(runtime, &prompt_response);
+    if runtime == ExternalRuntime::Antigravity && outcome.is_ok() {
         // agy can return from session/prompt before an awaited command finishes.
         // Leave the event stream alive, but never hold the session for a daemon.
         let settled = collector.lock().await.antigravity_command_settled.clone();
@@ -522,17 +565,25 @@ pub(crate) async fn run_acp_prompt(
             settle_acp_run(state, runtime, child.id.as_str(), step, &collector, status).await;
             return Err(message.into());
         }
-        if tokio::time::timeout(Duration::from_secs(5), client.drain_events()).await.is_err() {
+        if !matches!(
+            tokio::time::timeout(Duration::from_secs(5), client.drain_events()).await,
+            Ok(Ok(()))
+        ) {
             event_task.abort();
             settle_acp_run(state, runtime, child.id.as_str(), step, &collector, "error").await;
             return Err("Antigravity's final command events could not be drained".into());
         }
     }
     event_task.abort();
-    let (status, failure) = match stop_reason {
-        Some("cancelled") => ("interrupted", Some(format!("{} ACP adapter cancelled the turn", runtime.display_name()))),
-        Some("refusal") if runtime == ExternalRuntime::Antigravity => ("error", Some("Antigravity refused the turn; check your provider quota and account status.".into())),
-        _ => ("completed", None),
+    let outcome = match (outcome, collector.lock().await.config_error.as_ref()) {
+        (Ok(()), Some(error)) => {
+            Err(("error", format!("ACP config_option_update was invalid: {error}")))
+        }
+        (outcome, _) => outcome,
+    };
+    let status = match &outcome {
+        Ok(()) => "completed",
+        Err((status, _)) => *status,
     };
     settle_acp_run(
         state,
@@ -543,9 +594,7 @@ pub(crate) async fn run_acp_prompt(
         status,
     )
     .await;
-    if let Some(error) = failure {
-        return Err(error);
-    }
+    outcome.map_err(|(_, error)| error)?;
     update_external_session_metadata(
         state,
         child.id.as_str(),
@@ -577,9 +626,6 @@ pub(crate) async fn run_acp_prompt(
         })
         .unwrap_or_default();
     let collector = collector.lock().await;
-    if let Some(error) = &collector.config_error {
-        return Err(format!("ACP config_option_update was invalid: {error}"));
-    }
     let text = collector.text.clone();
     let usage = collector.usage.clone();
     Ok(ExternalRunResult {
@@ -587,11 +633,7 @@ pub(crate) async fn run_acp_prompt(
             provider_id: model.provider_id.clone(),
             model_id: confirmed_model,
             text,
-            finish: prompt_response
-                .get("stopReason")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .or_else(|| Some("end_turn".to_string())),
+            finish: Some("end_turn".into()),
             total_tokens: usage.total_tokens,
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,

@@ -1258,22 +1258,24 @@ impl StandardConfigSourceService {
                 })?;
             let mut document = Self::read_layer(&path)?;
             apply_config_update(&mut document, &request.update)?;
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let temp = path.with_extension("tmp");
-            fs::write(
-                &temp,
-                format!(
-                    "{}\n",
-                    serde_json::to_string_pretty(&document)
-                        .map_err(|error| ServiceError::new(error.to_string()))?
-                ),
-            )?;
-            fs::rename(&temp, &path)?;
+            write_config_document(&path, &document)?;
             self.snapshot(&ConfigSnapshotRequest::new(workspace))
         })
     }
+}
+
+/// Publish a JSON config atomically, without following a pre-created temp file.
+pub fn write_config_document(path: &Path, document: &Value) -> Result<(), ServiceError> {
+    use std::io::Write;
+    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    serde_json::to_writer_pretty(temp.as_file_mut(), document)
+        .map_err(|error| ServiceError::new(error.to_string()))?;
+    temp.write_all(b"\n")?;
+    temp.persist(path).map_err(|error| ServiceError::from(error.error))?;
+    Ok(())
 }
 
 fn absolute_workspace(path: &Path) -> PathBuf {

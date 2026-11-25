@@ -124,6 +124,7 @@ rfd = { version = "0.17", optional = true, default-features = false }
 
 # Metal on macOS and iOS: video and present timing on macOS, and the `metal-backend` feature on both.
 [target.'cfg(target_vendor = "apple")'.dependencies]
+block2-metal = { package = "block2", version = "0.6" }
 objc2-video = { package = "objc2", version = "0.6" }
 objc2-core-foundation = "0.3"
 objc2-metal = "0.3"
@@ -149,7 +150,6 @@ objc2-app-kit = { version = "0.2.2", features = ["NSApplication", "NSButton", "N
 objc2-core-video = { version = "0.3", features = ["CVPixelBufferIOSurface", "objc2-io-surface"] }
 # Unused by name: its default features give IOSurfaceRef the CF `Type` impl objc2-core-video needs.
 objc2-io-surface = "0.3"
-block2-metal = { package = "block2", version = "0.6" }
 # Video playback (`Video`): AVPlayer, its video output and the poster/headless image generator.
 objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVAsset", "AVAssetImageGenerator", "AVAssetTrack", "AVMediaFormat", "AVPlayer", "AVPlayerItem", "AVPlayerItemOutput", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media", "objc2-core-video"] }
 objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMTime"] }

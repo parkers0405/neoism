@@ -58,6 +58,8 @@ clap = { workspace = true }
 # to this daemon instead of spawning its own embedded one.
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["server", "tokio", "http1", "service"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 
 # Owner+SYSTEM-only DACLs on secret files — the Windows counterpart of the
 # unix 0o600/0o700 tightening (see src/windows_acl.rs).

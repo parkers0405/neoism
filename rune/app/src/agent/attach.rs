@@ -6,7 +6,7 @@
 //!   draft: each adds an `[imageN]` / `[pdfN]` / `[fileN: name]` token to the text and a chip
 //!   in a strip of 64 pt thumbnails at the top of the composer card, removed with its ×.
 //! - Submitting sends them with the prompt (`Attachment { kind: mime, path: name, bytes }`),
-//!   20 MB each at most, and echoes them into the transcript as `data:` URLs.
+//!   up to 20 MiB combined (subject to the wire budget), and echoes them as `data:` URLs.
 //! - Message photos sit outside the text bubble, stacked when there are several. Horizontal
 //!   swipes cycle the stack; clicking opens the set in the full-window preview.
 
@@ -14,14 +14,17 @@ use crate::app::App;
 use crate::tabs::TabKind;
 use crate::ui::theme::rgb;
 use base64::Engine as _;
-use neoism_protocol::agent::{Attachment, HistoryAttachment};
+use neoism_protocol::agent::{Attachment, HistoryAttachment, MOBILE_PHOTO_MAX_BYTES, MOBILE_PHOTO_MAX_COUNT, mobile_photo_filename, mobile_photo_mime};
 use rune::{El, KeyEvent, Tx, col, el, row, text};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::io::Read as _;
+use std::sync::Arc;
 
 /// `MAX_INLINE_ATTACHMENT_BYTES`.
 pub const MAX_BYTES: usize = 20 * 1024 * 1024;
+// Leave room in the daemon's 64 MiB WebSocket message for text and envelope fields.
+const MAX_WIRE_BYTES: usize = 60 * 1024 * 1024;
 /// `COMPOSER_THUMB_SIZE` and `MESSAGE_THUMB_SIZE`.
 pub const COMPOSER_THUMB: f32 = 64.0;
 pub const MESSAGE_THUMB: f32 = 260.0;
@@ -38,7 +41,7 @@ pub struct Attached {
 impl Attached {
     pub fn is_image(&self) -> bool { self.mime.starts_with("image/") }
     /// The cache key its image decodes under.
-    pub fn key(&self) -> String { format!("draft:{}:{}", self.token, self.bytes.len()) }
+    fn key(&self, tab: u64) -> String { format!("draft:{tab}:{}", self.token) }
 }
 
 /// The open full-window preview: the image's cache key and name.
@@ -56,8 +59,6 @@ pub struct Attachments {
     images: RefCell<HashMap<String, Option<rune::Image>>>,
     inline_pending: RefCell<Vec<rune::Image>>,
     inline_version: std::cell::Cell<usize>,
-    /// Paths a picker chose off the main thread, for `poll` to attach.
-    pub picked: Arc<Mutex<Vec<String>>>,
     pub preview: Option<Preview>,
     preview_gallery: Vec<Preview>,
     stacks: HashMap<String, usize>,
@@ -208,31 +209,56 @@ impl App {
         self.attach.preview = Some(Preview { key: format!("inline:{path}"), name: name.to_owned() });
     }
 
-    /// The paperclip: choose images to attach. A worker runs the desktop's picker so the window
-    /// keeps drawing; `poll` attaches what it returns.
-    /// The paperclip: GPUiX's file browser in its picture mode.
+    /// The paperclip opens the file browser in picture mode.
     pub fn request_attach(&mut self) {
         self.open_file_browser(crate::browser::Mode::AttachImage);
     }
 
-    /// Attach files to the active composer (the picker's, a browser's or a drop's choice).
-    /// Unreadable, empty or oversized files are skipped. Returns whether any attached.
-    pub fn attach_images(&mut self, paths: Vec<String>) -> bool {
-        let mut any = false;
+    /// Attach files from the browser or a drop, reporting rejected files together.
+    pub fn attach_images(&mut self, paths: &[std::path::PathBuf]) {
+        let mut errors = Vec::new();
         for path in paths {
-            let Ok(bytes) = std::fs::read(&path) else { continue };
-            let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
+            let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
             let mime = mime_for(&name);
-            any |= self.attach_bytes(&name, mime, bytes);
+            let result = (|| {
+                if path.extension().and_then(|e| e.to_str()).is_some_and(|ext| {
+                    matches!(ext.to_ascii_lowercase().as_str(), "heic" | "heif" | "avif" | "tif" | "tiff" | "svg")
+                }) { return Err("Unsupported picture format. Export it as PNG or JPEG."); }
+                let metadata = path.metadata().map_err(|_| "Could not find or read the file.")?;
+                if !metadata.is_file() { return Err("Not a regular file."); }
+                if metadata.len() > MAX_BYTES as u64 { return Err("File exceeds the 20 MiB attachment limit."); }
+                let mut bytes = Vec::new();
+                std::fs::File::open(path).and_then(|file| file.take(MAX_BYTES as u64 + 1).read_to_end(&mut bytes))
+                    .map_err(|_| "Could not read the file.")?;
+                self.add_attachment(&name, mime, bytes)
+            })();
+            if let Err(reason) = result { errors.push(format!("{name}: {reason}")); }
         }
-        any
+        if !errors.is_empty() {
+            self.modal = Some(crate::ui::modal::Modal::notice("Could not attach files", &errors.join("\n")));
+        }
     }
 
     /// `attach_file_bytes`: add one attachment to the active tab's draft.
     pub fn attach_bytes(&mut self, name: &str, mime: &str, bytes: Vec<u8>) -> bool {
-        if bytes.is_empty() || bytes.len() > MAX_BYTES { return false; }
+        if let Err(reason) = self.add_attachment(name, mime, bytes) {
+            self.modal = Some(crate::ui::modal::Modal::notice("Could not attach file", &format!("{name}: {reason}")));
+            return false;
+        }
+        true
+    }
+
+    fn add_attachment(&mut self, name: &str, mime: &str, bytes: Vec<u8>) -> Result<(), &'static str> {
+        if bytes.is_empty() { return Err("The file is empty."); }
+        if bytes.len() > MAX_BYTES { return Err("File exceeds the 20 MiB attachment limit."); }
         let index = self.active;
-        if !matches!(self.tabs.get(index).map(|t| &t.kind), Some(TabKind::Agent { .. })) { return false; }
+        if !matches!(self.tabs.get(index).map(|t| &t.kind), Some(TabKind::Agent { .. })) { return Err("Open an agent chat first."); }
+        if self.paired_chat_device() {
+            // The first prompt still owns this tab's attachment list until ThreadCreated.
+            if self.tabs[index].pending_prompt.is_some() { return Err("Wait for the new chat to open before attaching another photo."); }
+            Self::mobile_photo_type(name, mime)?;
+        }
+        self.attachment_budget(index, Some(&bytes))?;
         let tab = self.tabs[index].id;
         let list = self.attach.pending.entry(tab).or_default();
         let mut n = list.len() + 1;
@@ -245,13 +271,47 @@ impl App {
         let draft = &mut self.tabs[index].draft;
         draft.insert_pill(format!("attachment:{token}"), &token);
         draft.paste(" ");
+        Ok(())
+    }
+
+    fn mobile_photo_type(name: &str, mime: &str) -> Result<(), &'static str> {
+        if mobile_photo_mime(mime) && mobile_photo_filename(name) { Ok(()) }
+        else { Err("Paired mobile chat accepts only photos with a valid filename.") }
+    }
+
+    fn attachment_budget(&self, index: usize, additional: Option<&[u8]>) -> Result<(), &'static str> {
+        let tab = &self.tabs[index];
+        let live = self.attach.pending.get(&tab.id).into_iter().flatten().filter(|a| {
+            tab.draft.pills().any(|(_, id)| id.strip_prefix("attachment:") == Some(a.token.as_str()))
+        });
+        let size = live.clone().map(|a| a.bytes.len()).sum::<usize>() + additional.map_or(0, |bytes| bytes.len());
+        if self.paired_chat_device() {
+            if size > MOBILE_PHOTO_MAX_BYTES || live.clone().count() + usize::from(additional.is_some()) > MOBILE_PHOTO_MAX_COUNT {
+                return Err("Paired mobile chat allows up to four photos and 4 MiB total. Remove or resize a photo.");
+            }
+            for a in live { Self::mobile_photo_type(&a.name, &a.mime)?; }
+            return Ok(());
+        }
+        if size > MAX_BYTES { return Err("Attachments can total at most 20 MiB per message. Remove or resize a file."); }
+        // The current wire protocol encodes each byte as up to three digits plus a comma.
+        if size > MAX_WIRE_BYTES / 4 && live.flat_map(|a| a.bytes.iter()).chain(additional.into_iter().flatten())
+            .map(|&b| 2 + usize::from(b >= 10) + usize::from(b >= 100)).sum::<usize>() > MAX_WIRE_BYTES
+        { return Err("These attachments are too large to send together. Remove or resize a file."); }
+        Ok(())
+    }
+
+    pub(crate) fn check_attachment_budget(&mut self, index: usize) -> bool {
+        if let Err(reason) = self.attachment_budget(index, None) {
+            self.modal = Some(crate::ui::modal::Modal::notice("Could not send attachments", reason));
+            return false;
+        }
         true
     }
 
-    /// A picker's paths waiting from its worker. Returns whether any attached.
-    pub fn take_picked_attachments(&mut self) -> bool {
-        let paths: Vec<String> = std::mem::take(&mut *self.attach.picked.lock().unwrap());
-        !paths.is_empty() && self.attach_images(paths)
+    pub(crate) fn clear_draft_attachment_images(&mut self, tab: u64) {
+        let prefix = format!("draft:{tab}:");
+        self.attach.images.get_mut().retain(|key, _| !key.starts_with(&prefix));
+        if self.attach.preview.as_ref().is_some_and(|p| p.key.starts_with(&prefix)) { self.attach.preview = None; }
     }
 
     /// The × on a chip: drop the attachment and its token.
@@ -267,25 +327,28 @@ impl App {
     }
 
     /// A pasted image (Ctrl+V or Super+V with an image on the clipboard) attaches as
-    /// `clipboard-image-N.png`. Returns whether it did.
+    /// `clipboard-image-N.png`. Consumes image pastes even when rejected.
     pub fn paste_image(&mut self, content: &rune::ClipboardContent) -> bool {
         let Some(image) = content.image() else { return false };
         let n = self.tabs.get(self.active).and_then(|t| self.attach.pending.get(&t.id)).map_or(0, Vec::len) + 1;
-        self.attach_bytes(&format!("clipboard-image-{n}.png"), "image/png", image.png().to_vec())
+        self.attach_bytes(&format!("clipboard-image-{n}.png"), "image/png", image.png().to_vec());
+        true
     }
 
     /// Take the attachments a tab's draft carries for its prompt: the wire form, and the
     /// transcript's echo.
     pub fn take_attachments(&mut self, session_id: &str) -> (Vec<Attachment>, Vec<HistoryAttachment>) {
         let tab = self.tabs.iter().find(|t| matches!(&t.kind, TabKind::Agent { session: Some(id) } if id == session_id)).map(|t| t.id);
-        let list = tab.and_then(|tab| self.attach.pending.remove(&tab)).unwrap_or_default();
+        let list = tab.and_then(|tab| {
+            self.clear_draft_attachment_images(tab);
+            self.attach.pending.remove(&tab)
+        }).unwrap_or_default();
         let wire = list.iter().map(|a| Attachment { kind: a.mime.clone(), path: Some(a.name.clone()), bytes: a.bytes.to_vec() }).collect();
         let echo = list.iter().map(|a| HistoryAttachment {
             filename: a.name.clone(),
             url: format!("data:{};base64,{}", a.mime, base64::engine::general_purpose::STANDARD.encode(&a.bytes)),
             mime: a.mime.clone(),
         }).collect();
-        // The echo's images are already decoded under the draft's keys.
         (wire, echo)
     }
 
@@ -299,9 +362,9 @@ impl App {
         image
     }
 
-    fn draft_image(&self, a: &Attached) -> Option<rune::Image> {
+    fn draft_image(&self, tab: u64, a: &Attached) -> Option<rune::Image> {
         let bytes = a.bytes.clone();
-        self.attachment_image(&a.key(), move || Some(bytes.to_vec()))
+        self.attachment_image(&a.key(tab), move || Some(bytes.to_vec()))
     }
 
     /// A history attachment's image, keyed by its message and place.
@@ -334,8 +397,8 @@ fn thumb(app: &App, image: Option<rune::Image>, size: f32) -> El {
     let s = app.ty.scale();
     let inner = el().w(size).h(size).radius(11.0 * s).fill(rgb(p.bg)).clip_rounded(11.0 * s);
     let inner = match image {
-        Some(image) => inner.child(el().w(size).h(size).pixels_fit(image.pixels(), rune::SurfaceFit::Fit)),
-        None => inner.center().child(text("Image unavailable").font(app.ty.sized(10.0)).color(rgb(p.muted)).wrap()),
+        Some(image) if image.error().is_none() => inner.child(el().w(size).h(size).pixels_fit(image.pixels(), rune::SurfaceFit::Fit)),
+        _ => inner.center().child(text("Image unavailable").font(app.ty.sized(10.0)).color(rgb(p.muted)).wrap()),
     };
     el().padding(2.0 * s).radius(13.0 * s).fill(rgb(p.border).alpha(0.9)).child(inner)
 }
@@ -381,8 +444,8 @@ pub fn composer_strip(app: &App, tab: u64) -> Option<El> {
     for a in list {
         let token = a.token.clone();
         let body = if a.is_image() {
-            let (key, name) = (a.key(), a.name.clone());
-            thumb(app, app.draft_image(a), COMPOSER_THUMB * s)
+            let (key, name) = (a.key(tab), a.name.clone());
+            thumb(app, app.draft_image(tab, a), COMPOSER_THUMB * s)
                 .on_press(move |s: &mut App| {
                     s.attach.preview_gallery.clear();
                     s.attach.preview = Some(Preview { key: key.clone(), name: name.clone() });
@@ -451,15 +514,17 @@ pub fn message_strip(app: &App, message_id: &str, attachments: &[HistoryAttachme
 
 /// The full-window preview (`ImagePreviewModal`): a dark backdrop, the image fitted 32 pt in
 /// from the sides, 64 pt from the top and 32 from the bottom, its name, and a ×.
-pub fn preview(app: &App) -> El {
+pub fn preview(app: &App, [top, right, bottom, left]: [f32; 4]) -> El {
     let Some(preview) = &app.attach.preview else { return el() };
     let p = app.pal;
     let [w, h] = app.window;
+    let safe_w = (w - left - right).max(0.0);
+    let safe_h = (h - top - bottom).max(0.0);
     let image = app.attach.images.borrow().get(&preview.key).cloned().flatten();
     let body = match image {
-        Some(image) => el().w((w - 64.0).max(1.0)).h((h - 96.0).max(1.0)).absolute(32.0, 64.0)
+        Some(image) => el().w((safe_w - 64.0).max(1.0)).h((safe_h - 96.0).max(1.0)).absolute(left + 32.0, top + 64.0)
             .pixels_fit(image.pixels(), rune::SurfaceFit::Fit),
-        None => text("Image unavailable").font(app.ty.sized(14.0)).color(rgb(p.fg)).absolute(32.0, 64.0),
+        None => text("Image unavailable").font(app.ty.sized(14.0)).color(rgb(p.fg)).absolute(left + 32.0, top + 64.0),
     };
     let gallery_index = app.attach.preview_gallery.iter().position(|p| p.key == preview.key);
     let count = app.attach.preview_gallery.len();
@@ -475,14 +540,14 @@ pub fn preview(app: &App) -> El {
             true
         })
         .child(body.on_press(|_: &mut App| {}))
-        .child(text(preview.name.clone()).font(app.ty.sized(14.0)).color(rgb(p.fg)).truncate().max_w((w - 112.0).max(1.0)).absolute(32.0, 20.0))
-        .child(el().key("image-preview-close").w(40.0).h(40.0).absolute(w - 56.0, 12.0).radius(6.0).fill(rgb(p.surface)).center()
+        .child(text(preview.name.clone()).font(app.ty.sized(14.0)).color(rgb(p.fg)).truncate().max_w((safe_w - 112.0).max(1.0)).absolute(left + 32.0, top + 20.0))
+        .child(el().key("image-preview-close").label("Close image preview").w(44.0).h(44.0).absolute(w - right - 56.0, top + 12.0).radius(6.0).fill(rgb(p.surface)).center()
             .child(text("\u{d7}").font(app.ty.sized(24.0)).color(rgb(p.fg)))
             .on_press(|s: &mut App| s.attach.preview = None));
     if let Some(index) = gallery_index.filter(|_| count > 1) {
-        modal = modal.child(text(format!("{} / {}", index + 1, count)).font(app.ty.sized(12.0)).color(rgb(p.fg)).absolute(w / 2.0 - 20.0, h - 26.0));
-        for (label, step, x) in [("<", -1, 12.0), (">", 1, w - 52.0)] {
-            modal = modal.child(el().w(40.0).h(48.0).absolute(x, h / 2.0 - 24.0).radius(8.0).fill(rgb(p.surface)).center()
+        modal = modal.child(text(format!("{} / {}", index + 1, count)).font(app.ty.sized(12.0)).color(rgb(p.fg)).absolute(left + safe_w / 2.0 - 20.0, h - bottom - 26.0));
+        for (label, step, x) in [("<", -1, left + 12.0), (">", 1, w - right - 52.0)] {
+            modal = modal.child(el().w(40.0).h(48.0).absolute(x, top + safe_h / 2.0 - 24.0).radius(8.0).fill(rgb(p.surface)).center()
                 .child(text(label).font(app.ty.sized(24.0)).color(rgb(p.fg)))
                 .on_press(move |a: &mut App| a.step_image_preview(step)));
         }
@@ -493,6 +558,71 @@ pub fn preview(app: &App) -> El {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paired_new_chat_keeps_photo_until_thread_created() {
+        use neoism_protocol::agent::{AgentClientMessage, AgentServerMessage};
+
+        let mut app = App::new();
+        app.mobile = true;
+        app.server.link.current = Some(crate::servers::Selection {
+            endpoint: "wss://desk.example.ts.net/mobile-device/session".into(),
+            ..Default::default()
+        });
+        app.connection = crate::app::Connection::Connected;
+        app.workspace_ready = true;
+        app.open_tab(TabKind::Agent { session: None });
+        app.composer.selection.model = "mock/image-model".into();
+        let tab = app.active_tab().id;
+        app.cwd.clear();
+        assert!(!app.attach_bytes("oversize.png", "image/png", vec![0; MOBILE_PHOTO_MAX_BYTES + 1]));
+        assert!(!app.attach_bytes("notes.txt", "text/plain", vec![1]));
+        assert!(app.attach_bytes("picked.png", "image/png", vec![1, 2, 3]));
+        app.tabs[app.active].draft.paste("Describe this");
+        let draft = app.active_tab().draft.text.clone();
+        app.agent_sent.borrow_mut().clear();
+        app.submit();
+        assert_eq!(app.active_tab().draft.text, draft);
+        assert!(app.active_tab().draft.pills().any(|(_, id)| id == "attachment:[image1]"));
+        assert!(app.active_tab().pending_prompt.is_none());
+
+        app.cwd = "/existing-project".into();
+        app.submit();
+        assert_eq!(app.active_tab().pending_prompt.as_deref(), Some(draft.trim()));
+        assert!(app.attach.pending.contains_key(&tab));
+        assert!(app.agent_sent.borrow().iter().any(|wire| wire.contains("CreateThread")));
+        assert!(!app.agent_sent.borrow().iter().any(|wire| wire.contains("SubmitPrompt")));
+        assert!(!app.attach_bytes("another.png", "image/png", vec![4, 5, 6]));
+        app.apply_agent(serde_json::from_value::<AgentServerMessage>(serde_json::json!({
+            "ThreadCreated": {"session_id": "test-session"}
+        })).unwrap());
+        let sent = app.agent_sent.borrow();
+        let prompts: Vec<_> = sent.iter().filter_map(|wire| match serde_json::from_str(wire).unwrap() {
+            AgentClientMessage::SubmitPrompt { session_id, text, attachments, .. } => Some((session_id, text, attachments)),
+            _ => None,
+        }).collect();
+        assert_eq!(prompts, vec![("test-session".into(), draft.trim().into(), vec![Attachment {
+            kind: "image/png".into(), path: Some("picked.png".into()), bytes: vec![1, 2, 3],
+        }])]);
+        assert!(!app.attach.pending.contains_key(&tab));
+    }
+
+    #[test]
+    fn attachment_limits_report_errors_without_changing_the_draft() {
+        let mut app = App::new();
+        app.load_fixture("attachment-limits", "Attachments", "[]");
+        assert!(app.attach_bytes("valid.png", "image/png", vec![0; MAX_BYTES]));
+        let draft = app.active_tab().draft.text.clone();
+        assert!(!app.attach_bytes("extra.png", "image/png", vec![0]));
+        assert!(app.modal.as_ref().unwrap().body.contains("20 MiB per message"));
+        assert_eq!(app.active_tab().draft.text, draft);
+        let tab = app.active_tab().id;
+        app.remove_attachment(tab, "[image1]");
+        assert!(!app.attach_bytes("large.png", "image/png", vec![255; MAX_WIRE_BYTES / 4 + 1]));
+        assert!(app.modal.as_ref().unwrap().body.contains("too large to send"));
+        assert!(app.attach_bytes("small.png", "image/png", vec![0]));
+        assert!(app.check_attachment_budget(app.active));
+    }
 
     #[test]
     fn swipe_accumulates_and_does_not_race_through_the_stack() {

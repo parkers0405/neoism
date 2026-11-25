@@ -128,6 +128,17 @@ impl App {
         let limit = session.older_limit.max(8);
         self.send_agent(neoism_protocol::agent::AgentClientMessage::GetHistory { session_id: session_id.into(), cursor: Some(cursor), limit: Some(limit) });
     }
+
+    pub(crate) fn touch_history_tick(&mut self) {
+        if !self.mobile { return; }
+        let crate::tabs::TabKind::Agent { session: Some(id) } = &self.active_tab().kind else { return };
+        let id = id.clone();
+        if let Some(session) = self.sessions.get_mut(&id) && session.touch_scrolled_up.replace(false) {
+            session.scrolled_up_at = Some(Instant::now());
+            session.turn_released();
+            self.request_older(&id);
+        }
+    }
 }
 
 #[cfg(test)]

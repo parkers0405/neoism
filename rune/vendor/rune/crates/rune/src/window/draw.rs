@@ -154,6 +154,8 @@ impl<S: 'static> Host<S> {
             if renderer.srgb_blend() == rt.srgb_blend()
                 && l.presented.as_ref().is_some_and(|p| p.unchanged(rt, &l.config, animating, next_tick)) {
                 sync_platform(l, rt, &mut self.secure_input, &mut self.ime_allowed, &self.clipboard);
+                #[cfg(target_os = "ios")]
+                rt.sync_touch_edit_menu(&l.window);
                 l.stop_pacing();
                 self.meter.set_pacing(l.pacing_state(false));
                 self.frame_reports.unchanged(target);
@@ -245,6 +247,8 @@ impl<S: 'static> Host<S> {
         if hidden { l.hidden_pace.rendered(now); }
         let update_ms = now.elapsed().as_secs_f64() * 1000.0;
         sync_platform(l, rt, &mut self.secure_input, &mut self.ime_allowed, &self.clipboard);
+        #[cfg(target_os = "ios")]
+        rt.sync_touch_edit_menu(&l.window);
         let target_format = if rt.srgb_blend() { l.config.format.remove_srgb_suffix() } else { l.config.format };
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor {
             format: (target_format != l.config.format).then_some(target_format),

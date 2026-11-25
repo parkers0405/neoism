@@ -33,6 +33,7 @@ use crate::window::{CustomCursor, CustomCursorSource, Theme};
 
 use super::app_state::{send_occluded_event_for_all_windows, AppState, EventWrapper};
 use super::notification_center::create_observer;
+use super::scene::{self, WinitSceneDelegate};
 use super::{app_state, monitor, MonitorHandle};
 
 #[derive(Debug)]
@@ -177,13 +178,20 @@ impl<T: 'static> EventLoop<T> {
         setup_control_flow_observers();
 
         let center = unsafe { NSNotificationCenter::defaultCenter() };
+        let uses_scenes = scene::uses_scene_lifecycle();
+        if uses_scenes {
+            // UIKit resolves the scene delegate by name from Info.plist.
+            let _ = WinitSceneDelegate::class();
+        }
 
         let _did_finish_launching_observer = create_observer(
             &center,
             // `application:didFinishLaunchingWithOptions:`
             unsafe { UIApplicationDidFinishLaunchingNotification },
             move |_| {
-                app_state::did_finish_launching(mtm);
+                if !uses_scenes {
+                    app_state::did_finish_launching(mtm);
+                }
             },
         );
         let _did_become_active_observer = create_observer(
@@ -191,7 +199,9 @@ impl<T: 'static> EventLoop<T> {
             // `applicationDidBecomeActive:`
             unsafe { UIApplicationDidBecomeActiveNotification },
             move |_| {
-                app_state::handle_nonuser_event(mtm, EventWrapper::StaticEvent(Event::Resumed));
+                if !uses_scenes {
+                    app_state::handle_nonuser_event(mtm, EventWrapper::StaticEvent(Event::Resumed));
+                }
             },
         );
         let _will_resign_active_observer = create_observer(
@@ -199,7 +209,9 @@ impl<T: 'static> EventLoop<T> {
             // `applicationWillResignActive:`
             unsafe { UIApplicationWillResignActiveNotification },
             move |_| {
-                app_state::handle_nonuser_event(mtm, EventWrapper::StaticEvent(Event::Suspended));
+                if !uses_scenes {
+                    app_state::handle_nonuser_event(mtm, EventWrapper::StaticEvent(Event::Suspended));
+                }
             },
         );
         let _will_enter_foreground_observer = create_observer(
@@ -207,6 +219,9 @@ impl<T: 'static> EventLoop<T> {
             // `applicationWillEnterForeground:`
             unsafe { UIApplicationWillEnterForegroundNotification },
             move |notification| {
+                if uses_scenes {
+                    return;
+                }
                 let app = unsafe { notification.object() }.expect(
                     "UIApplicationWillEnterForegroundNotification to have application object",
                 );
@@ -221,6 +236,9 @@ impl<T: 'static> EventLoop<T> {
             // `applicationDidEnterBackground:`
             unsafe { UIApplicationDidEnterBackgroundNotification },
             move |notification| {
+                if uses_scenes {
+                    return;
+                }
                 let app = unsafe { notification.object() }.expect(
                     "UIApplicationDidEnterBackgroundNotification to have application object",
                 );

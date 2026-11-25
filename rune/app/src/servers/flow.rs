@@ -205,7 +205,10 @@ impl App {
 
     /// Dial a server (or a system, or Local Server) and switch to it once it answers.
     pub fn connect_server(&mut self, selection: Selection) {
-        if selection.id == self.server.current_id() && selection.system.is_none() { return; }
+        if selection.id == self.server.current_id() && selection.system.is_none()
+            && !(self.mobile && crate::device_pair::is_session(&selection.endpoint)
+                && self.server.link.current.as_ref().is_some_and(|current| current.auth_token != selection.auth_token))
+        { return; }
         let id = selection.system.as_ref().map_or_else(|| selection.id.clone(), |s| format!("system:{s}"));
         let body = if selection.name.is_empty() { "Connecting to the selected system\u{2026}".to_owned() } else { selection.name.clone() };
         self.start_job(id, "Connecting", &body, move || super::dial(selection).map(Outcome::Connected));
@@ -311,8 +314,21 @@ impl App {
             return;
         };
         if let Some(index) = self.workspace_on(Some(&selection.id)) {
-            // Already open: its tab, and the tunnel just dialed for it closes again.
             self.select_workspace(index);
+            if self.mobile && self.workspace_active == index && crate::device_pair::is_session(&selection.endpoint)
+                && self.server.link.current.as_ref().is_some_and(|current| current.auth_token != selection.auth_token)
+            {
+                // Renew the socket without throwing away this Mac's open chats and drafts.
+                self.server.link.current = Some(selection);
+                self.workspace_ready = false;
+                self.connection = crate::app::Connection::Connecting;
+                self.agent_resync_due = true;
+                if let Some(wake) = self.waker.clone() {
+                    let (daemon, inbox) = crate::daemon::Daemon::start_to(Some(target), move || wake());
+                    self.daemon = Some(daemon);
+                    self.inbox = Some(inbox);
+                }
+            }
             return;
         }
         let (id, title, cwd, adopt) = match workspace {
@@ -355,7 +371,7 @@ impl App {
     /// `+ Add Server`: host this project, or join (`beginServer`).
     pub fn open_server_form(&mut self) {
         let directory = if self.server.remote() { crate::startup::home() } else { self.cwd.clone() };
-        self.form = Some(Form::server(Draft { host: true, directory, ..Draft::default() }));
+        self.form = Some(Form::server(Draft { host: !self.mobile, directory, ..Draft::default() }));
     }
 
     pub fn open_edit_server(&mut self, id: &str) {
@@ -376,6 +392,16 @@ impl App {
         if self.server.pending.is_some() { return; }
         let Some(form) = &mut self.form else { return };
         match &form.kind {
+            Kind::PairPhone => {
+                let password = form.value("token").unwrap_or_default();
+                if password.trim().is_empty() || password.len() > 256 || password.chars().any(char::is_control) {
+                    form.error = Some("Enter a pairing password of up to 256 bytes without control characters.".into());
+                    return;
+                }
+                let password = password.to_owned();
+                self.form = None;
+                crate::ui::phone_share::generate(self, password);
+            }
             Kind::System => {
                 let target = form.value("system_target").unwrap_or("").to_owned();
                 let name = form.value("system_name").unwrap_or("").to_owned();
@@ -498,6 +524,21 @@ pub fn operation(draft: &Draft) -> Result<Operation, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn re_pairing_replaces_the_selected_mac_credential_without_losing_its_draft() {
+        let mut app = App::new_surface(String::new(), true);
+        let mut selection = Selection { id: "mac".into(), endpoint: "wss://mac.example/mobile-device/session".into(), auth_token: Some("old".into()), ..Default::default() };
+        app.server.link.current = Some(selection.clone());
+        app.workspace_ready = true;
+        app.tabs[0].draft.replace_text("keep this draft");
+        selection.auth_token = Some("new".into());
+        let target = crate::daemon::Target { url: selection.endpoint.clone(), auth_token: selection.auth_token.clone(), pairing_token: None };
+        app.switch_connection(Connected { selection, target: Some(target), workspace: None, tunnel: None });
+        assert_eq!(app.server.link.current.unwrap().auth_token.as_deref(), Some("new"));
+        assert_eq!(app.tabs[0].draft.text, "keep this draft");
+        assert!(!app.workspace_ready);
+    }
 
     #[test]
     fn the_form_picks_its_operation_and_validates() {

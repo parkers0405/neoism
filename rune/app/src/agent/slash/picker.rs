@@ -22,6 +22,7 @@ pub enum Kind {
     McpActions,
     Connect,
     AgentConnections,
+    SubagentModels,
     ConnectAccount,
     ConnectAccountActions,
     ConnectAuth,

@@ -134,8 +134,8 @@ fn event_source_session<'a>(event: &'a Value, bound_session_id: &'a str) -> &'a 
         .unwrap_or(bound_session_id)
 }
 
-/// `SessionEvent.kind` sent once a session's stream from the agent is open again after
-/// it broke (an agent restart, a network drop, a machine that slept).
+/// `SessionEvent.kind` sent when a session's stream from the agent opens after a failed
+/// attach or a disconnect, so clients can reconcile what the live tail missed.
 pub(crate) const STREAM_RESUMED: &str = "stream.resumed";
 
 pub(crate) fn start_event_stream(inner: &Arc<AgentInner>, session_id: &str) -> bool {
@@ -220,10 +220,12 @@ async fn run_event_stream_inner(
     };
     let mut retry_delay = std::time::Duration::from_millis(250);
     let mut connected_once = false;
+    let mut attempted = false;
     loop {
         if inner.tx.is_closed() {
             return;
         }
+        let retrying = std::mem::replace(&mut attempted, true);
         let resp = match inner
             .authorize_agent_request(inner.agent_http.get(&url))
             .send()
@@ -274,10 +276,10 @@ async fn run_event_stream_inner(
                 )
                 .await;
             }
-        } else if connected_once {
-            // What the agent published while this stream was down never reached the
-            // client, and a live tail does not replay it: the client reconciles its
-            // transcripts from history. Older clients ignore the unknown kind.
+        } else if !catalog && retrying {
+            // The client's initial history read can finish while the first attach
+            // is still retrying. A live tail doesn't replay that gap (or a later
+            // disconnect), so ask the client to reconcile from history.
             let _ = inner.tx.send(AgentServerMessage::SessionEvent {
                 session_id: session_id.clone(),
                 kind: STREAM_RESUMED.to_owned(),

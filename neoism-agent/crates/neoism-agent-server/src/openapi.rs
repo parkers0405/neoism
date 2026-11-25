@@ -1772,6 +1772,24 @@ fn apply_authoritative_contract(document: &mut Value) {
             ),
         ),
     );
+    let subagent_default = json!({
+        "type": "object", "additionalProperties": false, "required": ["provider"],
+        "properties": {
+            "provider": { "type": "string", "description": "Subagent harness ID; use neoism for native tasks." },
+            "model": { "type": ["string", "null"], "description": "For neoism, provider/model (split on the first slash). For external harnesses, the exact advertised model value. Omit or send null to clear the override." },
+            "reasoning": { "type": ["string", "null"], "description": "For neoism, the model variant. For external harnesses, the exact advertised reasoning value, not the selector ID. Omit or send null to clear the override." }
+        }
+    });
+    for (method, operation, body) in [
+        ("get", "v2.subagents.default.get", None),
+        ("post", "v2.subagents.default.set", Some(json_request(true, subagent_default.clone()))),
+    ] {
+        add(
+            "/v2/subagents/default", method,
+            op(operation, "subagents", json!([query("directory", true, json!({"type":"string"}))]),
+                body, success("200", "Workspace subagent default", subagent_default.clone())),
+        );
+    }
     add(
         "/v2/execution-activity",
         "get",

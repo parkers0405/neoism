@@ -305,7 +305,10 @@ impl App {
     pub fn activity_follows_end(&self, session_id: &str) -> bool {
         let Some(session) = self.sessions.get(session_id).filter(|_| self.activity_state(session_id).is_some()) else { return false };
         let (offset, max) = session.scroll.get();
-        max > 1.0 && max - offset <= 2.0 && crate::ui::follow::wheel_base(session.wheel_target, offset) == offset
+        // A shrinking transcript can be logically pinned while its drawn bottom is still
+        // moving. Do not switch to the inline row just because the spring is in flight.
+        max > 1.0 && (session.following_bottom.get() || max - offset <= 2.0)
+            && crate::ui::follow::wheel_base(session.wheel_target, offset) == offset
     }
 
     fn activity_top_padding(&self, session_id: &str) -> f32 {
@@ -602,6 +605,12 @@ mod tests {
         assert_eq!(app.activity.as_ref().unwrap().state, State::Background);
         assert!(app.activity_pinned, "hydrated background work pins just like a live turn");
 
+        app.sessions["restored"].following_bottom.set(true);
+        app.sessions["restored"].scroll.set((500.0, 520.0));
+        assert!(!app.tick_activity().1, "a layout spring must not swap the activity view");
+        assert!(app.activity_pinned);
+
+        app.sessions["restored"].following_bottom.set(false);
         app.sessions["restored"].scroll.set((250.0, 500.0));
         app.tick_activity();
         assert!(!app.activity_pinned, "reading older messages keeps the indicator in the transcript");

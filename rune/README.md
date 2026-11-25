@@ -113,6 +113,7 @@ video so agents can read the motion without playing it. Extract any frame with
   active tab brighter; an accent dot while that tab's agent works, a yellow one for unsaved files). Tab titles
   use the proportional interface font (`Type::tab`), not the monospace. Status line with mode pill
   (`NORMAL`/`AGENT`/`TERMINAL`), cwd pill, git branch chip, LSP chip, position, FPS pill.
+- **Open on phone**: the desktop workspace strip's QR button opens the existing Fast Server host form for the current local project. Nothing is hosted until you set a password and confirm. On a Fast Server hosted by this app, the button reopens the QR and copy-link modal. The QR carries the existing HTTPS invite verbatim; the phone still needs the separate password. Joining someone else's server does not grant a share action. The offline `workspace-phone-share` scene uses a reserved `.invalid` host and starts no tunnel.
 - **Agent sidebar** (deliberately departs from `04-sidebar-conversations.png`): a search field with the project
   filter and New chat as icon buttons beside it; conversations are rounded cards with the project and age on top
   and the title and its model's provider mark below. The filter is a rounded popover ("Search projects…" over an
@@ -438,6 +439,8 @@ The agent composer uses native blue atomic pills for selected skills, image/file
 Chat Markdown image previews (`![description](path)`) load local absolute paths, workspace-relative paths, `file://` URLs and inline image data URLs through Rune's image cache. File reads and decoding run off the UI thread; completed decodes invalidate memoized Markdown so placeholders become pictures. Click a picture to open the existing image viewer. This is native-local loading, not a filesystem-serving HTTP endpoint; remote-host paths and web image URLs are not fetched. Use `--scene timeline-inline-image` to check the surface headlessly.
 
 Sent photos sit above and outside the text bubble. Multiple photos form a fanned stack; horizontal trackpad swipes (or Shift+wheel) cycle every photo without scrolling the transcript sideways. Click the stack to open the selected photo full-window, then use horizontal swipes, Left/Right, or the viewer arrows to browse the set. Escape, the close button, or the backdrop dismisses the viewer. `--scene agent-attach` checks a single photo; set `NEOISM_RUNE_PHOTO_STACK=1` for four photos.
+
+Chat attachments have a 20 MiB combined raw limit per message and must also fit the WebSocket encoding budget. The composer reports rejected files and keeps the draft if it exceeds the send budget. The picture picker lists PNG, JPEG, GIF, WebP, and BMP; export HEIC and other unsupported pictures as PNG or JPEG. Model providers may set lower limits or accept fewer formats.
 
 Clicking a local image file in the file tree opens a read-only tab that fits the image to its pane without cropping. Reopening the file selects the existing tab. Use `--scene image-viewer` to check the file preview headlessly.
 

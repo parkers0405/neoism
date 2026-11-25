@@ -78,14 +78,15 @@ fn main() {
         }
     };
     // The key code that types `c` under ⌘ on this machine's layout, if any.
-    let code_typing = |c: &str| (0..128u16).find(|&code| unsafe { event(code, COMMAND).charactersIgnoringModifiers() }
+    let code_typing = |c: &str, flags| (0..128u16).find(|&code| unsafe { event(code, flags).charactersIgnoringModifiers() }
         .is_some_and(|s| s.to_string() == c));
 
     let target: Retained<target::Target> = unsafe { msg_send_id![super(mtm.alloc().set_ivars(())), init] };
-    let cases: [(&str, &str, usize); 8] = [
+    let cases = [
         ("cmd+b", "b", COMMAND), ("cmd+=", "=", COMMAND), ("ctrl+cmd+f", "f", CONTROL | COMMAND),
         ("cmd+shift+z", "z", SHIFT | COMMAND), ("alt+cmd+k", "k", OPTION | COMMAND),
         ("cmd+left", "\u{f702}", COMMAND), ("f5", "\u{f708}", 0), ("cmd+backspace", "\u{8}", COMMAND),
+        ("cmd+shift+=", "+", COMMAND), ("cmd+-", "-", COMMAND),
     ];
     // SAFETY: this dedicated main-thread process owns every menu. It never opens a window or
     // activates; the only action the menu sends is the test target's `hit:`.
@@ -129,14 +130,15 @@ fn main() {
             let hits = target::HITS.with(|hits| hits.borrow().clone());
             handled.then(|| hits.join(","))
         };
-        for (accelerator, key, mask) in [("cmd+b", "b", COMMAND), ("cmd+=", "=", COMMAND), ("ctrl+cmd+f", "f", CONTROL | COMMAND),
-            ("cmd+shift+z", "z", SHIFT | COMMAND)] {
-            let Some(code) = code_typing(key) else { println!("SKIP: no key types {key:?} under ⌘ here"); continue };
-            assert_eq!(fires(code, mask).as_deref(), Some(accelerator), "{accelerator} from key code {code}");
+        for (accelerator, key, flags) in [("cmd+b", "b", COMMAND), ("cmd+=", "=", COMMAND), ("ctrl+cmd+f", "f", CONTROL | COMMAND),
+            ("cmd+shift+z", "Z", SHIFT | COMMAND), ("cmd+shift+=", "+", SHIFT | COMMAND), ("cmd+-", "-", COMMAND)] {
+            let Some(code) = code_typing(key, flags) else { println!("SKIP: no key types {key:?} under {flags:#x} here"); continue };
+            assert_eq!(fires(code, flags).as_deref(), Some(accelerator), "{accelerator} from key code {code}");
+            println!("PASS: {accelerator} from key code {code}");
         }
         // QWERTY's B position fires ⌘B only where it types "b" (on Dvorak it types "x").
         const QWERTY_B: u16 = 11;
-        let b_here = code_typing("b") == Some(QWERTY_B);
+        let b_here = code_typing("b", COMMAND) == Some(QWERTY_B);
         assert_eq!(fires(QWERTY_B, COMMAND).is_some(), b_here);
         println!("PASS: key equivalents hold the accelerators' characters; QWERTY B types b here: {b_here}");
     }

@@ -215,7 +215,11 @@ export function createAdapter(context) {
           if (m.type === 'result' && !m.parent_tool_use_id && !turn.done) {
             turn.done = true;
             if (active === turn) active = null;
-            if (m.is_error || m.subtype !== 'success') turn.reject(new Error(`Claude Code ${m.subtype}: ${(m.errors ?? []).join('; ')}`));
+            if (m.is_error || m.subtype !== 'success') {
+              const error = new Error(`Claude Code ${m.subtype}: ${(m.errors ?? []).join('; ')}`);
+              if (/oauth session expired|authentication_failed/i.test(error.message)) state.error = error;
+              turn.reject(error);
+            }
             else Promise.resolve(turn.interruption).then(() => turn.resolve({ finish: turn.interrupted ? 'interrupted' : 'completed', model, usage: usageOf(m.usage) }), turn.reject);
           }
         }
@@ -248,8 +252,12 @@ export function createAdapter(context) {
   async function ensure() {
     check();
     if (opening) await opening;
-    if (!runtime) {
-      opening ??= boot(expectedSession).finally(() => { opening = undefined; });
+    if (!runtime || runtime.error) {
+      // A new operation can reload native credentials. Never replay a failed turn.
+      opening ??= (async () => {
+        if (runtime?.error) await shutdown();
+        await boot(expectedSession);
+      })().finally(() => { opening = undefined; });
       await opening;
     }
     check();

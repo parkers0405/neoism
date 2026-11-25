@@ -3,6 +3,13 @@
 use super::*;
 
 impl El {
+    /// Clear input focus after a finger finishes panning this scroll viewport.
+    /// Taps, mouse wheels, and cancelled touches leave focus alone.
+    pub fn blur_after_touch_scroll(mut self) -> Self {
+        self.handlers.blur_after_touch_scroll = true;
+        self.preserve_focus_on_press(true)
+    }
+
     /// Let a finger pan the native viewport even when this element has `on_drag`.
     /// Mouse drags and taps keep their ordinary behavior. Touch Down is deferred until
     /// tap release, so a pan never starts mouse selection or changes the editor cursor.

@@ -47,6 +47,7 @@ pub struct Cx<S> {
     pub(super) env: Env,
     pub(super) titlebar_inset: f32,
     pub(super) chrome: crate::ChromeInsets,
+    pub(super) safe_area: [f32; 4],
     /// `Cx::caption_color`, read once the view returns.
     pub(super) caption_color: Option<Color>,
     /// `Cx::foreground` and `Cx::focus_ring`, read once the view returns.
@@ -73,6 +74,7 @@ impl<S> Cx<S> {
     pub fn retype<T>(&self) -> Cx<T> {
         Cx {
             env: self.env, titlebar_inset: self.titlebar_inset, chrome: self.chrome, caption_color: self.caption_color,
+            safe_area: self.safe_area,
             defaults: self.defaults,
             titlebar: self.titlebar,
             system_accent: self.system_accent,
@@ -214,13 +216,14 @@ impl<S> Cx<S> {
     pub fn focus_color(&self) -> Color {
         self.system_accent.focus(self.env.system_dark)
     }
-    /// Browser safe-area insets in points, in top/right/bottom/left order. Zero on native.
+    /// System safe-area insets in points, in top/right/bottom/left order. On iOS the
+    /// bottom inset also avoids a docked software keyboard. Available on iOS and web.
     /// Apply these inside a full-canvas root so backgrounds can extend to the screen edges.
     pub fn safe_area(&self) -> [f32; 4] {
         #[cfg(target_arch = "wasm32")]
         { crate::platform::web::safe_area() }
         #[cfg(not(target_arch = "wasm32"))]
-        { [0.0; 4] }
+        { self.safe_area }
     }
     /// The host's OS accessibility preference, independent of this commit's override.
     pub fn system_reduced_motion(&self) -> bool {

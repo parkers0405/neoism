@@ -45,6 +45,8 @@ pub(super) enum Action {
     Wheel(u64, Vec<String>, crate::WheelEvent),
     Gesture(Vec<String>, gesture_dispatch::Gesture),
     Ime(Ime),
+    #[cfg(target_os = "ios")]
+    TouchEditCommand(String, char),
     Paste(crate::ClipboardContent, Option<Option<String>>),
     /// A `Tx::read_clipboard` callback's id and what the clipboard held.
     ClipboardRead(u64, crate::ClipboardContent),
@@ -458,6 +460,8 @@ impl<S: 'static> Runtime<S> {
             Action::Wheel(gesture, chain, ev) => self.run_wheel(gesture, chain, ev, &mut one),
             Action::Gesture(chain, gesture) => self.run_gesture(chain, gesture, &mut one),
             Action::Ime(ev) => self.run_ime(ev, &mut one),
+            #[cfg(target_os = "ios")]
+            Action::TouchEditCommand(path, command) => self.run_touch_edit_command(&path, command, &mut one),
             Action::Paste(content, target) => {
                 if target.is_some_and(|target| target != self.paste_target()) { return false; }
                 let hook = self.focused_input().and_then(|i| i.paste.clone());

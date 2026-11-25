@@ -290,6 +290,7 @@ pub struct InputSpec {
     pub(crate) spellcheck: bool,
     /// [`El::selection_style`]: the selection's highlight and ink, by window focus, over `selection`.
     pub(crate) selection_style: Option<SelectionStyle>,
+    pub(crate) touch_edit_menu: bool,
 }
 
 impl std::fmt::Debug for InputSpec {
@@ -700,6 +701,7 @@ pub fn text_input(edit: &TextEdit, style: TextStyle) -> El {
         paste: None,
         spellcheck: false,
         selection_style: None,
+        touch_edit_menu: false,
     }));
     e.sync_input_pills();
     e.sync_input_rich();

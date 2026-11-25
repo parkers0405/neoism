@@ -17,9 +17,9 @@ fn equivalents_are_the_characters_the_accelerators_name() {
     assert_eq!(equivalent("ctrl+cmd+s"), eq("s", CONTROL | COMMAND));
     // ⌃⌘F, never the function-key flag (1 << 23) that AppKit draws as 🌐.
     assert_eq!(equivalent("ctrl+cmd+f"), eq("f", CONTROL | COMMAND));
-    // Shift stays in the mask beside the unshifted character.
+    // Shift stays in the mask for letters; the plus equivalent uses the literal symbol.
     assert_eq!(equivalent("cmd+shift+z"), eq("z", SHIFT | COMMAND));
-    assert_eq!(equivalent("cmd+shift+="), eq("=", SHIFT | COMMAND));
+    assert_eq!(equivalent("cmd+shift+="), eq("+", COMMAND));
     assert_eq!(equivalent("ctrl+alt+shift+cmd+k"), eq("k", CONTROL | OPTION | SHIFT | COMMAND));
 }
 

@@ -42,6 +42,9 @@ pub enum ServiceClientMessage {
     /// table.
     Agent {
         request_id: u64,
+        /// Workspace scope for subagent picker requests; legacy messages ignore it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_root: Option<String>,
         message: AgentClientMessage,
     },
     // ---------------- wave-7 web parity additions ----------------

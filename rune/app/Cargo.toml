@@ -18,17 +18,19 @@ frame-profile = ["rune/frame-profile"]
 
 [dependencies]
 wgpu = { version = "~30.0.1", default-features = false, features = ["std", "wgsl"] }
-rune = { git = "https://github.com/anomalyco/rune", rev = "e970367bd7d2a51e2e7d58e2978ea32eac7780cb" }
+rune = { git = "https://github.com/anomalyco/rune", rev = "e970367bd7d2a51e2e7d58e2978ea32eac7780cb", features = ["native-file-dialog"] }
 rune-kit = { git = "https://github.com/anomalyco/rune", rev = "e970367bd7d2a51e2e7d58e2978ea32eac7780cb", features = ["markdown"] }
 neoism-protocol = { path = "../../neoism-protocol" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tungstenite = { version = "0.24", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 dirs = "6"
 # Pure native Markdown dictionary helpers (no legacy UI dependency).
 typos-dict = "0.13"
 unicase = "2.9"
 png = "0.17"
+qrcode = { version = "0.14.1", default-features = false }
 base64 = "0.22"
 libloading = "0.8"
 unicode-segmentation = "1"
@@ -64,8 +66,18 @@ merman = { version = "=0.10.0", default-features = false, features = ["all-diagr
 resvg = { version = "=0.47.0", default-features = false, features = ["text"] }
 ttf-parser = { version = "=0.25.1", default-features = false, features = ["std"] }
 
+[target.'cfg(target_os = "ios")'.dependencies]
+block2 = "0.5.1"
+objc2 = "0.5.3"
+objc2-foundation = { version = "0.2.2", features = ["block2", "NSArray", "NSData", "NSError", "NSItemProvider", "NSProgress", "NSSet", "NSString", "NSThread"] }
+objc2-photos-ui = { version = "0.2.2", features = ["PHPicker"] }
+objc2-ui-kit = { version = "0.2.2", features = ["block2", "UIApplication", "UIImage", "UIScene", "UISceneDefinitions", "UIViewController", "UIWindow", "UIWindowScene"] }
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1.12"
 
 [profile.release]
 debug = 1

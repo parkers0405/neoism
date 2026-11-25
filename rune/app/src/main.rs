@@ -25,6 +25,12 @@ mod home;
 mod image_viewer;
 mod keys;
 mod mermaid;
+mod mobile;
+mod mobile_photo;
+mod device_pair;
+mod mobile_qr;
+#[cfg(target_os = "ios")]
+mod mobile_dictation;
 #[cfg(target_os = "macos")]
 mod open_documents;
 mod palette;
@@ -91,12 +97,13 @@ fn setup(app: &mut App, waker: rune::Waker) {
     app.tools.icons.load(&images);
     app.images = Some(images);
     // Headless renders (`--snap`, `--tree`) draw the reference look without a daemon.
-    if std::env::var_os("NEOISM_RUNE_OFFLINE").is_none() {
+    if !app.mobile && std::env::var_os("NEOISM_RUNE_OFFLINE").is_none() {
         let wake = waker.clone();
         let (daemon, inbox) = daemon::Daemon::start(move || wake());
         app.daemon = Some(daemon);
         app.inbox = Some(inbox);
     }
+    if app.mobile { crate::mobile::restore_device(app); return; }
     #[cfg(target_os = "macos")]
     let documents = app.launch_documents.take();
     #[cfg(target_os = "macos")]
@@ -158,7 +165,15 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     if let Some(wait) = reconnect_wait { wake!("reconnect-notice", wait); }
     let changed = changed | reconnect_changed;
     let fonts_changed = app.sync_font_families(tx);
-    let changed = changed | inbound_changed | fonts_changed | app.take_decoded_previews() | app.take_picked_attachments() | app.poll_server() | app.sync_terminals(tx);
+    let changed = changed | inbound_changed | fonts_changed | app.take_decoded_previews() | app.poll_server() | app.sync_terminals(tx);
+    let changed = changed | (app.mobile && (crate::mobile::poll_pairing(app) | app.poll_background_import()));
+    let changed = changed | crate::ui::phone_share::poll(app);
+    #[cfg(target_os = "ios")]
+    let changed = changed | crate::mobile_dictation::poll(app);
+    #[cfg(any(target_os = "ios", target_os = "macos"))]
+    let changed = changed | mobile_qr::poll(app);
+    #[cfg(target_os = "ios")]
+    let changed = changed | mobile_photo::poll(app);
     let (goal_wait, goal_changed) = app.goals_tick();
     if let Some(wait) = goal_wait { wake!("goal-age", wait); }
     let changed = changed | goal_changed;
@@ -199,13 +214,14 @@ fn poll_frame(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
     let table_changed = table_changed | marquee_changed;
     if table_held { wake!("table-bar", std::time::Duration::from_millis(300)); }
     // The input bar's stars sparkle while one is on screen (live opacities, ten steps a second).
-    if app.tick_stars(clock) { wake!("stars", std::time::Duration::from_millis(100)); }
+    if !app.mobile && app.tick_stars(clock) { wake!("stars", std::time::Duration::from_millis(100)); }
     // Presence orbs flow (at 30 Hz) while one is in view.
     if app.orbs_on_screen() && let Some(next) = app.orbs.tick() { wake!("orbs", next); }
     app.editor_follow_cursor(tx);
     app.tree_follow_selection(tx);
     app.conversation_follow(tx);
     app.conversation_autoload();
+    app.touch_history_tick();
     if let Some(wait) = app.project_add_tick() { wake!("project-add", wait); }
     if let Some(wait) = app.fork_tick() { wake!("fork", wait); }
     if let Some(wait) = app.catalog_tick() { wake!("model-catalog", wait); }
@@ -390,6 +406,10 @@ fn app_spec() -> AppSpec<App> {
             ("git-review-nowrap", |s| { git::fixture(s, true); s.git_panel.review.no_wrap = true; s.git_review_fixture_relayout(); }),
             ("git-review-split", |s| { git::fixture(s, true); s.git_panel.review.split = true; s.git_review_fixture_relayout(); }),
             ("agent-new", |s| { s.open_tab(tabs::TabKind::Agent { session: None }); }),
+            ("agent-subagent-models", |s| {
+                s.open_tab(tabs::TabKind::Agent { session: None });
+                s.fixture_subagent_models();
+            }),
             ("agent-external-work", |s| {
                 use neoism_protocol::agent::AgentServerMessage;
                 s.focused_view = true;
@@ -617,6 +637,12 @@ fn app_spec() -> AppSpec<App> {
             ("server-creating", servers::flow::progress_fixture),
             ("server-ready", |s| {
                 let invite = "https://example.opentunnel.net/";
+                s.server.ready_invite = Some(invite.into());
+                s.modal = Some(ui::modal::Modal::fast_server_ready("Team project", invite));
+            }),
+            ("workspace-phone-share", |s| {
+                // Reserved hostname, same URL shape as production; no host or credentials.
+                let invite = "https://phone-share.example.invalid/?name=Team+project";
                 s.server.ready_invite = Some(invite.into());
                 s.modal = Some(ui::modal::Modal::fast_server_ready("Team project", invite));
             }),
@@ -1167,6 +1193,10 @@ fn window_app(init: impl FnOnce() -> App + 'static) -> rune::App<App> {
 
 fn main() {
     startup::record_crashes();
+    if cfg!(target_os = "ios") || std::env::var_os("NEOISM_MOBILE").is_some() {
+        mobile::run();
+        return;
+    }
     // `neoism --version`, `neoism update` and the rest answer before any window or daemon.
     let args: Vec<String> = std::env::args().skip(1).collect();
     let launch = match cli::dispatch(&args) { Ok(launch) => launch, Err(code) => std::process::exit(code) };
@@ -1174,6 +1204,16 @@ fn main() {
     // A distinct id per instance lets several builds run side by side (and be found by class).
     let app_id = std::env::var("NEOISM_RUNE_APP_ID").unwrap_or_else(|_| "ai.neoism.rune".into());
     rune::set_app_id(Box::leak(app_id.into_boxed_str()));
+    #[cfg(target_os = "macos")]
+    let app_icon = include_bytes!("../../../misc/macos/neoism.icns").as_slice();
+    #[cfg(target_os = "windows")]
+    let app_icon = include_bytes!("../../../misc/windows/neoism.ico").as_slice();
+    #[cfg(target_os = "linux")]
+    let app_icon = include_bytes!("../../../neoism-frontend/shared/assets/icons/neoism.png").as_slice();
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    if let Err(err) = rune::set_app_icon(app_icon) {
+        eprintln!("Could not set the Neoism app icon: {err}");
+    }
     #[cfg(target_os = "macos")]
     rune::set_open_documents_handler(open_documents::receive);
     #[cfg(target_os = "macos")]

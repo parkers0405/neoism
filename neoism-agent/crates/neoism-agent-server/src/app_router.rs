@@ -106,6 +106,11 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
             get(crate::external_agent::options::preview)
                 .post(crate::external_agent::options::preview_selected),
         )
+        .route(
+            "/v2/subagents/default",
+            get(crate::plugins::subagents::get_default)
+                .post(crate::plugins::subagents::set_default),
+        )
         .route("/v2/session-projects", get(v2_session_projects))
         .route("/v2/sessions", get(v2_session_list).post(session_create))
         .route(
@@ -162,7 +167,11 @@ pub(crate) fn app_with_cors(state: AppState, allowed_origins: &[String]) -> Rout
         .route("/v2/sessions/:session_id/fork", post(session_fork))
         .route("/v2/sessions/:session_id/diff", get(session_diff))
         .route("/v2/sessions/:session_id/undo-tree", get(session_undo_tree))
-        .route("/v2/sessions/:session_id/prompt", post(v2_prompt))
+        .route(
+            "/v2/sessions/:session_id/prompt",
+            // The composer allows 20 MiB raw; base64 and JSON need additional room.
+            post(v2_prompt).layer(axum::extract::DefaultBodyLimit::max(28 * 1024 * 1024)),
+        )
         .route("/v2/sessions/:session_id/prompt-if-idle", post(crate::v2_routes::v2_prompt_if_idle))
         .route(
             "/v2/sessions/:session_id/prompt-async",

@@ -331,6 +331,9 @@ impl<S: 'static> Runtime<S> {
         self.focused_input().is_some_and(|i| i.edit.is_secure())
     }
 
+    #[cfg(target_os = "ios")]
+    pub(crate) fn has_text_input_focus(&self) -> bool { self.focused_input().is_some() }
+
     pub fn has_focus(&self) -> bool {
         self.focus.path().is_some()
     }

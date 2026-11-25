@@ -173,7 +173,7 @@ delegate and all existing methods. An existing non-Rune selector is an error; th
 Rune hook returns nil after teardown. Key equivalents are native menu equivalents,
 not global registrations. AppKit matches them by the character typed, so an item's
 equivalent is the character its accelerator names: `cmd+b` is "b" with ⌘ on every
-layout, `cmd+shift+=` is "=" with ⇧⌘, and named keys use AppKit's characters (↩ ⇥ ⎋ ⌫ ⌦,
+layout, `cmd+shift+=` is the literal "+" with ⌘, and named keys use AppKit's characters (↩ ⇥ ⎋ ⌫ ⌦,
 arrows, F-keys). App menu, named menus, Dock and context menus all show the same key.
 When two items in the menu bar share an equivalent, AppKit gives it to the first and
 the later one shows none, so one key never runs two items. Rune never sets the

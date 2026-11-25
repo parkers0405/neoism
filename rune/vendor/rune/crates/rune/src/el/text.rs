@@ -578,4 +578,11 @@ impl El {
         if let Some(i) = self.cold.get_mut_if_some().and_then(|c| c.input.as_deref_mut()) { i.animate_layout = true; }
         self
     }
+
+    /// Let the iOS host show its edit menu after a double tap or press-and-hold.
+    /// Selection remains in this field's `TextEdit`. Secure fields never opt in.
+    pub fn touch_edit_menu(mut self) -> Self {
+        if let Some(input) = &mut self.cold_mut().input { input.touch_edit_menu = true; }
+        self
+    }
 }

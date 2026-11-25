@@ -341,6 +341,15 @@ impl App {
         // Systems rows open their settings inside the palette rather than closing it.
         if let Some(picker) = &self.picker {
             match picker.rows().get(index.unwrap_or(picker.selected)).map(|r| r.target) {
+                Some(Target::System(i)) if self.mobile => {
+                    let system = picker.systems[i].clone();
+                    if system.local || system.enabled {
+                        self.picker = None;
+                        if system.local { self.select_server("local"); }
+                        else { self.connect_system(&system.id, &system.name); }
+                    }
+                    return;
+                }
                 Some(Target::System(i)) => return self.open_system_settings(i),
                 Some(Target::Setting(setting)) => return self.run_setting(setting),
                 _ => {}
@@ -409,7 +418,7 @@ impl App {
             Action::CloseSplitOrTab => self.close_tab(self.active),
             Action::IncreaseFontSize => self.set_font_size(self.ty.size + 1.0),
             Action::DecreaseFontSize => self.set_font_size(self.ty.size - 1.0),
-            Action::ResetFontSize => self.set_font_size(crate::config::DEFAULT_FONT_SIZE),
+            Action::ResetFontSize => self.set_font_size(if self.mobile { crate::mobile::DEFAULT_FONT_SIZE } else { crate::config::DEFAULT_FONT_SIZE }),
             Action::ThemePicker => self.open_picker(Mode::Themes),
             Action::OpenSettings => self.open_settings(),
             Action::Backgrounds => self.open_picker(Mode::Backgrounds),
@@ -432,8 +441,14 @@ impl App {
 
     /// Font zoom shows at once; the config write follows (as the GPUiX host did).
     fn set_font_size(&mut self, size: f32) {
+        #[cfg(debug_assertions)]
+        if self.mobile && std::env::var_os("NEOISM_TRACE_MAC_ZOOM").is_some() {
+            eprintln!("zoom trace: font size {} -> {}", self.ty.size, size.clamp(8.0, 40.0));
+        }
         self.ty.size = size.clamp(8.0, 40.0);
-        self.set_setting("appearance.fonts.size", json!(self.ty.size));
+        // Mobile presentation changes must not change the paired desktop's settings.
+        if self.mobile { crate::mobile::save_zoom(self.ty.size); }
+        else { self.set_setting("appearance.fonts.size", json!(self.ty.size)); }
     }
 
     /// Persist a background choice (`ui.window.background-image[-disabled]`).
@@ -502,6 +517,16 @@ impl App {
 
     pub fn apply_theme(&mut self, name: &str) {
         self.pal = palette(name);
+        if self.mobile {
+            if let Some(images) = &self.images { self.wordmark.load(images, crate::wordmark::tint_for(self.pal)); }
+            let path = crate::mobile::theme_path();
+            if let Some(dir) = path.parent() {
+                if let Err(error) = std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&path, self.pal.name)) {
+                    self.modal = Some(crate::ui::modal::Modal::notice("Could not save theme", &error.to_string()));
+                }
+            }
+            return;
+        }
         let colors = self.terminal_colors();
         for term in self.terminals.values_mut() { term.set_colors(&colors); }
         if let Some(images) = &self.images { self.wordmark.load(images, crate::wordmark::tint_for(self.pal)); }

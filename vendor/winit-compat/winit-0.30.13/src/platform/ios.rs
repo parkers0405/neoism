@@ -97,6 +97,14 @@ impl<T: 'static> EventLoopExtIOS for EventLoop<T> {
 
 /// Additional methods on [`Window`] that are specific to iOS.
 pub trait WindowExtIOS {
+    /// Presents UIKit's standard edit menu at a point in the window's logical coordinates.
+    fn present_edit_menu(&self, point: (f32, f32), selection: bool, select_all: bool);
+
+    /// Dismisses the active UIKit edit menu and disables its responder actions.
+    fn dismiss_edit_menu(&self);
+    /// The UIKit view's usable-area insets in points, ordered top/right/bottom/left.
+    /// The bottom inset includes a docked software keyboard when visible.
+    fn safe_area_insets(&self) -> [f32; 4];
     /// Sets the [`contentScaleFactor`] of the underlying [`UIWindow`] to `scale_factor`.
     ///
     /// The default value is device dependent, and it's recommended GLES or Metal applications set
@@ -195,6 +203,16 @@ pub trait WindowExtIOS {
 }
 
 impl WindowExtIOS for Window {
+    fn present_edit_menu(&self, point: (f32, f32), selection: bool, select_all: bool) {
+        self.window.maybe_queue_on_main(move |w| w.present_edit_menu(point, selection, select_all));
+    }
+
+    fn dismiss_edit_menu(&self) {
+        self.window.maybe_queue_on_main(|w| w.dismiss_edit_menu());
+    }
+    fn safe_area_insets(&self) -> [f32; 4] {
+        self.window.maybe_wait_on_main(|w| w.safe_area_insets())
+    }
     #[inline]
     fn set_scale_factor(&self, scale_factor: f64) {
         self.window.maybe_queue_on_main(move |w| w.set_scale_factor(scale_factor))
@@ -256,6 +274,24 @@ impl WindowExtIOS for Window {
     #[inline]
     fn recognize_rotation_gesture(&self, should_recognize: bool) {
         self.window.maybe_queue_on_main(move |w| w.recognize_rotation_gesture(should_recognize));
+    }
+}
+
+/// Standard edit menu actions. Paste carries the text read directly in the UIKit action.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EditAction {
+    Cut,
+    Copy,
+    Paste(String),
+    SelectAll,
+}
+
+/// Writes plain text to the iOS system pasteboard from the main thread.
+pub fn write_clipboard_text(text: &str) {
+    use objc2_foundation::{MainThreadMarker, NSString};
+    use objc2_ui_kit::UIPasteboard;
+    if MainThreadMarker::new().is_some() {
+        unsafe { UIPasteboard::generalPasteboard().setString(Some(&NSString::from_str(text))); }
     }
 }
 

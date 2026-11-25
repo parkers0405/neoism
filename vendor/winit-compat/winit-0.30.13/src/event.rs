@@ -150,6 +150,10 @@ pub enum StartCause {
 /// Describes an event from a [`Window`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum WindowEvent {
+    /// A standard UIKit edit action requested on a custom text editor.
+    #[cfg(target_os = "ios")]
+    IosEditAction(crate::platform::ios::EditAction),
+
     /// The activation token was delivered back and now could be used.
     #[cfg_attr(not(any(x11_platform, wayland_platform)), allow(rustdoc::broken_intra_doc_links))]
     /// Delivered in response to [`request_activation_token`].

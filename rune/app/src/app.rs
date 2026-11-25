@@ -84,6 +84,14 @@ pub enum Focus {
 const GIT_WATCH_TOKEN: &str = "neoism-rune-git-status";
 
 pub struct App {
+    pub(crate) mobile: bool,
+    pub(crate) mobile_composer_menu: bool,
+    pub(crate) mobile_pairing: crate::mobile::Pairing,
+    pub(crate) device_invite: Option<crate::device_pair::Reply<crate::ui::phone_share::InviteReply>>,
+    pub(crate) device_qr: Option<String>,
+    pub(crate) mobile_backgrounds: crate::settings::mobile_backgrounds::State,
+    #[cfg(target_os = "ios")]
+    pub(crate) mobile_dictation: Option<crate::mobile_dictation::Dictation>,
     pub workspaces: Vec<crate::workspace::Entry>,
     pub workspace_active: usize,
     /// Window-wide round-robin cursor; deliberately not swapped with workspace state.
@@ -253,6 +261,10 @@ pub struct App {
     pub orbs: crate::ui::orb::Orbs,
     /// Wakes the UI thread (poll) from views and background work.
     pub waker: Option<rune::Waker>,
+    #[cfg(target_os = "ios")]
+    pub(crate) mobile_photo: Option<crate::mobile_photo::Pending>,
+    #[cfg(any(target_os = "ios", target_os = "macos"))]
+    pub(crate) mobile_qr: Option<crate::mobile_qr::Pending>,
     pub mermaid_cache: crate::mermaid::Cache,
     pub mermaid_sources: std::collections::HashSet<String>,
     pub mermaid_view_version: u64,
@@ -369,6 +381,10 @@ impl App {
     }
 
     pub(crate) fn new_at(cwd: String) -> App {
+        Self::new_surface(cwd, false)
+    }
+
+    pub(crate) fn new_surface(cwd: String, mobile: bool) -> App {
         let config = crate::config::load();
         let mut wordmark = Wordmark::default();
         wordmark.fire_enabled = config.wordmark_fire;
@@ -378,6 +394,14 @@ impl App {
         let workspace_name = std::path::Path::new(&cwd).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or("~".into());
         let local_name = crate::ui::orb::local_display_name(config.display_name.as_deref());
         let mut app = App {
+            mobile,
+            mobile_composer_menu: false,
+            mobile_pairing: Default::default(),
+            device_invite: None,
+            device_qr: None,
+            mobile_backgrounds: Default::default(),
+            #[cfg(target_os = "ios")]
+            mobile_dictation: None,
             #[cfg(target_os = "macos")]
             launch_documents: None,
             liquid_glass_selection: config.liquid_glass_selection,
@@ -486,6 +510,10 @@ impl App {
             orbs: crate::ui::orb::Orbs::new(config.gold_avatar.then(|| local_name.clone())),
             local_name,
             waker: None,
+            #[cfg(target_os = "ios")]
+            mobile_photo: None,
+            #[cfg(any(target_os = "ios", target_os = "macos"))]
+            mobile_qr: None,
             mermaid_cache: Default::default(),
             mermaid_sources: Default::default(),
             mermaid_view_version: 0,
@@ -502,13 +530,13 @@ impl App {
             background_job_versions: Default::default(), background_jobs: Default::default(), background_started: Default::default(),
             header_hover: None,
             // The local branch until the daemon's Git watch reports counts.
-            git: crate::config::git_branch().map(|branch| crate::ui::status::GitSummary { branch, ..Default::default() }),
+            git: if mobile { None } else { crate::config::git_branch().map(|branch| crate::ui::status::GitSummary { branch, ..Default::default() }) },
             git_panel: Default::default(),
             splash: Default::default(),
             terminals: HashMap::new(),
             pending_pty: Default::default(),
         };
-        app.open_tab(TabKind::Home);
+        app.open_tab(if mobile { TabKind::Agent { session: None } } else { TabKind::Home });
         app.workspaces.push(crate::workspace::Entry { id: app.workspace_id.clone(), title: app.workspace_name.clone(), server: None, state: None });
         app
     }
@@ -564,10 +592,21 @@ impl App {
                 self.workspace_ready = false;
                 self.agent_resync_due |= again;
                 self.server.link.answered();
+                if self.paired_chat_device() {
+                    // The isolated chat socket does not register or switch daemon workspaces.
+                    self.server.link.adopt = None;
+                    self.conv_all = true;
+                    self.workspace_ready = true;
+                    self.agent_connected();
+                    if std::mem::take(&mut self.agent_resync_due) { self.agent_resync(true); }
+                    return;
+                }
                 self.register_workspace();
-                self.collab_reconnect();
-                self.tree_reconnected();
-                self.git_connected();
+                if !self.mobile {
+                    self.collab_reconnect();
+                    self.tree_reconnected();
+                    self.git_connected();
+                }
             }
             // The lid opened on a connection that survived it: nothing was lost on the way
             // here, but the agent behind the daemon may have moved on meanwhile.

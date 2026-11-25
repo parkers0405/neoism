@@ -9,6 +9,9 @@ use std::collections::VecDeque;
 use super::selectable::{Unit, extend};
 use super::*;
 
+/// Two taps need not land on the same pixel; the second tap chooses the word.
+const EDIT_TAP_SLOP: f32 = 16.0;
+
 #[derive(Clone, Copy, Debug)]
 enum Step {
     Down { clicks: u8, shift: bool },
@@ -24,8 +27,8 @@ pub(super) struct Hit {
 
 #[derive(Default)]
 pub(super) struct InputClick {
-    /// The last non-Shift press on an input: `(path, time, window_x, window_y, clicks)`.
-    last: Option<(String, f64, f32, f32, u8)>,
+    /// Last non-Shift press: `(path, time, window_x, window_y, clicks, edit_touch)`.
+    last: Option<(String, f64, f32, f32, u8, bool)>,
     /// What the press that started the current selection selects by, and the unit range it
     /// began on, which a drag keeps whole.
     unit: Unit,
@@ -128,9 +131,11 @@ fn unit_at(e: &crate::edit::TextEdit, h: Hit, unit: Unit) -> (usize, usize) {
 impl<S: 'static> Runtime<S> {
     /// A press at (x, y) on text field `ji`, down at `down_at`; `second` when it's the second
     /// of a double press.
-    pub(super) fn input_down(&mut self, ji: usize, x: f32, y: f32, down_at: f64, second: bool) {
-        let now = self.now_clock();
-        let shift = self.held_mods.shift;
+    pub(super) fn input_down(&mut self, ji: usize, x: f32, y: f32, down_at: f64, second: bool, edit_touch: Option<f64>) {
+        // Touch intervals use input timestamps, not the time of the last rendered frame.
+        let now = edit_touch.unwrap_or_else(|| self.now_clock());
+        let shift = edit_touch.is_none() && self.held_mods.shift;
+        let slop = if edit_touch.is_some() { EDIT_TAP_SLOP } else { CLICK_SLOP };
         // Its text drew scaled or rotated with its box: map the press back to the rest layout.
         let [lx, ly] = self.to_local(ji, x, y);
         let jn = &self.nodes[ji];
@@ -142,17 +147,19 @@ impl<S: 'static> Runtime<S> {
             1
         } else {
             let n = match &self.input_click.last {
-                Some((p, t, px, py, n))
+                Some((p, t, px, py, n, touch))
                     if *p == path
+                        && *touch == edit_touch.is_some()
+                        && now >= *t
                         && now - t <= self.double_click_interval
-                        && (x - px).abs() <= CLICK_SLOP
-                        && (y - py).abs() <= CLICK_SLOP =>
+                        && (x - px).abs() <= slop
+                        && (y - py).abs() <= slop =>
                 {
                     (n + 1).min(3)
                 }
                 _ => 1,
             };
-            self.input_click.last = Some((path.clone(), now, x, y, n));
+            self.input_click.last = Some((path.clone(), now, x, y, n, edit_touch.is_some()));
             n
         };
         self.input_click.dragging = Some(path.clone());
@@ -176,6 +183,17 @@ impl<S: 'static> Runtime<S> {
             screen: self.screen_at(x, y),
         };
         self.press.hold(capture::Held::new(path, d, crate::PointerButton::Primary, (x, y), down_at, second, None));
+    }
+
+    pub(super) fn input_hold_word(&mut self, path: &str, x: f32, y: f32) -> bool {
+        let Some(i) = self.live_index(path).filter(|&i| self.allowed(i)) else { return false };
+        if !self.touch_edit_field(i) || self.input_click.dragging_path() != Some(path) { return false; }
+        let [lx, ly] = self.to_local(i, x, y);
+        let [ix, iy, ..] = self.nodes[i].inset;
+        self.input_click.clear_last();
+        self.input_click.steps.push_back((path.to_owned(), Step::Down { clicks: 2, shift: false }));
+        self.queue.push(Action::Focus(path.to_owned(), lx - ix, ly - iy));
+        true
     }
 
     pub(super) fn input_drag(&mut self, x: f32, y: f32, drag_move: bool) {

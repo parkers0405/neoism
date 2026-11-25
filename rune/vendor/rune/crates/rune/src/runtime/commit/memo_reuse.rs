@@ -339,6 +339,7 @@ fn same_handlers(
         gestures,
         on_drag,
         touch_policy,
+        blur_after_touch_scroll,
         drag_out,
         drag_threshold,
         on_drag_start,
@@ -384,6 +385,7 @@ fn same_handlers(
         && same_gestures(&a.gestures, gestures)
         && opt_rc_eq(&a.on_drag, on_drag)
         && a.touch_policy == *touch_policy
+        && a.blur_after_touch_scroll == *blur_after_touch_scroll
         && opt_rc_eq(&a.drag_out, drag_out)
         && a.drag_threshold == *drag_threshold
         && opt_rc_eq(&a.on_drag_start, on_drag_start)

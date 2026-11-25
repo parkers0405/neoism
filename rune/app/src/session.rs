@@ -362,7 +362,7 @@ impl App {
             Some("notes") => Some(Sidebar::Notes),
             _ => None,
         };
-        self.tabs.iter_mut().enumerate().for_each(|(i, t)| t.draft.focused = i == self.active);
+        self.tabs.iter_mut().enumerate().for_each(|(i, t)| t.draft.focused = i == self.active && !cfg!(target_os = "ios"));
     }
 }
 

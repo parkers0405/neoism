@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Neoism Mobile Preview</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #101011; color: #f3f3f3; font: 14px system-ui, sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: center; justify-content: space-between; padding: 14px 24px; border-bottom: 1px solid #2a2a2c; }
+  h1 { margin: 0; font-size: 15px; letter-spacing: -.02em; }
+  h1 span { color: #a1a1aa; font-weight: 400; margin-left: 6px; }
+  nav { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  button, select { font: inherit; color: #c8c8cc; background: #19191b; border: 1px solid #303034; border-radius: 8px; min-height: 36px; padding: 4px 10px; cursor: pointer; }
+  button[aria-pressed="true"] { background: #f3f3f3; border-color: #f3f3f3; color: #101011; }
+  main { display: grid; justify-items: center; gap: 12px; padding: 16px 12px; }
+  img { display: block; max-width: 100%; max-height: calc(100dvh - 120px); width: auto; height: auto; object-fit: contain; border-radius: 16px; outline: 1px solid #38383b; background: #19191b; }
+  [hidden] { display: none; }
+  [role="status"] { margin: 0; text-align: center; color: #a1a1aa; font-size: 12px; }
+  @media (max-width: 620px) { header { padding: 12px; } img { max-height: none; } }
+</style>
+<header>
+  <h1>Neoism <span>Mobile preview</span></h1>
+  <nav aria-label="Preview controls">
+    <button data-scene="pair" aria-pressed="false">Pair</button>
+    <button data-scene="welcome" aria-pressed="false">Welcome</button>
+    <button data-scene="chat" aria-pressed="true">Chat</button>
+    <button data-scene="history" aria-pressed="false">Chats</button>
+    <button data-scene="systems" aria-pressed="false">Devices</button>
+    <button data-scene="crafting" aria-pressed="false">Crafting</button>
+    <button data-scene="models" aria-pressed="false">Models</button>
+    <button data-scene="composer-menu" aria-pressed="false">Composer menu</button>
+    <button data-scene="settings" aria-pressed="false">Settings</button>
+    <button data-scene="themes" aria-pressed="false">Themes</button>
+    <select aria-label="Preview dimensions">
+      <option>320x640</option><option selected>390x844</option><option>430x932</option>
+    </select>
+    <button id="refresh">Refresh render</button>
+  </nav>
+</header>
+<main>
+  <img alt="Rune-rendered Neoism Mobile preview" width="390" height="844">
+  <button id="replay" hidden>Replay splash</button>
+  <p role="status">Rendering preview...</p>
+</main>
+<script>
+  const buttons = [...document.querySelectorAll('[data-scene]')];
+  const size = document.querySelector('select');
+  const image = document.querySelector('img');
+  const replay = document.querySelector('#replay');
+  const status = document.querySelector('[role="status"]');
+  let scene = 'chat';
+  function render() {
+    replay.hidden = scene !== 'welcome';
+    const [width, height] = size.value.split('x').map(Number);
+    image.width = width;
+    image.height = height;
+    image.style.width = `min(${width}px, calc((100dvh - 120px) * ${width / height}))`;
+    image.style.aspectRatio = `${width} / ${height}`;
+    status.textContent = 'Rendering preview...';
+    image.alt = `Neoism Mobile ${scene} screen`;
+    image.src = `/render.png?${new URLSearchParams({scene, size: size.value, refresh: Date.now()})}`;
+  }
+  image.onload = () => { status.textContent = `${size.value} pt | Rune render, sample data only`; };
+  image.onerror = () => { status.textContent = 'Render failed. Check the local preview server and try Refresh render.'; };
+  replay.onclick = () => {
+    status.textContent = 'Rendering the native splash animation...';
+    image.src = `/splash.png?${new URLSearchParams({size: size.value, refresh: Date.now()})}`;
+  };
+  image.onclick = () => { if (scene === 'welcome') replay.click(); };
+  buttons.forEach(button => button.onclick = () => {
+    scene = button.dataset.scene;
+    buttons.forEach(item => item.setAttribute('aria-pressed', item === button));
+    render();
+  });
+  size.onchange = render;
+  document.querySelector('#refresh').onclick = render;
+  render();
+</script>
+</html>

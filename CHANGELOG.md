@@ -2,6 +2,12 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.170] - 2026-11-25
+
+- Share a desktop workspace with Neoism Mobile using a password-protected QR invite. The iOS app is distributed separately through TestFlight.
+- Set a workspace-wide default harness, model, and reasoning level for subagents. External agent connections now carry more of their model options through to subagent runs.
+- Native file pickers and app icon handling have been updated, along with keyboard and touch input fixes in Rune.
+
 ## [0.7.169] - 2026-11-23
 
 ### Workflows, external agents, and image previews

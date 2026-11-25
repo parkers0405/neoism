@@ -17,7 +17,7 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{msg_send, sel};
 use objc2_foundation::{
-    CGRect, CGSize, MainThreadMarker, NSInteger, NSObjectProtocol, NSOperatingSystemVersion,
+    NSArray, CGRect, CGSize, MainThreadMarker, NSInteger, NSObjectProtocol, NSOperatingSystemVersion,
     NSProcessInfo,
 };
 use objc2_ui_kit::{UIApplication, UICoordinateSpace, UIView, UIWindow};
@@ -461,6 +461,9 @@ pub(crate) fn will_launch(mtm: MainThreadMarker, queued_handler: EventLoopHandle
 
 pub fn did_finish_launching(mtm: MainThreadMarker) {
     let mut this = AppState::get_mut(mtm);
+    if this.has_launched() {
+        return; // UIKit can reconnect the scene without restarting the app.
+    }
     let windows = match this.state_mut() {
         AppStateImpl::Launching { queued_windows, .. } => mem::take(queued_windows),
         s => bug!("unexpected state {:?}", s),
@@ -666,11 +669,13 @@ fn handle_user_events(mtm: MainThreadMarker) {
 }
 
 pub(crate) fn send_occluded_event_for_all_windows(application: &UIApplication, occluded: bool) {
-    let mtm = MainThreadMarker::from(application);
-
-    let mut events = Vec::new();
     #[allow(deprecated)]
-    for window in application.windows().iter() {
+    send_occluded_events(MainThreadMarker::from(application), &application.windows(), occluded);
+}
+
+pub(super) fn send_occluded_events(mtm: MainThreadMarker, windows: &NSArray<UIWindow>, occluded: bool) {
+    let mut events = Vec::new();
+    for window in windows.iter() {
         if window.is_kind_of::<WinitUIWindow>() {
             // SAFETY: We just checked that the window is a `winit` window
             let window = unsafe {
@@ -723,10 +728,15 @@ pub fn handle_events_cleared(mtm: MainThreadMarker) {
 
 pub(crate) fn terminated(application: &UIApplication) {
     let mtm = MainThreadMarker::from(application);
+    if !AppState::get_mut(mtm).has_launched() {
+        return;
+    }
 
     let mut events = Vec::new();
     #[allow(deprecated)]
-    for window in application.windows().iter() {
+    let windows = super::scene::window_scene(mtm)
+        .map_or_else(|| application.windows(), |scene| unsafe { scene.windows() });
+    for window in windows.iter() {
         if window.is_kind_of::<WinitUIWindow>() {
             // SAFETY: We just checked that the window is a `winit` window
             let window = unsafe {

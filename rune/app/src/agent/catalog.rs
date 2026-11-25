@@ -167,6 +167,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn paired_new_chat_defaults_to_host_home_and_keeps_a_chosen_root() {
+        let mut app = App::new_surface("~".into(), true);
+        app.server.link.current = Some(crate::servers::Selection {
+            endpoint: "wss://mac.example/mobile-device/session".into(), ..Default::default()
+        });
+        let projects = || vec![
+            SessionProjectSummary { directory: "/".into(), updated_ms: 3 },
+            SessionProjectSummary { directory: "/projects/older".into(), updated_ms: 1 },
+            SessionProjectSummary { directory: "/projects/recent".into(), updated_ms: 2 },
+        ];
+        app.apply_session_projects(IDENTITY, projects(), vec![]);
+        crate::mobile::new_chat(&mut app);
+        assert_eq!(app.new_chat_directory(), None);
+        app.activate_project("project:/projects/older");
+        app.apply_session_projects(IDENTITY, projects(), vec![]);
+        crate::mobile::new_chat(&mut app);
+        assert_eq!(app.new_chat_directory().as_deref(), Some("/projects/older"));
+        app.activate_project("project:~");
+        assert_eq!(app.new_chat_directory(), None);
+    }
+
+    #[test]
+    fn paired_project_picker_keeps_remote_paths_and_shows_folder_names() {
+        let mut app = App::new_surface("~".into(), true);
+        app.server.link.current = Some(crate::servers::Selection {
+            endpoint: "wss://host.example/mobile-device/session".into(), ..Default::default()
+        });
+        let paths = [(r"C:\Users\parker\work\windows-project", "windows-project"),
+            (r"\\server\share\network-project", "network-project"), ("/home/parker/linux-project", "linux-project")];
+        app.apply_session_projects(IDENTITY, paths.iter().map(|(path, _)| SessionProjectSummary { directory: (*path).into(), updated_ms: 1 }).collect(), vec![]);
+        let rows = app.project_rows();
+        for (path, name) in paths {
+            let row = rows.iter().find(|row| row.description == path).unwrap();
+            assert_eq!(row.title, name);
+            app.activate_project(&row.value);
+            assert_eq!(app.workspace_name, name);
+            assert_eq!(app.new_chat_directory().as_deref(), Some(path));
+        }
+    }
+
+    #[test]
     fn a_conversation_that_finishes_off_screen_is_unread_until_opened() {
         let mut app = App::new();
         // Nothing is marked from history: idle with no work seen before it.

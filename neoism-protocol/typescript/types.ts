@@ -1316,6 +1316,9 @@ export type AgentClientMessage =
   | { SetAgent: { session_id: string; agent: string } }
   | { SetThinkingMode: { session_id: string; thinking: string } }
   | "ListProviders"
+  | { GetSubagentModels: { request_id: string; provider: string } }
+  | { GetSubagentDefault: { request_id: string } }
+  | { SetSubagentDefault: { request_id: string; provider: string; model: string | null; reasoning?: string } }
   // -- Local context -----------------------------------------------
   | { ListAgents: { directory?: string | null } }
   | { ListSkills: { directory?: string | null } }
@@ -1330,6 +1333,11 @@ export type AgentClientMessage =
   | { Compact: { session_id: string; request_id?: string | null } }
   | { SetTitle: { session_id: string; title: string } }
   | "Ping";
+
+export interface SubagentModel {
+  id: string;
+  label: string;
+}
 
 export type AgentServerMessage =
   // -- Original direct-proxy surface -------------------------------
@@ -1494,6 +1502,8 @@ export type AgentServerMessage =
       };
     }
   | { ProviderCatalog: { providers: ProviderInfo[] } }
+  | { SubagentModels: { request_id: string; provider: string; models: SubagentModel[]; reasoning?: SubagentModel[]; error: string | null } }
+  | { SubagentDefault: { request_id: string; provider: string; model: string | null; reasoning?: string; error: string | null } }
   | { AgentCatalog: { agents: AgentInfo[] } }
   | { SkillCatalog: { skills: SkillInfo[] } }
   | { UsageUpdate: { session_id: string; usage: Usage } }

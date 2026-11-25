@@ -2,10 +2,12 @@
 use std::cell::{Cell, RefCell};
 
 use objc2::rc::Retained;
-use objc2::runtime::{NSObjectProtocol, ProtocolObject};
+use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{declare_class, msg_send, msg_send_id, mutability, sel, ClassType, DeclaredClass};
 use objc2_foundation::{CGFloat, CGPoint, CGRect, MainThreadMarker, NSObject, NSSet, NSString};
+use objc2_foundation::{NSNotification, NSNotificationCenter};
 use objc2_ui_kit::{
+    UIKeyboardFrameEndUserInfoKey, UIKeyboardWillChangeFrameNotification,
     UICoordinateSpace, UIEvent, UIForceTouchCapability, UIGestureRecognizer,
     UIGestureRecognizerDelegate, UIGestureRecognizerState, UIKeyInput, UIPanGestureRecognizer,
     UIPinchGestureRecognizer, UIResponder, UIRotationGestureRecognizer, UITapGestureRecognizer,
@@ -21,7 +23,12 @@ use crate::platform_impl::platform::DEVICE_ID;
 use crate::platform_impl::KeyEventExtra;
 use crate::window::{WindowAttributes, WindowId as RootWindowId};
 
+mod edit_menu;
+
 pub struct WinitViewState {
+    edit_menu: edit_menu::EditMenu,
+    secure_text_entry: Cell<bool>,
+    keyboard_frame: Cell<Option<CGRect>>,
     pinch_gesture_recognizer: RefCell<Option<Retained<UIPinchGestureRecognizer>>>,
     doubletap_gesture_recognizer: RefCell<Option<Retained<UITapGestureRecognizer>>>,
     rotation_gesture_recognizer: RefCell<Option<Retained<UIRotationGestureRecognizer>>>,
@@ -60,6 +67,29 @@ declare_class!(
                 }),
             );
             let _: () = unsafe { msg_send![super(self), drawRect: rect] };
+        }
+
+        #[method(safeAreaInsetsDidChange)]
+        fn safe_area_insets_did_change(&self) {
+            let _: () = unsafe { msg_send![super(self), safeAreaInsetsDidChange] };
+            // Layout reports the current insets to Rune even if the surface size stays the same.
+            unsafe { self.setNeedsLayout() };
+        }
+
+        #[method(winitKeyboardFrameChanged:)]
+        fn keyboard_frame_changed(&self, notification: &NSNotification) {
+            let Some(window) = self.window() else { return };
+            let frame = if window.isKeyWindow() {
+                // UIKit supplies an NSValue containing a CGRect in screen coordinates.
+                unsafe {
+                    notification.userInfo()
+                        .and_then(|info| info.objectForKey(UIKeyboardFrameEndUserInfoKey))
+                        .map(|value| msg_send![&*value, CGRectValue])
+                }
+            } else { None };
+            if self.ivars().keyboard_frame.replace(frame) != frame {
+                unsafe { self.setNeedsLayout() };
+            }
         }
 
         #[method(layoutSubviews)]
@@ -321,6 +351,25 @@ declare_class!(
         fn can_become_first_responder(&self) -> bool {
             true
         }
+
+        #[method(canPerformAction:withSender:)]
+        fn can_perform_action(&self, action: Sel, sender: Option<&AnyObject>) -> bool {
+            self.ivars().edit_menu.can_perform(action).unwrap_or_else(|| unsafe {
+                msg_send![super(self), canPerformAction: action, withSender: sender]
+            })
+        }
+
+        #[method(cut:)]
+        fn cut(&self, _: Option<&AnyObject>) { self.edit_menu_action(sel!(cut:)); }
+
+        #[method(copy:)]
+        fn copy(&self, _: Option<&AnyObject>) { self.edit_menu_action(sel!(copy:)); }
+
+        #[method(paste:)]
+        fn paste(&self, _: Option<&AnyObject>) { self.edit_menu_action(sel!(paste:)); }
+
+        #[method(selectAll:)]
+        fn select_all(&self, _: Option<&AnyObject>) { self.edit_menu_action(sel!(selectAll:)); }
     }
 
     unsafe impl NSObjectProtocol for WinitView {}
@@ -333,6 +382,8 @@ declare_class!(
     }
 
     unsafe impl UITextInputTraits for WinitView {
+        #[method(isSecureTextEntry)]
+        fn is_secure_text_entry(&self) -> bool { self.ivars().secure_text_entry.get() }
     }
 
     unsafe impl UIKeyInput for WinitView {
@@ -354,12 +405,21 @@ declare_class!(
 );
 
 impl WinitView {
+    pub(crate) fn set_secure_keyboard(&self, secure: bool) {
+        if self.ivars().secure_text_entry.replace(secure) != secure {
+            unsafe { self.reloadInputViews(); }
+        }
+    }
+
     pub(crate) fn new(
         mtm: MainThreadMarker,
         window_attributes: &WindowAttributes,
         frame: CGRect,
     ) -> Retained<Self> {
         let this = mtm.alloc().set_ivars(WinitViewState {
+            edit_menu: edit_menu::EditMenu::default(),
+            secure_text_entry: Cell::new(false),
+            keyboard_frame: Cell::new(None),
             pinch_gesture_recognizer: RefCell::new(None),
             doubletap_gesture_recognizer: RefCell::new(None),
             rotation_gesture_recognizer: RefCell::new(None),
@@ -370,6 +430,13 @@ impl WinitView {
             pan_last_delta: Cell::new(CGPoint { x: 0.0, y: 0.0 }),
         });
         let this: Retained<Self> = unsafe { msg_send_id![super(this), initWithFrame: frame] };
+
+        // Selector observers are weak and are removed automatically on iOS 9+.
+        unsafe {
+            NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
+                &this, sel!(winitKeyboardFrameChanged:), Some(UIKeyboardWillChangeFrameNotification), None,
+            );
+        }
 
         this.setMultipleTouchEnabled(true);
 
@@ -383,6 +450,20 @@ impl WinitView {
     fn window(&self) -> Option<Retained<WinitUIWindow>> {
         // SAFETY: `WinitView`s are always installed in a `WinitUIWindow`
         (**self).window().map(|window| unsafe { Retained::cast(window) })
+    }
+
+    pub(crate) fn keyboard_bottom_inset(&self) -> f32 {
+        let (Some(frame), Some(window)) = (self.ivars().keyboard_frame.get(), self.window()) else { return 0.0 };
+        if !window.isKeyWindow() { return 0.0; }
+        let frame = self.convertRect_fromCoordinateSpace(frame, &window.screen().coordinateSpace());
+        let bounds = self.bounds();
+        let bottom = bounds.origin.y + bounds.size.height;
+        // A floating or split keyboard must not lift the whole chat viewport.
+        if frame.origin.x > bounds.origin.x + 1.0
+            || frame.origin.x + frame.size.width < bounds.origin.x + bounds.size.width - 1.0
+            || frame.origin.y + frame.size.height < bottom - 1.0
+        { return 0.0; }
+        (bottom - frame.origin.y).clamp(0.0, bounds.size.height) as f32
     }
 
     pub(crate) fn recognize_pinch_gesture(&self, should_recognize: bool) {

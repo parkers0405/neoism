@@ -299,6 +299,15 @@ pub enum AgentClientMessage {
     ListProviders,
     /// Correlated model-picker hydration read; legacy ListProviders stays valid.
     ListModelCatalog { request_id: String, directory: Option<String> },
+    GetSubagentModels { request_id: String, provider: String },
+    GetSubagentDefault { request_id: String },
+    SetSubagentDefault {
+        request_id: String,
+        provider: String,
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<String>,
+    },
     /// Request the resolved per-directory config defaults. Reply is
     /// [`AgentServerMessage::ConfigDefaults`].
     GetConfigDefaults {
@@ -941,6 +950,22 @@ pub enum AgentServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
+    SubagentModels {
+        request_id: String,
+        provider: String,
+        models: Vec<SubagentModel>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        reasoning: Vec<SubagentModel>,
+        error: Option<String>,
+    },
+    SubagentDefault {
+        request_id: String,
+        provider: String,
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<String>,
+        error: Option<String>,
+    },
     /// Reply to [`AgentClientMessage::GetConfigDefaults`].
     ConfigDefaults {
         #[serde(default)]
@@ -1142,9 +1167,24 @@ pub enum PromptDelivery {
     Queue,
 }
 
-/// Wire-side attachment placeholder. Today's chrome only sends plain
-/// text prompts; this carries the eventual file-reference / image
-/// metadata so the protocol can be extended without re-versioning.
+/// Paired mobile chat bounds for inline photos. The current JSON wire format
+/// uses up to four bytes of JSON per raw byte; leave room for prompt metadata.
+pub const MOBILE_PHOTO_MAX_BYTES: usize = 4 * 1024 * 1024;
+pub const MOBILE_PHOTO_MAX_COUNT: usize = 4;
+pub const MOBILE_CHAT_MAX_MESSAGE_BYTES: usize = 4 * MOBILE_PHOTO_MAX_BYTES + 1024 * 1024;
+
+pub fn mobile_photo_mime(mime: &str) -> bool {
+    matches!(mime, "image/png" | "image/jpeg" | "image/webp" | "image/gif" | "image/bmp")
+}
+
+/// For inline photos `path` is only a display filename, never a path or URL.
+pub fn mobile_photo_filename(name: &str) -> bool {
+    !name.trim().is_empty() && name.len() <= 255 && !matches!(name, "." | "..")
+        && !name.contains(['/', '\\', ':']) && !name.chars().any(char::is_control)
+}
+
+/// Wire-side attachment. Inline bytes use `kind` for the MIME type and may
+/// carry a display filename in `path`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Attachment {
     pub kind: String,
@@ -1391,6 +1431,12 @@ pub struct ProviderInfo {
     pub name: String,
     #[serde(default)]
     pub models: Vec<ModelInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubagentModel {
+    pub id: String,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

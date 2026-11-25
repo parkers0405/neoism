@@ -10,11 +10,12 @@ use objc2_foundation::{
 };
 use objc2_ui_kit::{
     UIApplication, UICoordinateSpace, UIResponder, UIScreen, UIScreenOverscanCompensation,
-    UIViewController, UIWindow,
+    UIViewController, UIWindow, UIWindowScene,
 };
 use tracing::{debug, warn};
 
 use super::app_state::EventWrapper;
+use super::scene;
 use super::view::WinitView;
 use super::view_controller::WinitViewController;
 use crate::cursor::Cursor;
@@ -79,7 +80,13 @@ impl WinitUIWindow {
         window_attributes: &WindowAttributes,
         frame: CGRect,
         view_controller: &UIViewController,
+        scene: Option<&UIWindowScene>,
     ) -> Retained<Self> {
+        if let Some(scene) = scene {
+            let this: Retained<Self> = unsafe { msg_send_id![mtm.alloc(), initWithWindowScene: scene] };
+            this.setRootViewController(Some(view_controller));
+            return this;
+        }
         let this: Retained<Self> = unsafe { msg_send_id![mtm.alloc(), initWithFrame: frame] };
 
         this.setRootViewController(Some(view_controller));
@@ -383,8 +390,17 @@ impl Inner {
         }
     }
 
-    pub fn set_ime_purpose(&self, _purpose: ImePurpose) {
+    pub fn set_ime_purpose(&self, purpose: ImePurpose) {
+        self.view.set_secure_keyboard(matches!(purpose, ImePurpose::Password));
         warn!("`Window::set_ime_purpose` is ignored on iOS")
+    }
+
+    pub(crate) fn present_edit_menu(&self, point: (f32, f32), selection: bool, select_all: bool) {
+        self.view.present_edit_menu(point, selection, select_all);
+    }
+
+    pub(crate) fn dismiss_edit_menu(&self) {
+        self.view.dismiss_edit_menu();
     }
 
     pub fn focus_window(&self) {
@@ -487,6 +503,10 @@ impl Window {
         window_attributes: WindowAttributes,
     ) -> Result<Window, RootOsError> {
         let mtm = event_loop.mtm;
+        let scene = scene::window_scene(mtm);
+        if scene.is_none() && scene::uses_scene_lifecycle() {
+            return Err(os_error!(super::OsError::WindowSceneUnavailable));
+        }
 
         if window_attributes.min_inner_size.is_some() {
             warn!("`WindowAttributes::min_inner_size` is ignored on iOS");
@@ -508,16 +528,18 @@ impl Window {
 
         let screen_bounds = screen.bounds();
 
-        let frame = match window_attributes.inner_size {
-            Some(dim) => {
-                let scale_factor = screen.scale();
-                let size = dim.to_logical::<f64>(scale_factor as f64);
-                CGRect {
-                    origin: screen_bounds.origin,
-                    size: CGSize { width: size.width as _, height: size.height as _ },
-                }
-            },
-            None => screen_bounds,
+        let frame = if let Some(scene) = &scene {
+            // For scene-based apps UIKit owns the window geometry.
+            unsafe { scene.coordinateSpace() }.bounds()
+        } else if let Some(dim) = window_attributes.inner_size {
+            let scale_factor = screen.scale();
+            let size = dim.to_logical::<f64>(scale_factor as f64);
+            CGRect {
+                origin: screen_bounds.origin,
+                size: CGSize { width: size.width as _, height: size.height as _ },
+            }
+        } else {
+            screen_bounds
         };
 
         let view = WinitView::new(mtm, &window_attributes, frame);
@@ -526,7 +548,8 @@ impl Window {
             view.isKindOfClass(class!(CAMetalLayer)) || view.isKindOfClass(class!(CAEAGLLayer));
 
         let view_controller = WinitViewController::new(mtm, &window_attributes, &view);
-        let window = WinitUIWindow::new(mtm, &window_attributes, frame, &view_controller);
+        let window =
+            WinitUIWindow::new(mtm, &window_attributes, frame, &view_controller, scene.as_deref());
 
         app_state::set_key_window(mtm, &window);
 
@@ -667,6 +690,12 @@ impl Inner {
     fn rect_from_screen_space(&self, rect: CGRect) -> CGRect {
         let screen_space = self.window.screen().coordinateSpace();
         self.window.convertRect_fromCoordinateSpace(rect, &screen_space)
+    }
+
+    pub(crate) fn safe_area_insets(&self) -> [f32; 4] {
+        if !app_state::os_capabilities().safe_area { return [0.0; 4]; }
+        let insets = self.view.safeAreaInsets();
+        [insets.top as f32, insets.right as f32, (insets.bottom as f32).max(self.view.keyboard_bottom_inset()), insets.left as f32]
     }
 
     fn safe_area_screen_space(&self) -> CGRect {

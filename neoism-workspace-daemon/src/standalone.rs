@@ -519,7 +519,7 @@ async fn run(cli: Cli, nonce: Option<String>, hosted_nonce: Option<String>) -> S
     // we start serving (and trim the LRU cap as a side effect). The
     // opportunistic per-paste sweep keeps the cap enforced afterwards.
     crate::workspace::sweep_clipboard_dir_on_startup();
-    let app = server::router(server::AppState {
+    let mut app = server::router(server::AppState {
         lsp_runtime: neoism_agent_server::language_server::LspRuntime::new(
             neoism_agent_neoism_adapter::neoism_services(),
         ),
@@ -530,6 +530,18 @@ async fn run(cli: Cli, nonce: Option<String>, hosted_nonce: Option<String>) -> S
         crdt: crate::crdt::sync::CrdtSyncHub::default(),
         paired_hosts,
     });
+    // Never add the mobile plane to Fast Server, persistent hosted workspaces,
+    // or temporary hosts, even if they inherit its environment.
+    let _mobile_listener = if nonce.is_none() && hosted_nonce.is_none() && cli.temporary_parent_pid.is_none() {
+        if let Some((operator_routes, listener)) = server::mobile_device::start().await? {
+            app = app.merge(operator_routes);
+            Some(listener)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     // Serve the same router on the desktop's default unix socket so a
     // plain `neoism` launch (which probes that socket before spawning

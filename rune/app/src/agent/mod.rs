@@ -34,6 +34,7 @@ pub mod tools;
 
 pub use activity::Activity;
 pub use composer::overlay;
+pub(crate) use composer::mobile_menu;
 pub use family::Families;
 pub use header::Step as HeaderStep;
 pub use projects::{ProjectMenu, view as project_menu};
@@ -118,6 +119,7 @@ pub struct Session {
     /// User-question row indices, rebuilt with `rows`, not on scroll callbacks.
     pub question_rows: std::cell::RefCell<std::rc::Rc<Vec<usize>>>,
     pub scroll: std::rc::Rc<std::cell::Cell<(f32, f32)>>,
+    pub following_bottom: std::rc::Rc<std::cell::Cell<bool>>,
     /// The wheel or trackpad glide's target and when it was set (`follow::wheel_base`).
     pub wheel_target: Option<(f32, std::time::Instant)>,
     /// Where the transcript was scrolled when it last showed, unless it was at its end. A
@@ -131,6 +133,7 @@ pub struct Session {
     /// When the reader last moved up the transcript: older history loads ahead of someone
     /// heading toward it, never on its own (`anchor.rs`).
     pub scrolled_up_at: Option<std::time::Instant>,
+    pub touch_scrolled_up: std::rc::Rc<std::cell::Cell<bool>>,
     /// Where each mounted row was last drawn (top below the viewport's top, height), the row
     /// a moving view is held by, and its last placement (`anchor.rs`).
     pub row_tops: std::collections::HashMap<String, (f32, f32)>,
@@ -483,6 +486,7 @@ impl App {
     }
 
     pub fn open_conversation(&mut self, session_id: &str) {
+        crate::mobile::select_chat_from_history(self);
         // Opening a finished conversation reads it.
         self.finished.remove(session_id);
         if let Some(index) = self.tabs.iter().position(|t| t.kind == TabKind::Agent { session: Some(session_id.into()) }) {
@@ -774,7 +778,7 @@ impl App {
         self.tabs[index].pending_prompt = Some(text);
         self.send_agent(AgentClientMessage::CreateThread {
             title: None,
-            directory: Some(self.cwd.clone()),
+            directory: self.new_chat_directory(),
             agent: Some(self.composer.selection.agent.clone()).filter(|a| !a.is_empty()),
             model: Some(self.composer.selection.model.clone()).filter(|m| !m.is_empty()),
             connection_id: self.composer.selection.connection_id.clone(),
@@ -811,7 +815,8 @@ impl App {
             attachments: echo,
             created_at: 0,
         };
-        // Idle sends keep their immediate bubble. Busy steers wait for consumption.
+        // Idle sends keep their immediate bubble. Busy prompts wait for consumption.
+        let delivery = if self.mobile && (session.streaming || session.queued_prompts > 0) { PromptDelivery::Queue } else { PromptDelivery::Steer };
         if !session.streaming && session.queued_prompts == 0 {
             session.messages.push(echo.clone());
             session.activity_reveal = Some((message_id.clone(), None));
@@ -828,7 +833,7 @@ impl App {
             model: Some(self.composer.selection.model.clone()).filter(|m| !m.is_empty()),
             connection_id: self.composer.selection.connection_id.clone(),
             thinking: Some(self.composer.selection.thinking.clone()).filter(|t| !t.is_empty()),
-            delivery: PromptDelivery::Steer,
+            delivery,
         });
     }
 
@@ -1220,6 +1225,20 @@ impl App {
             AgentServerMessage::ProviderState { session_id, context_limit, .. } => {
                 if let Some(limit) = context_limit.filter(|l| *l > 0) { self.sessions.entry(session_id).or_default().context_limit = Some(limit); }
             }
+            AgentServerMessage::SessionEvent { session_id, kind, properties } if kind == "prompt.rejected" => {
+                let Some(id) = properties["messageId"].as_str() else { return false };
+                let Some(session) = self.sessions.get_mut(&session_id) else { return false };
+                if session.pending_prompts.remove(id).is_none() { return false; }
+                if let Some(at) = session.message_position(id) {
+                    session.messages.remove(at);
+                    session.invalidate_message_positions();
+                    session.structure += 1;
+                    session.rebase_live();
+                }
+                session.activity_reveal = session.activity_reveal.take().filter(|(message, _)| message != id);
+                let reason = properties["message"].as_str().unwrap_or("The agent server rejected the prompt.");
+                self.modal = Some(crate::ui::modal::Modal::notice("Message not sent", reason));
+            }
             AgentServerMessage::SessionEvent { session_id, kind, properties }
                 if kind == "session.status" && properties["status"]["type"] == "retry" => {
                 let status = &properties["status"];
@@ -1597,6 +1616,26 @@ mod prompt_queue_tests {
 #[cfg(test)]
 mod cache_tests {
     use super::*;
+    #[test]
+    fn prompt_rejection_removes_only_the_failed_echo_and_shows_the_reason() {
+        let mut app = App::new();
+        app.load_fixture("rejected", "Rejected", "[]");
+        app.submit_prompt("rejected", "First".into());
+        app.submit_prompt("rejected", "Second".into());
+        let session = &app.sessions["rejected"];
+        let id = session.messages.iter().find(|m| m.text == "Second").unwrap().id.clone();
+        assert!(app.apply_agent(AgentServerMessage::SessionEvent {
+            session_id: "rejected".into(),
+            kind: "prompt.rejected".into(),
+            properties: serde_json::json!({ "messageId": id, "message": "HTTP 413" }),
+        }));
+        let session = &app.sessions["rejected"];
+        assert!(!session.pending_prompts.contains_key(&id));
+        assert!(session.messages.iter().all(|m| m.id != id));
+        assert!(session.messages.iter().any(|m| m.text == "First"));
+        assert_eq!(app.modal.as_ref().unwrap().body, "HTTP 413");
+    }
+
     #[test]
     fn compaction_notices_without_ids_keep_their_separate_positions() {
         let row = |id: &str, text: &str| serde_json::from_value::<HistoryMessage>(json!({"id":id,"role":"System","kind":"System","text":text})).unwrap();

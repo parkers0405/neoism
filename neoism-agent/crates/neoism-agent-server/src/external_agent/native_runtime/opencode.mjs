@@ -200,16 +200,19 @@ export function createAdapter(context) {
     return result;
   }
   async function reconcile(turn) {
+    let lastRoot;
     for (const [sid, scope] of turn.sessions) {
       const history = await http(`/session/${enc(sid)}/message`);
       for (const m of history) {
         if (turn.old.has(m.info.id) || m.info.role !== 'assistant') continue;
         if (sid === turn.sessionId && m.info.parentID !== turn.promptID) continue;
+        if (sid === turn.sessionId) lastRoot = m.info;
         turn.project.message(m.info, scope);
         if (m.info.error) turn.error = m.info.error;
         for (const p of m.parts) turn.project.part(p, scope, true);
       }
     }
+    return lastRoot;
   }
   async function start({ sessionId, text, selection, emit, request }) {
     await ready();
@@ -231,11 +234,14 @@ export function createAdapter(context) {
       if (turn.finished || turn.finishing) return;
       turn.finishing = true;
       try {
-        await reconcile(turn);
+        const lastRoot = await reconcile(turn);
         if (turn.finished) return;
         turn.project.finish();
         if (turn.error && turn.error.name !== 'MessageAbortedError') throw new Error(`OpenCode: ${turn.error.data?.message ?? turn.error.name ?? 'session error'}`);
-      const cancelled = interrupted || turn.error?.name === 'MessageAbortedError';
+        const cancelled = interrupted || turn.error?.name === 'MessageAbortedError';
+        if (!cancelled && (!lastRoot?.time?.completed || lastRoot.finish === 'tool-calls')) {
+          throw new Error('OpenCode became idle before recording a completed assistant response');
+        }
         emit({ type: 'runtime.status', sessionId, status: cancelled ? 'interrupted' : 'idle' });
         turn.finished = true;
         settle({ finish: cancelled ? 'interrupted' : 'stop', model: turn.project.model, usage: turn.project.usage() });
@@ -305,7 +311,8 @@ export function createAdapter(context) {
         entries: p.todos.map(t => ({ content: t.content, status: t.status, priority: t.priority })) });
       else if (e.type === 'session.error') { turn.error = p.error; turn.admitted = true; }
       else if (e.type === 'session.status' || e.type === 'session.idle') {
-        const status = p.status?.type ?? 'idle';
+        const status = e.type === 'session.idle' ? 'idle' : p.status?.type;
+        if (!status) return;
         if (scope) emit({ type: 'child.updated', sessionId: sid, scope, status: status === 'idle' ? 'completed' : 'running' });
         else {
           emit({ type: 'runtime.status', sessionId, status, message: p.status?.message });

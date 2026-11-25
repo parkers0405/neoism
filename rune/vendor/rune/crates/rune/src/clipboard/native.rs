@@ -11,13 +11,24 @@ impl Client {
         // Nothing to clear before the first write.
         if std::mem::take(&mut rt.clear_secret_request) && let Some(w) = WORKER.get() { let _ = w.sender.send(Request::Clear(None)); }
         if let Some(copy) = rt.copy_request.take() {
-            let worker = worker();
-            copy.bind(Route::System(worker.clone()));
-            let _ = worker.send(Request::Write(copy, Some(Notify { changed: self.changed.clone(), wake: self.wake.clone() })));
+            #[cfg(target_os = "ios")]
+            if copy.clear_after.is_none() && copy.content.has_plain() {
+                winit::platform::ios::write_clipboard_text(copy.content.text());
+            } else {
+                send_write(self, copy);
+            }
+            #[cfg(not(target_os = "ios"))]
+            send_write(self, copy);
         }
         if let Some(target) = rt.paste_request.take() { self.read_for(Purpose::paste(rt, target)); }
         for id in std::mem::take(&mut rt.read_requests) { self.read_for(Purpose::Read(id)); }
     }
+}
+
+fn send_write(client: &Client, copy: ClipboardWrite) {
+    let worker = worker();
+    copy.bind(Route::System(worker.clone()));
+    let _ = worker.send(Request::Write(copy, Some(Notify { changed: client.changed.clone(), wake: client.wake.clone() })));
 }
 
 static WORKER: OnceLock<Worker> = OnceLock::new();
@@ -209,4 +220,3 @@ fn windows_read_html() -> Option<String> {
         out
     }
 }
-

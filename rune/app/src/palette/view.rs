@@ -75,10 +75,10 @@ pub fn view(app: &App) -> El {
         .key("picker-query")
         .autofocus()
         // Commands keep the window cursor at Rune's real insertion point, not on a result.
-        .caret(rune::Color::TRANSPARENT, crate::ui::cursor::selection(app))
+        .caret(if app.mobile { rgb(p.fg) } else { rune::Color::TRANSPARENT }, crate::ui::cursor::selection(app))
         .placeholder(match picker.mode {
             Mode::Themes => "Search themes...", Mode::Backgrounds => "Search backgrounds...",
-            Mode::Systems => "Search systems...", Mode::Servers => "Search servers...", Mode::SystemSettings => "",
+            Mode::Systems => "Search systems...", Mode::Servers if app.mobile => "Search systems...", Mode::Servers => "Search servers...", Mode::SystemSettings => "",
             Mode::Commands => "Type a command… · ? all",
             Mode::Directories => "Type a command..." }, rgb(p.dim))
         .color(rgb(p.fg)).w_full()
@@ -103,6 +103,10 @@ pub fn view(app: &App) -> El {
         .transition(rune::Transition::none()).instant_changes()
         .border_sides([0.0, 0.0, if picker.expanded() { 1.0 } else { 0.0 }, 0.0], rgb(p.border));
     match picker.mode {
+        Mode::Servers if app.mobile && cfg!(target_os = "ios") => {
+            header = header.child(row().w_full().h(44.0).px(14.0).center_y()
+                .child(text("Systems").font(app.ty.sans(16.0, 650.0)).color(rgb(p.fg))));
+        }
         Mode::Systems | Mode::Servers => header = header.child(categories(app, picker.mode, width)),
         Mode::SystemSettings => header = header.child(settings_header(app, picker, width)),
         _ => {}
@@ -131,12 +135,13 @@ pub fn view(app: &App) -> El {
     let dialog = col().key("picker").w(width).fill(rgb(p.bg)).motion(rune::Spring::NONE)
         .preserve_focus_on_press(true)
         .transition(rune::Transition::none())
-        .corners([8.0 * s, 8.0 * s, 0.0, 0.0])
-        .border(2.0 * s, rgb(p.surface))
-        .clip_rounded(8.0 * s)
+        .corners(if app.mobile { [22.0; 4] } else { [8.0 * s, 8.0 * s, 0.0, 0.0] })
+        .border(if app.mobile { 1.0 } else { 2.0 * s }, rgb(p.surface))
+        .clip_rounded(if app.mobile { 22.0 } else { 8.0 * s })
         .on_press(|_: &mut App| {})
         .child(header)
         .child(body);
+    let dialog = if app.mobile { dialog.backdrop_blur(14.0).fill(rgb(p.bg).alpha(0.94)).shadow(6.0, 24.0, rune::Color::BLACK.alpha(0.22)) } else { dialog };
     // Confirmation dialogs and other overlays above the palette must own their input.
     let front = app.finder.is_none() && app.browser.is_none() && app.form.is_none()
         && app.modal.is_none() && app.menu.is_none() && app.context.is_none()

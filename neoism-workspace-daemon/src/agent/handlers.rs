@@ -28,6 +28,7 @@ pub(crate) async fn handle_create_thread(
     connection_id: Option<String>,
     thinking: Option<String>,
     external_provider: Option<String>,
+    bind_stream: bool,
 ) {
     let mut body = serde_json::Map::new();
     if let Some(provider) = external_provider {
@@ -116,7 +117,7 @@ pub(crate) async fn handle_create_thread(
                 context_limit: None,
             });
             // Auto-bind the SSE stream so deltas start flowing.
-            if !session_id.is_empty() {
+            if bind_stream && !session_id.is_empty() {
                 start_event_stream(&inner, &session_id);
             }
         }
@@ -124,12 +125,12 @@ pub(crate) async fn handle_create_thread(
     }
 }
 
-pub(crate) async fn handle_switch_thread(inner: Arc<AgentInner>, session_id: String) {
+pub(crate) async fn handle_switch_thread(inner: Arc<AgentInner>, session_id: String, bind_stream: bool) {
     // Verify the session exists; if it does, bind the SSE stream and
     // ack with `ThreadSwitched`.
     match http_get_json(&inner, &format!("/v2/sessions/{session_id}")).await {
         Ok(value) => {
-            start_event_stream(&inner, &session_id);
+            if bind_stream { start_event_stream(&inner, &session_id); }
             let _ = inner.tx.send(AgentServerMessage::ThreadSwitched {
                 session_id: session_id.clone(),
             });
@@ -872,7 +873,7 @@ pub(crate) async fn handle_submit_prompt(
         }));
     }
     body.insert("parts".to_string(), Value::Array(parts));
-    body.insert("messageId".to_string(), Value::String(message_id));
+    body.insert("messageId".to_string(), Value::String(message_id.clone()));
     if let Some(author) = author.filter(|author| !author.trim().is_empty()) {
         body.insert("author".to_string(), Value::String(author));
     }
@@ -924,6 +925,11 @@ pub(crate) async fn handle_submit_prompt(
     )
     .await
     {
+        let _ = inner.tx.send(AgentServerMessage::SessionEvent {
+            session_id,
+            kind: "prompt.rejected".into(),
+            properties: json!({ "messageId": message_id, "message": err }),
+        });
         emit_error(&inner.tx, err);
     }
 }

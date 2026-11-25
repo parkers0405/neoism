@@ -29,6 +29,7 @@ impl App {
                 self.tabs[i].draft.clear();
                 self.tabs[i].pastes.clear();
                 self.attach.pending.remove(&tab);
+                self.clear_draft_attachment_images(tab);
                 self.composer_changed();
                 return true;
             }
@@ -79,6 +80,30 @@ impl App {
 #[cfg(test)]
 mod interrupt_tests {
     use super::*;
+
+    #[test]
+    fn mobile_send_queues_a_draft_without_stopping_the_stream() {
+        let mut app = App::new_surface(String::new(), true);
+        app.load_fixture("busy", "Busy chat", "[]");
+        app.composer.selection.model = "local/one".into();
+        app.connection = crate::app::Connection::Connected;
+        app.workspace_ready = true;
+        app.sessions.get_mut("busy").unwrap().streaming = true;
+        app.tabs[app.active].draft.replace_text("Follow up when finished");
+        let mut rt = rune::Runtime::new(app, |a, _| composer(a, 390.0), (390.0, 300.0), rune::Env::default());
+        rt.frame(0.0);
+        let [x, y, w, h] = rt.elements().iter().find(|e| e.key.as_deref() == Some("composer-send")).unwrap().rect;
+        rt.pointer_down(x + w / 2.0, y + h / 2.0);
+        rt.pointer_up(x + w / 2.0, y + h / 2.0);
+        rt.frame(1.0 / 60.0);
+        let sent = rt.state.agent_sent.borrow();
+        let delivery = serde_json::to_value(neoism_protocol::agent::PromptDelivery::Queue).unwrap();
+        assert!(sent.iter().filter_map(|message| serde_json::from_str::<serde_json::Value>(message).ok()).any(|message| {
+            message["SubmitPrompt"]["delivery"] == delivery && message["SubmitPrompt"]["text"] == "Follow up when finished"
+        }));
+        assert!(!sent.iter().any(|message| message.contains("CancelInflight")));
+        assert!(rt.state.active_tab().draft.text.is_empty());
+    }
 
     #[test]
     fn send_button_dispatches_goal_through_correlated_goal_admission() {
@@ -135,18 +160,29 @@ pub fn composer(app: &App, max_w: f32) -> El {
     let p = app.pal;
     let tab = app.active_tab();
     let tab_id = tab.id;
+    let mobile_draft = app.mobile && matches!(&tab.kind, TabKind::Agent { session: None });
+    let compact = app.mobile && !mobile_draft;
     let streaming = !app.has_prompt() && matches!(&tab.kind, TabKind::Agent { session: Some(id) } if app.sessions.get(id).is_some_and(|s| s.streaming));
-    let input = rune::text_input(&tab.draft, app.ty.chat_composer())
+    let input = rune::text_input(&tab.draft, app.ty.chat_composer());
+    let input = if app.mobile { input.touch_edit_menu() } else { input }
         // Keys through this field (list arrows, wheel-free navigation) commit animated: without
         // it Rune lands every change in the commit at once, cutting the slides mid-list.
         .animate_edit_layout()
         .key(format!("composer:{}", tab.id))
-        .caret(Color::TRANSPARENT, crate::ui::cursor::selection(app))
+        .caret(if app.mobile { rgb(p.fg) } else { Color::TRANSPARENT }, crate::ui::cursor::selection(app))
         .placeholder("Ask anything", rgb(p.dim))
         .color(rgb(p.fg)).w_full().min_h(26.0)
         .pill_colors(rgb(p.blue).alpha(0.2), Some(rgb(p.blue)))
         .on_edit(move |s: &mut App| { s.select_tab(tab_id); s.composer_edit() })
-        .on_input_change(move |s: &mut App, _: &mut Tx| { s.select_tab(tab_id); if !s.pending_prompt_changed() { s.composer_changed(); } })
+        .on_input_change(move |s: &mut App, tx: &mut Tx| {
+            s.select_tab(tab_id);
+            if !s.pending_prompt_changed() {
+                let slash_open = |s: &App| s.composer.picker.as_ref().is_some_and(|p| p.kind == Kind::Slash);
+                let was_open = slash_open(s);
+                s.composer_changed();
+                if s.mobile && was_open != slash_open(s) { tx.animated(); }
+            }
+        })
         .on_input_key(move |s: &mut App, e: &rune::KeyEvent, tx: &mut Tx| { s.select_tab(tab_id); s.image_preview_key(e) || s.agent_composer_key(e, tx) || s.timeline_jump_key(e, tx) || s.composer_interrupt_key(e) || crate::keys::shortcut(s, e, tx) })
         .on_input_paste(move |s: &mut App, content: &rune::ClipboardContent, _: &mut Tx| { s.select_tab(tab_id); s.paste_composer(content) })
         .on_submit(move |s: &mut App, tx: &mut Tx| { s.select_tab(tab_id); if !s.submit_pending_prompt() && !s.submit_command(tx) { s.submit(); } });
@@ -163,50 +199,92 @@ pub fn composer(app: &App, max_w: f32) -> El {
         }
         None => app.model.clone(),
     };
-    let model = row().key("composer-model").h(30.0 * cs).gap(7.0 * cs).center_y().shrink()
+    let model = row().key("composer-model").label("Choose model").h(if app.mobile { 44.0 } else { 30.0 * cs }).gap(7.0 * cs).center_y().shrink()
+        .px(if mobile_draft { 8.0 } else { 0.0 }).radius(8.0).hover(rgb(p.hover))
         .child(super::slash::provider_mark(app, 14.0 * cs))
         .child(text(model_label).font(app.ty.sans(13.5, 500.0)).color(rgb(p.fg)).truncate().shrink())
         .child(icon(app, glyph::CHEVRON_DOWN, 0.45, rgb(p.muted)))
         .on_press(move |s: &mut App| {
             s.select_tab(tab_id);
+            s.mobile_composer_menu = false;
             if s.composer.picker.as_ref().is_some_and(|picker| picker.kind == Kind::Model) { s.close_prompt_picker(); } else { s.open_selection(Kind::Model); }
         });
-    let send = el().key("composer-send").w(36.0).h(36.0).radius(8.0).center()
-        .fill(if streaming { rgb(p.fg) } else { rgb(p.muted).alpha(0.6) })
-        .child(icon(app, if streaming { glyph::STOP } else { glyph::ARROW_UP }, 0.9, if streaming { rgb(p.bg) } else { rgb(p.fg) }))
+    let send_size = if app.mobile { 44.0 } else { 36.0 };
+    let has_draft = !tab.draft.text.trim().is_empty();
+    let stop = streaming && !(app.mobile && has_draft);
+    let highlighted = streaming || (app.mobile && has_draft);
+    let send = el().key("composer-send").label(if stop { "Stop response" } else if streaming { "Queue message" } else { "Send message" })
+        .w(send_size).h(send_size).radius(if compact { 22.0 } else { 8.0 }).center()
+        .fill(if highlighted { rgb(p.fg) } else { rgb(p.muted).alpha(0.6) })
+        .child(icon(app, if stop { glyph::STOP } else { glyph::ARROW_UP }, 0.9, if highlighted { rgb(p.bg) } else { rgb(p.fg) }))
         .on_press_tx(move |s: &mut App, tx: &mut Tx| {
             s.select_tab(tab_id);
             if s.submit_pending_prompt() { return; }
             let i = s.active;
             match s.tabs[i].kind.clone() {
-                TabKind::Agent { session: Some(id) } if s.sessions.get(&id).is_some_and(|x| x.streaming) => s.stop(&id),
+                TabKind::Agent { session: Some(id) } if s.sessions.get(&id).is_some_and(|x| x.streaming)
+                    && (!s.mobile || s.tabs[i].draft.text.trim().is_empty()) => s.stop(&id),
                 _ => if !s.submit_command(tx) { s.submit(); },
             }
         });
     // The paperclip: a button the send button's size, its glyph as large as the chips' text.
-    let attach = el().key("composer-attach").w(36.0).h(36.0).radius(8.0).center()
+    let attach = el().key("composer-attach").label("Attach a picture").w(send_size).h(send_size).radius(8.0).center()
         .fill(if app.composer_attach_hover == Some(tab_id) { rgb(p.hover) } else { rgb(p.hover).alpha(0.0) })
         .child(icon(app, glyph::PAPERCLIP, 1.5, rgb(if app.composer_attach_hover == Some(tab_id) { p.fg } else { p.dim })))
         .on_hover_change(move |s: &mut App, inside: bool, _: &mut Tx| {
             if inside { s.composer_attach_hover = Some(tab_id); } else if s.composer_attach_hover == Some(tab_id) { s.composer_attach_hover = None; }
         })
-        .on_press(move |s: &mut App| { s.select_tab(tab_id); s.request_attach(); });
+        .on_press_tx(move |s: &mut App, tx| {
+            s.select_tab(tab_id);
+            if s.mobile { crate::mobile_photo::choose(s, tx); } else { s.request_attach(); }
+        });
+    let plus = || el().key("mobile-composer-options").label("Add photo").w(44.0).h(44.0).radius(22.0).center().hover(rgb(p.hover))
+        .child(text("+").font(app.ty.sans(25.0, 400.0)).color(rgb(p.fg)))
+        .on_press(|a: &mut App| {
+            a.close_prompt_picker();
+            a.tabs[a.active].draft.focused = false;
+            a.mobile_composer_menu = !a.mobile_composer_menu;
+        });
+    let mic = || -> Option<El> {
+        #[cfg(target_os = "ios")]
+        if app.mobile {
+            let recording = app.mobile_dictation.is_some();
+            return Some(el().key("composer-mic").role("button").label(if recording { "Finish dictation" } else { "Dictate message" })
+                .w(40.0).h(44.0).radius(20.0).center().hover(rgb(p.hover))
+                .child(text(if recording { "\u{f04db}" } else { "\u{f036c}" }).font(app.ty.icon_sized(17.0)).color(rgb(if recording { p.red } else { p.dim })))
+                .on_press(move |a: &mut App| crate::mobile_dictation::toggle(a, tab_id)));
+        }
+        None
+    };
+    let bar = if compact {
+        row().key("composer-pill").min_h(56.0).w_full().px(5.0).py(6.0).gap(6.0).center_y().radius(28.0)
+            .backdrop_blur(10.0).fill(rgb(p.bg).mix(rgb(p.surface), 0.42).alpha(0.97))
+            .border(1.0, rgb(p.fg).alpha(0.13)).shadow(3.0, 14.0, Color::BLACK.alpha(0.14))
+            .child(plus())
+            .child(rune::auto_grow(input, 1, 6).w(0.0).grow(1.0).min_w(0.0))
+            .child_opt(mic())
+            .child(send)
+    } else {
+        col().w_full().gap(if mobile_draft { 8.0 } else { 22.0 })
+            .child(if mobile_draft { input.min_h(52.0) } else { input })
+            .child(row().key("composer-chip-row").w_full().gap(6.0).center_y()
+                .child(if mobile_draft { plus() } else { attach }.ml(-8.0)).child(el().grow(1.0)).child(model.mr(8.0)).child_opt(mic()).child(send))
+    };
     let card = col().key("agent-input-card")
-        .on_layout(move |s: &mut App, r: [f32; 4]| { s.rects.insert(card_key.clone(), r); }).w_full().radius(18.0).fill(rgb(p.bg)).border(1.0, rgb(p.border))
-        .px(20.0).pt(16.0).pb(12.0).gap(22.0)
+        .on_layout(move |s: &mut App, r: [f32; 4]| { s.rects.insert(card_key.clone(), r); }).w_full()
         .on_drop_files(move |s: &mut App, files: &[std::path::PathBuf], _: &mut Tx| {
             s.select_tab(tab_id);
-            s.attach_images(files.iter().map(|f| f.display().to_string()).collect());
-        })
-        .child(stars(app, tab_id))
+            s.attach_images(files);
+        });
+    let card = if compact { card.gap(6.0) } else if mobile_draft {
+        card.radius(18.0).fill(rgb(p.bg)).border(1.0, rgb(p.border)).px(14.0).pt(14.0).pb(8.0).gap(8.0)
+    } else {
+        card.radius(18.0).fill(rgb(p.bg)).border(1.0, rgb(p.border)).px(20.0).pt(16.0).pb(12.0).gap(22.0).child(stars(app, tab_id))
+    };
+    let card = card
         // Attached images ride at the top of the card, over the text.
         .child_opt(super::attach::composer_strip(app, tab_id))
-        .child(input)
-        .child(row().key("composer-chip-row").w_full().gap(6.0).center_y()
-            .child(attach.ml(-8.0))
-            .child(el().grow(1.0))
-            .child(model.mr(8.0))
-            .child(send));
+        .child(bar);
     let footer = row().key("composer-footer").grow(1.0).shrink().h(32.0).px(18.0).center_y().justify_between()
         .fill(rgb(p.surface).alpha(0.7)).corners([0.0, 0.0, 12.0, 12.0])
         .child(row().gap(10.0).center_y()
@@ -233,7 +311,41 @@ pub fn composer(app: &App, max_w: f32) -> El {
                 .on_press(|a: &mut App| a.reply_to = None))
     });
     let column = col().w_full().max_w(max_w).child_opt(replying).child(card);
-    if app.composer.hints_hidden { column } else { column.child(row().w_full().px(28.0).child(footer)) }
+    if mobile_draft {
+        column.child(row().w_full().px(12.0).child(row().w_full().h(36.0).px(10.0).gap(8.0).center_y()
+            .fill(rgb(p.surface).alpha(0.7)).corners([0.0, 0.0, 12.0, 12.0])
+            .child(row().key("mobile-composer-folder").label("Choose a folder").h_full().px(4.0).gap(8.0).center_y().radius(6.0).hover(rgb(p.hover))
+                .on_layout(|a: &mut App, rect| { a.rects.insert("mobile-composer-folder".into(), rect); })
+                .grow(1.0).shrink().min_w(0.0)
+                .child(icon(app, glyph::FOLDER, 0.85, rgb(p.dim)))
+                .child(text(if app.new_chat_directory().is_none() { "Home".into() } else { app.workspace_name.clone() }).font(app.ty.small()).color(rgb(p.fg)).truncate().shrink())
+                .on_press(|a: &mut App| {
+                    a.close_prompt_picker();
+                    a.mobile_composer_menu = false;
+                    a.tabs[a.active].draft.focused = false;
+                    if a.paired_chat_device() { a.open_project_menu(); }
+                    else { a.open_file_browser(crate::browser::Mode::ChooseDirectory); }
+                }))
+            .child(el().label("Agent commands").h_full().px(4.0).center().hover(rgb(p.hover))
+                .child(text("/ commands").font(app.ty.small()).color(rgb(p.dim)))
+                .on_press(App::open_mobile_commands))))
+    } else if compact || app.composer.hints_hidden { column } else { column.child(row().w_full().px(28.0).child(footer)) }
+}
+
+pub(crate) fn mobile_menu(app: &App) -> El {
+    let Some([x, y, _, _]) = app.rects.get(&format!("composer-card:{}", app.active_tab().id)).copied() else { return el() };
+    let p = app.pal;
+    let panel = col().key("mobile-composer-menu").w((app.window[0] - 28.0).min(176.0)).padding(5.0).radius(14.0)
+        .transition(super::slash::composer_transition(app.ty.scale()))
+        .backdrop_blur(14.0).fill(rgb(p.bg).alpha(0.96)).border(1.0, rgb(p.border)).shadow(4.0, 20.0, Color::BLACK.alpha(0.22))
+        .on_press(|_: &mut App| {})
+        .child(row().key("mobile-composer-photo").label("Photo").w_full().h(44.0).px(12.0).gap(9.0).center_y().radius(9.0).hover(rgb(p.hover))
+            .child(text("\u{f02e9}").font(app.ty.icon_sized(17.0)).color(rgb(p.dim)))
+            .child(text("Photo").font(app.ty.sans(14.0, 550.0)).color(rgb(p.fg)))
+            .on_press_tx(|a: &mut App, tx| { a.mobile_composer_menu = false; crate::mobile_photo::choose(a, tx); }));
+    el().key("mobile-composer-menu-scrim").transition(rune::Transition::none()).pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+        .on_press(|a: &mut App| a.mobile_composer_menu = false)
+        .child(panel.absolute(x, (y - 62.0).max(0.0)))
 }
 
 /// Faint stars inside the composer card: spread over the card's own size (and clipped to its
@@ -276,11 +388,11 @@ impl App {
 }
 
 /// What floats over the agent pane: the picker card above the composer, and a playing skit.
-pub fn overlay(app: &App) -> El {
+pub fn overlay(app: &App, safe_area: [f32; 4]) -> El {
     el().key("agent-overlay").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
         .child(super::slash::effect_layer(app))
-        .child(if app.has_prompt() { super::prompts::card(app) } else { super::slash::picker_card(app) })
-        .child(super::attach::preview(app))
+        .child(if app.has_prompt() { super::prompts::card(app) } else { super::slash::picker_card(app, safe_area) })
+        .child(super::attach::preview(app, safe_area))
 }
 
 impl App {

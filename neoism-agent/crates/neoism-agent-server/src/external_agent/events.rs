@@ -91,7 +91,8 @@ pub(crate) async fn handle_acp_events(mut ctx: AcpEventContext) {
                     status,
                     "external ACP process exited"
                 );
-                break;
+                // The runner still needs to acknowledge its post-prompt barrier
+                // even when the adapter exited immediately after its reply.
             }
             AcpEvent::Error { server_id, message } => {
                 tracing::warn!(

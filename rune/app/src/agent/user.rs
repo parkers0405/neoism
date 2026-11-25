@@ -3,7 +3,7 @@
 //! the sender's presence orb in a lane beside the tail.
 
 use crate::app::App;
-use rune::{Color, El, Shape, canvas, col, el, row, text};
+use rune::{Color, El, Shape, canvas, col, row, text};
 
 const ORB: f32 = 28.0;
 const PAD_Y: f32 = 11.0;

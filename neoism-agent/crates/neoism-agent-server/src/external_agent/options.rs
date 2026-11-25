@@ -28,7 +28,7 @@ pub(crate) struct PreviewRequest {
 /// not returned: the provider process is terminated when this request ends.
 /// Request-level native admission: profile/path gating is separate from live
 /// authentication, which the parent router supplies in CallerClaims.
-pub(super) fn admitted_request_directory(
+pub(crate) fn admitted_request_directory(
     state: &AppState,
     claims: Option<&crate::caller::CallerClaims>,
     directory: Option<String>,
@@ -254,6 +254,95 @@ pub(crate) async fn validate_draft(
     Ok(json!({"selectedOptions": confirmed.selected_options,
         "configOptions": confirmed.config_options, "modeFallback": confirmed.mode_fallback,
         "optionsValid": false}))
+}
+
+/// Confirm a picker selection live, not against the last-good preview cache.
+/// Use the same resolution and exact-value checks as normal provider options.
+pub(crate) async fn validate_subagent_selection(
+    state: &AppState,
+    runtime: ExternalRuntime,
+    directory: &str,
+    model: Option<&str>,
+    reasoning: Option<&str>,
+) -> Result<(Option<String>, Option<String>), ApiError> {
+    if model.is_some_and(|value| value.trim().is_empty()) {
+        return Err(ApiError::bad_request("A model ID must not be empty"));
+    }
+    if model.is_none() && reasoning.is_none() {
+        return Ok((None, None));
+    }
+    let mut choices = BTreeMap::new();
+    if !runtime.acp_only() {
+        if let Some(model) = model {
+            choices.insert("model".into(), model.into());
+        }
+        // runtime.describe returns model-dependent options for this model.
+        let preview = native_control(state, runtime, directory, None, choices).await?;
+        if let Some(model) = model {
+            if !preview.pending_selection.as_ref().is_some_and(|selection| selection["model"] == model) {
+                return Err(ApiError::bad_request("The harness did not confirm this model"));
+            }
+        }
+        let reasoning_id = reasoning
+            .map(|value| subagent_reasoning_selector(&preview.config_options, value))
+            .transpose()?;
+        return Ok((model.map(|_| "model".into()), reasoning_id));
+    }
+    let mut preview = ephemeral(state, runtime, directory, BTreeMap::new()).await?;
+    let model_id = if let Some(model) = model {
+        let id = preview.config_options.iter()
+            .filter(|item| item["type"] == "select" && (item["category"] == "model" || item["id"] == "model"))
+            .find_map(|item| item["id"].as_str().filter(|id| !id.is_empty()))
+            .ok_or_else(|| ApiError::bad_request("The harness did not advertise a model selector"))?
+            .to_owned();
+        option(&preview.config_options, &id, model)?;
+        choices.insert(id.clone(), model.into());
+        preview = ephemeral(state, runtime, directory, choices.clone()).await?;
+        Some(id)
+    } else {
+        None
+    };
+    let reasoning_id = if let Some(value) = reasoning {
+        let id = subagent_reasoning_selector(&preview.config_options, value)?;
+        if model_id.as_ref() == Some(&id) {
+            return Err(ApiError::bad_request("The harness must advertise a separate reasoning selector"));
+        }
+        choices.insert(id.clone(), value.into());
+        // Replay and confirm both choices together against a fresh ACP session.
+        ephemeral(state, runtime, directory, choices).await?;
+        Some(id)
+    } else {
+        None
+    };
+    Ok((model_id, reasoning_id))
+}
+
+fn subagent_reasoning_selector(options: &[Value], value: &str) -> Result<String, ApiError> {
+    let mut selectors = options.iter().filter(|item| item["type"] == "select");
+    let selector = selectors.clone().find(|item| {
+        matches!(item["category"].as_str(), Some("thought_level" | "thought" | "reasoning"))
+    }).or_else(|| selectors.find(|item| {
+        item["category"].is_null() && matches!(item["id"].as_str(),
+            Some("thought_level" | "thought" | "reasoning" | "effort" | "reasoningEffort" | "variant"))
+    }));
+    let id = selector.and_then(|item| item["id"].as_str()).filter(|id| !id.is_empty())
+        .ok_or_else(|| ApiError::bad_request("The harness did not advertise a reasoning selector"))?;
+    option(options, id, value)?;
+    Ok(id.into())
+}
+
+#[test]
+fn subagent_picker_validates_only_advertised_reasoning_values() {
+    let options = [
+        json!({"id":"effort","type":"select","options":[{"value":"fallback"}]}),
+        json!({"id":"vendor-depth","type":"select","category":"thought_level",
+            "options":[{"group":"depth","options":[{"value":"deep"}]}]}),
+        json!({"id":"mode","type":"select","category":"mode","options":[{"value":"deep"}]}),
+    ];
+    assert_eq!(subagent_reasoning_selector(&options, "deep").unwrap(), "vendor-depth");
+    assert!(subagent_reasoning_selector(&options, "Deep").is_err());
+    assert_eq!(subagent_reasoning_selector(&options[..1], "fallback").unwrap(), "effort");
+    assert!(subagent_reasoning_selector(&options[2..], "deep").is_err());
 }
 
 /// Thin DTO projection only: native discovery and selection stay driver-owned.
@@ -766,7 +855,7 @@ async fn replay_choices(
                     pending.contains(id) && option(&options, id, &choices[id]).is_ok()
                 })
             })
-            .min_by_key(|item| if item["category"] == "model" { 0 } else { 1 })
+            .min_by_key(|item| if item["category"] == "model" || item["id"] == "model" { 0 } else { 1 })
             .and_then(|item| item["id"].as_str())
             .map(str::to_owned);
         let Some(next) = next else {

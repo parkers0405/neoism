@@ -95,8 +95,14 @@ pub(crate) struct AcpRpcError {
     pub(crate) message: String,
 }
 
-type PendingMap =
-    Arc<tokio::sync::Mutex<HashMap<u64, oneshot::Sender<Result<Value, AcpRpcError>>>>>;
+type PendingReply = oneshot::Sender<Result<Value, AcpRpcError>>;
+type PendingMap = Arc<tokio::sync::Mutex<PendingRequests>>;
+
+#[derive(Default)]
+struct PendingRequests {
+    replies: HashMap<u64, PendingReply>,
+    closed: Option<AcpRpcError>,
+}
 
 #[derive(Clone)]
 pub(crate) struct AcpClient {
@@ -155,7 +161,7 @@ impl AcpClient {
 
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (write_tx, write_rx) = mpsc::unbounded_channel();
-        let pending = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let pending = Arc::new(tokio::sync::Mutex::new(PendingRequests::default()));
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));
         let command_label = std::iter::once(config.command.as_str())
@@ -177,7 +183,8 @@ impl AcpClient {
             pid,
         });
         spawn_writer(config.id.clone(), stdin, write_rx, event_tx.clone());
-        spawn_reader(config.id.clone(), stdout, pending.clone(), event_tx.clone());
+        let stdout_done =
+            spawn_reader(config.id.clone(), stdout, pending.clone(), event_tx.clone());
         let stderr_done = spawn_stderr(
             config.id.clone(),
             stderr,
@@ -190,6 +197,7 @@ impl AcpClient {
             pending,
             event_tx,
             shutdown_rx,
+            stdout_done,
             stderr_tail,
             stderr_done,
             command_label,
@@ -235,14 +243,20 @@ impl AcpClient {
     ) -> Result<Value, AcpRpcError> {
         let id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
+        {
+            let mut pending = self.pending.lock().await;
+            if let Some(error) = &pending.closed {
+                return Err(error.clone());
+            }
+            pending.replies.insert(id, tx);
+        }
         if let Err(err) = self.write_tx.send(json!({
             "jsonrpc": JSONRPC,
             "id": id,
             "method": method,
             "params": params,
         })) {
-            self.pending.lock().await.remove(&id);
+            self.pending.lock().await.replies.remove(&id);
             return Err(AcpRpcError {
                 code: -32000,
                 message: format!("ACP write queue closed: {err}"),
@@ -255,7 +269,7 @@ impl AcpClient {
                 message: format!("ACP {method} response channel closed"),
             }),
             Err(_) => {
-                self.pending.lock().await.remove(&id);
+                self.pending.lock().await.replies.remove(&id);
                 Err(AcpRpcError {
                     code: -32000,
                     message: format!("ACP {method} timed out"),
@@ -299,11 +313,13 @@ impl AcpClient {
             .map_err(|err| format!("ACP write queue closed: {err}"))
     }
 
-    pub(crate) async fn drain_events(&self) {
+    pub(crate) async fn drain_events(&self) -> Result<(), &'static str> {
         let (tx, rx) = oneshot::channel();
-        if self.event_tx.send(AcpEvent::Barrier(tx)).is_ok() {
-            let _ = rx.await;
-        }
+        self.event_tx
+            .send(AcpEvent::Barrier(tx))
+            .map_err(|_| "ACP event receiver closed")?;
+        rx.await
+            .map_err(|_| "ACP event barrier was not acknowledged")
     }
 
     pub(crate) fn server_id(&self) -> &str {
@@ -356,7 +372,8 @@ fn spawn_reader(
     stdout: tokio::process::ChildStdout,
     pending: PendingMap,
     event_tx: mpsc::UnboundedSender<AcpEvent>,
-) {
+) -> oneshot::Receiver<()> {
+    let (done_tx, done_rx) = oneshot::channel();
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         loop {
@@ -399,13 +416,16 @@ fn spawn_reader(
                     let Some(id) = id.as_u64() else {
                         continue;
                     };
-                    let Some(tx) = pending.lock().await.remove(&id) else {
+                    let Some(tx) = pending.lock().await.replies.remove(&id) else {
                         continue;
                     };
-                    if let Some(result) = value.get("result") {
-                        let _ = tx.send(Ok(result.clone()));
-                    } else if let Some(error) = value.get("error") {
-                        let _ = tx.send(Err(AcpRpcError {
+                    let reply = match (value.get("result"), value.get("error")) {
+                        (Some(result), None)
+                            if value["jsonrpc"] == JSONRPC && value.get("method").is_none() =>
+                        {
+                            Ok(result.clone())
+                        }
+                        (None, Some(error)) => Err(AcpRpcError {
                             code: error
                                 .get("code")
                                 .and_then(Value::as_i64)
@@ -415,8 +435,13 @@ fn spawn_reader(
                                 .and_then(Value::as_str)
                                 .unwrap_or("ACP request failed")
                                 .to_string(),
-                        }));
-                    }
+                        }),
+                        _ => Err(AcpRpcError {
+                            code: -32000,
+                            message: "Malformed ACP JSON-RPC response".into(),
+                        }),
+                    };
+                    let _ = tx.send(reply);
                 }
                 (None, Some("session/update")) => {
                     let params = value.get("params").cloned().unwrap_or(Value::Null);
@@ -454,7 +479,9 @@ fn spawn_reader(
                 }
             }
         }
+        let _ = done_tx.send(());
     });
+    done_rx
 }
 
 fn spawn_stderr(
@@ -489,17 +516,33 @@ fn spawn_waiter(
     pending: PendingMap,
     event_tx: mpsc::UnboundedSender<AcpEvent>,
     shutdown: oneshot::Receiver<()>,
+    mut stdout_done: oneshot::Receiver<()>,
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
     stderr_done: oneshot::Receiver<()>,
     command_label: String,
 ) {
     tokio::spawn(async move {
+        let exit = async {
+            tokio::select! {
+                result = child.wait() => result.ok().and_then(|status| status.code()),
+                _ = shutdown => {
+                    crate::tool::process::kill_process_group(child.id());
+                    let _ = child.kill().await;
+                    child.wait().await.ok().and_then(|status| status.code())
+                }
+            }
+        };
+        tokio::pin!(exit);
         let status = tokio::select! {
-            result = child.wait() => result.ok().and_then(|status| status.code()),
-            _ = shutdown => {
-                crate::tool::process::kill_process_group(child.id());
-                let _ = child.kill().await;
-                child.wait().await.ok().and_then(|status| status.code())
+            status = &mut exit => {
+                // Let the reader dispatch a final reply already written to the pipe.
+                let _ = tokio::time::timeout(Duration::from_millis(100), &mut stdout_done).await;
+                Some(status)
+            }
+            _ = &mut stdout_done => {
+                // Preserve exit diagnostics when the process is exiting, but do
+                // not wait for the prompt deadline if it only closed stdout.
+                tokio::time::timeout(Duration::from_millis(100), &mut exit).await.ok()
             }
         };
         let _ = tokio::time::timeout(Duration::from_millis(100), stderr_done).await;
@@ -513,16 +556,26 @@ fn spawn_waiter(
         } else {
             format!("; stderr: {}", stderr.trim())
         };
-        let mut pending = pending.lock().await;
-        for (_, tx) in pending.drain() {
-            let _ = tx.send(Err(AcpRpcError {
-                code: -32000,
-                message: format!(
-                    "ACP server `{command_label}` exited (status {status:?}){detail}"
-                ),
-            }));
+        let error = AcpRpcError {
+            code: -32000,
+            message: match status {
+                Some(status) => {
+                    format!("ACP server `{command_label}` exited (status {status:?}){detail}")
+                }
+                None => format!("ACP server `{command_label}` closed stdout before replying{detail}"),
+            },
+        };
+        {
+            let mut pending = pending.lock().await;
+            pending.closed = Some(error.clone());
+            for (_, tx) in pending.replies.drain() {
+                let _ = tx.send(Err(error.clone()));
+            }
         }
-        drop(pending);
+        let status = match status {
+            Some(status) => status,
+            None => exit.await,
+        };
         let _ = event_tx.send(AcpEvent::Exited { server_id, status });
     });
 }
@@ -1016,8 +1069,7 @@ mod lifetime_tests {
         let response =
             json!({"jsonrpc":"2.0", "id":1, "result":{"stopReason":"end_turn"}})
                 .to_string();
-        let script =
-            format!("read line; printf '%s\\n' '{update}' '{response}'; read line");
+        let script = format!("read line; printf '%s\\n' '{update}' '{response}'");
         let config =
             AcpServerConfig::new("mock", "Mock", "/bin/sh", std::env::temp_dir())
                 .args(["-c", &script]);
@@ -1044,9 +1096,42 @@ mod lifetime_tests {
         assert_eq!(response["stopReason"], "end_turn");
         tokio::time::timeout(Duration::from_secs(2), client.drain_events())
             .await
+            .unwrap()
             .unwrap();
         assert_eq!(updates.lock().unwrap()[0]["content"]["text"], "final");
         handler.abort();
+    }
+
+    #[tokio::test]
+    async fn acp_prompt_stdout_eof_fails_while_process_is_still_alive() {
+        let config = AcpServerConfig::new("mock", "Mock", "/bin/sh", std::env::temp_dir())
+            .args(["-c", "read line; exec 1>&-; read line"]);
+        let (client, _events) = AcpClient::spawn(config).unwrap();
+        for _ in 0..2 {
+            let error = tokio::time::timeout(
+                Duration::from_secs(2),
+                client.request("session/prompt", json!({}), Duration::from_secs(30)),
+            )
+            .await
+            .expect("stdout EOF must not wait for the RPC deadline")
+            .unwrap_err();
+            assert!(error.message.contains("closed stdout before replying"));
+        }
+    }
+
+    #[tokio::test]
+    async fn acp_prompt_rejects_conflicting_rpc_result_and_error() {
+        let reply = json!({"jsonrpc":"2.0", "id":1, "result":{"stopReason":"end_turn"},
+            "error":{"code":-32000,"message":"failed"}});
+        let script = format!("read line; printf '%s\\n' '{reply}'");
+        let config = AcpServerConfig::new("mock", "Mock", "/bin/sh", std::env::temp_dir())
+            .args(["-c", &script]);
+        let (client, _events) = AcpClient::spawn(config).unwrap();
+        let error = client
+            .request("session/prompt", json!({}), Duration::from_secs(3))
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("Malformed ACP JSON-RPC response"));
     }
 
     #[tokio::test]

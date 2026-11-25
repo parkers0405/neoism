@@ -7,6 +7,10 @@
 use super::*;
 use crate::el::TouchPolicy;
 
+#[cfg(target_os = "ios")]
+#[path = "touch/edit_menu.rs"]
+mod edit_menu;
+
 /// How far (points) a finger travels before its touch is a drag or a pan, not a tap.
 const TOUCH_SLOP: f32 = 8.0;
 const DRAG_HOLD: f64 = 0.5;
@@ -28,6 +32,9 @@ pub enum TouchPhase {
 pub(super) struct Touch {
     pub(super) scroll: Option<scroll_touch::TouchScroll>,
     finger: Option<Finger>,
+    /// Field path and pending anchor; after presentation the path guards the action target.
+    #[cfg(target_os = "ios")]
+    edit_menu: Option<(String, Option<(f32, f32)>)>,
 }
 
 struct Finger {
@@ -43,6 +50,7 @@ struct Finger {
     /// The vertical viewport under the finger, held until the pan picks its axis.
     scroll: Option<NodeId>,
     horizontal: bool,
+    edit: Option<(String, bool)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -50,6 +58,7 @@ enum Mode {
     /// Still within the slop: lifting it here is a tap.
     Pending,
     Drag,
+    EditSelection,
     Pan,
 }
 
@@ -73,25 +82,43 @@ impl<S: 'static> Runtime<S> {
         if self.touch.finger.is_some() { return; }
         let scroll = self.touch_scroll_start(x, y);
         self.pointer_move(x, y);
-        self.pointer_down_source(x, y, true);
+        self.pointer_down_source(x, y, Some(time));
+        let edit = self.press.held().and_then(|h| {
+            self.live_index(&h.path).filter(|&i| self.touch_edit_field(i))?;
+            Some((h.path.clone(), h.drag.clicks >= 2))
+        });
         let policy = self.press.path().and_then(|p| self.live_index(p))
             .map_or(TouchPolicy::Drag, |i| self.nodes[i].handlers.touch_policy);
-        self.touch.finger = Some(Finger { id, origin: (x, y), last: 0.0, at: time, down_at: time, policy, velocity: 0.0, mode: Mode::Pending, scroll, horizontal: false });
+        self.touch.finger = Some(Finger { id, origin: (x, y), last: 0.0, at: time, down_at: time, policy, velocity: 0.0, mode: Mode::Pending, scroll, horizontal: false, edit });
+    }
+
+    pub(super) fn touch_edit_field(&self, i: usize) -> bool {
+        self.nodes[i].input.as_deref().is_some_and(|e| e.touch_edit_menu && e.access.is_some() && !e.edit.is_secure())
     }
 
     fn touch_move(&mut self, id: u64, x: f32, y: f32, time: f64) {
         let Some(f) = self.touch.finger.as_ref().filter(|f| f.id == id) else { return };
         let (dx, dy) = (x - f.origin.0, y - f.origin.1);
         if f.mode == Mode::Pending && dx.hypot(dy) > TOUCH_SLOP {
-            let (origin, scroll, policy) = (f.origin, f.scroll, f.policy);
-            let selecting = self.text_sel.dragging && time - f.down_at >= DRAG_HOLD;
+            let (origin, scroll, policy, held, editing) = (f.origin, f.scroll, f.policy, time - f.down_at >= DRAG_HOLD, f.edit.is_some());
+            if let Some((path, multi)) = &f.edit
+                && (*multi || held)
+            {
+                let path = path.clone();
+                if *multi || self.input_hold_word(&path, origin.0, origin.1) {
+                    self.touch.finger.as_mut().unwrap().mode = Mode::EditSelection;
+                    self.pointer_move(x, y);
+                    return;
+                }
+            }
+            let selecting = self.text_sel.dragging && held;
             let drag = selecting || self.press_drags() && match policy {
                 TouchPolicy::Drag => true,
                 TouchPolicy::Scroll => false,
-                TouchPolicy::HoldDrag => time - f.down_at >= DRAG_HOLD,
+                TouchPolicy::HoldDrag => held,
             };
             let (scroll, horizontal) = if drag { (None, false) } else { self.touch_scroll_pan(origin.0, origin.1, dx.abs() > dy.abs(), scroll) };
-            let pan = !drag && (scroll.is_some() || policy != TouchPolicy::Drag);
+            let pan = !drag && (scroll.is_some() || policy != TouchPolicy::Drag || editing);
             if pan {
                 // Stop selection tracking before layout moves text under the stationary
                 // pointer. Clearing never copies; normal selection-change delivery reports it.
@@ -113,7 +140,7 @@ impl<S: 'static> Runtime<S> {
         (f.last, f.at) = (along, time);
         match (f.mode, f.scroll) {
             (Mode::Pan, Some(scroll)) => self.touch_scroll_move(scroll, along),
-            (Mode::Drag, _) => self.pointer_move(x, y),
+            (Mode::Drag | Mode::EditSelection, _) => self.pointer_move(x, y),
             _ => {}
         }
     }
@@ -133,9 +160,28 @@ impl<S: 'static> Runtime<S> {
         // A pending tap never crossed TOUCH_SLOP. Release at its press point:
         // pointer_up otherwise turns even sub-slop finger jitter into a mouse
         // selection/custom-drag Move. A pan cancelled the press, so it clicks nothing.
-        let (x, y) = if f.mode == Mode::Drag { (x, y) } else { f.origin };
-        if f.mode == Mode::Drag { self.pointer_move(x, y); }
+        let dragged = matches!(f.mode, Mode::Drag | Mode::EditSelection);
+        let (x, y) = if dragged { (x, y) } else { f.origin };
+        if dragged { self.pointer_move(x, y); }
+        if let Some((path, multi)) = f.edit {
+            // A stationary long press selects on lift. A held drag selects before its first
+            // Move, so the following movement can extend the same word range.
+            let held = f.mode == Mode::Pending && time - f.down_at >= DRAG_HOLD;
+            let show = f.mode == Mode::EditSelection || (f.mode == Mode::Pending && multi)
+                || (held && self.input_hold_word(&path, x, y));
+            if show {
+                self.input_click.clear_last();
+                #[cfg(target_os = "ios")]
+                { self.touch.edit_menu = Some((path, Some((x, y)))); }
+            }
+        }
         self.pointer_up(x, y);
+        if pan && f.scroll.and_then(|id| self.node_index.get(&id).copied())
+            .is_some_and(|i| self.nodes[i].handlers.blur_after_touch_scroll)
+            && self.set_focus(None, false)
+        {
+            self.dirty = true;
+        }
         // No hover is left under a lifted finger.
         self.pointer_leave();
     }
@@ -203,6 +249,32 @@ mod tests {
         assert_eq!(rt.state.taps, [0]);
         assert_eq!(rt.pointer(), None);
         assert!(!rt.touching());
+    }
+
+    #[test]
+    fn picker_pan_blurs_on_lift_not_on_press_or_cancel() {
+        let mut rt = Runtime::new(crate::TextEdit::new(""), |edit, _| {
+            col().size(200.0, 300.0)
+                .child(crate::text_input(edit, crate::TextStyle::new(14.0, 400.0)).key("query").h(40.0)
+                    .on_edit(|s: &mut crate::TextEdit| s))
+                .child(col().w_full().h(200.0).scroll(ScrollSpec { stick_bottom: false }).blur_after_touch_scroll()
+                    .children((0..20).map(|_| el().w_full().h(40.0).on_press(|_: &mut crate::TextEdit| {}))))
+        }, (200.0, 300.0), Env::default());
+        rt.frame(0.0);
+        rt.touch(1, TouchPhase::Started, 30.0, 20.0, 0.0);
+        rt.touch(1, TouchPhase::Ended, 30.0, 20.0, 0.05);
+        rt.frame(0.016);
+        assert!(rt.state.focused);
+        for (id, end) in [(2, TouchPhase::Cancelled), (3, TouchPhase::Ended)] {
+            let time = id as f64;
+            rt.touch(id, TouchPhase::Started, 100.0, 150.0, time);
+            rt.touch(id, TouchPhase::Moved, 100.0, 100.0, time + 0.05);
+            rt.frame(0.016);
+            assert!(rt.state.focused);
+            rt.touch(id, end, 100.0, 100.0, time + 0.1);
+            rt.frame(0.016);
+            assert_eq!(rt.state.focused, end == TouchPhase::Cancelled);
+        }
     }
 
     #[test]

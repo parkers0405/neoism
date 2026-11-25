@@ -153,6 +153,7 @@ impl Daemon {
 
 struct Endpoint {
     url: String,
+    bearer: Option<String>,
     /// Sent in `Hello` (a hosted server's pairing password).
     pairing_token: Option<String>,
 }
@@ -178,7 +179,12 @@ fn with_token(base: &str, token: Option<&str>) -> String {
 }
 
 fn endpoint_for(target: &Target) -> Endpoint {
-    Endpoint { url: with_token(&target.url, target.auth_token.as_deref()), pairing_token: target.pairing_token.clone() }
+    let device_session = crate::device_pair::is_session(&target.url);
+    Endpoint {
+        url: if device_session { target.url.clone() } else { with_token(&target.url, target.auth_token.as_deref()) },
+        bearer: if device_session { target.auth_token.clone() } else { None },
+        pairing_token: target.pairing_token.clone(),
+    }
 }
 
 /// Dial `target` and complete the handshake, then hang up (`prepareServerConnection`'s probe):
@@ -244,7 +250,7 @@ fn discover(target: Option<&Target>) -> Result<Endpoint, String> {
         let address = record["address"].as_str().ok_or("Published daemon has no address")?;
         format!("ws://{address}/session")
     };
-    Ok(Endpoint { url: with_token(&base, token.as_deref()), pairing_token: None })
+    Ok(Endpoint { url: with_token(&base, token.as_deref()), bearer: None, pairing_token: None })
 }
 
 /// The workspace-scoped Agent proxy used by the desktop SDK. The daemon, not the caller,
@@ -270,7 +276,16 @@ type Socket = WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>;
 
 /// `ws://` locally and over SSH tunnels; `wss://` for Fast Server invites (rustls, web roots).
 fn connect(endpoint: &Endpoint) -> Result<Socket, String> {
-    let parsed = url::Url::parse(&endpoint.url).map_err(|_| "Invalid server address".to_owned())?;
+    let mut parsed = url::Url::parse(&endpoint.url).map_err(|_| "Invalid server address".to_owned())?;
+    let connector = if crate::device_pair::is_session(&endpoint.url) && let Some(ca) = parsed.fragment() {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(crate::device_pair::decode_ca(ca)?.into()).map_err(|_| "Invalid device certificate")?;
+        let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions().map_err(|_| "Could not initialize device TLS")?
+            .with_root_certificates(roots).with_no_client_auth();
+        parsed.set_fragment(None);
+        Some(tungstenite::Connector::Rustls(std::sync::Arc::new(config)))
+    } else { None };
     let secure = match parsed.scheme() { "ws" => false, "wss" => true, _ => return Err("Server addresses start with ws:// or wss://".into()) };
     let host = parsed.host_str().ok_or("Server address has no host")?.trim_matches(['[', ']']).to_owned();
     let port = parsed.port().unwrap_or(if secure { 443 } else { 80 });
@@ -285,7 +300,14 @@ fn connect(endpoint: &Endpoint) -> Result<Socket, String> {
     let mut config = tungstenite::protocol::WebSocketConfig::default();
     config.max_message_size = Some(64 << 20);
     config.max_frame_size = Some(64 << 20);
-    let (socket, _) = tungstenite::client_tls_with_config(endpoint.url.as_str(), stream, Some(config), None)
+    use tungstenite::client::IntoClientRequest;
+    let mut request = parsed.as_str().into_client_request().map_err(|_| "Invalid server address".to_owned())?;
+    if let Some(bearer) = &endpoint.bearer {
+        let mut value = format!("Bearer {bearer}").parse::<tungstenite::http::HeaderValue>().map_err(|_| "Invalid device credential".to_owned())?;
+        value.set_sensitive(true);
+        request.headers_mut().insert(tungstenite::http::header::AUTHORIZATION, value);
+    }
+    let (socket, _) = tungstenite::client_tls_with_config(request, stream, Some(config), connector)
         .map_err(|e| format!("Daemon handshake failed: {e}"))?;
     match socket.get_ref() {
         tungstenite::stream::MaybeTlsStream::Plain(s) => { s.set_read_timeout(Some(Duration::from_millis(8))).ok(); }

@@ -116,6 +116,12 @@ impl App {
         if !text.starts_with('/') { self.composer.slash_dismissed = false; }
     }
 
+    pub(crate) fn open_mobile_commands(&mut self) {
+        let rows = COMMANDS.iter().map(|c| Row::new(c.title, c.description, c.footer, c.title)).collect();
+        self.tabs[self.active].draft.focused = false;
+        self.composer.picker = Some(Picker::new(Kind::Slash, "Commands", rows));
+    }
+
     /// Keys the composer routes here first. True when the `/` menu used it.
     pub fn agent_composer_key(&mut self, event: &KeyEvent, tx: &mut Tx) -> bool {
         if self.has_prompt() { return self.prompt_key(event); }
@@ -199,7 +205,10 @@ impl App {
                 self.set_thinking(thinking);
             }
             SlashAction::OpenConnectPicker => self.open_connect(),
-            SlashAction::OpenAgentConnections(provider) => self.open_agent_connections(provider.as_deref()),
+            SlashAction::OpenAgentConnections(provider) => {
+                self.reset_subagent_setup_return();
+                self.open_agent_connections(provider.as_deref());
+            }
             SlashAction::ShowMcp => self.open_mcp(),
             SlashAction::OpenSessionsPicker => {
                 let rows = self.session_rows();
@@ -428,10 +437,20 @@ impl App {
         self.select_model_provider(&ids[next]);
     }
 
-    pub(super) fn focus_picker(&mut self, picker: Picker) {
+    pub(super) fn focus_picker(&mut self, mut picker: Picker) {
         let i = self.active;
+        if cfg!(target_os = "ios") && picker.kind != Kind::Slash && picker.mention.is_none() { picker.query.focused = false; }
         self.tabs[i].draft.focused = picker.kind == Kind::Slash || picker.mention.is_some();
         self.composer.picker = Some(picker);
+    }
+
+    pub(super) fn toggle_picker_modal(&mut self, tx: &mut Tx) {
+        self.composer.card_modal = !self.composer.card_modal;
+        if self.mobile {
+            if let Some(picker) = &mut self.composer.picker { picker.query.focused = false; }
+            self.tabs[self.active].draft.focused = false;
+            tx.blur();
+        }
     }
 
     /// Close any picker and give the composer its focus back.
@@ -445,7 +464,7 @@ impl App {
         self.composer.mcp_authorizing = false;
         self.composer.mcp_refresh_requested = false;
         let i = self.active;
-        self.tabs[i].draft.focused = true;
+        self.tabs[i].draft.focused = !cfg!(target_os = "ios");
     }
 
     fn choose_model(&mut self, model: String) {
@@ -565,7 +584,19 @@ impl App {
                     return;
                 }
                 self.tabs[i].draft.clear();
+                let original = self.mobile.then(|| self.active_session()).flatten();
                 self.run_slash(&row.value, tx);
+                // A picker can dismiss the keyboard and resize the transcript. Keep the
+                // reader's place rather than re-centering on another part of the chat.
+                if self.composer.picker.is_some() && let Some(id) = original.filter(|id| self.active_session().as_ref() == Some(id))
+                    && let Some(session) = self.sessions.get_mut(&id)
+                {
+                    if session.following_bottom.get() {
+                        tx.scroll_to_bottom_instant(format!("conversation:{id}"));
+                    } else if let Some((row, _)) = session.anchor(0.0, std::time::Instant::now()) {
+                        tx.keep_on_screen(row);
+                    }
+                }
             }
             Kind::Model => {
                 if row.value == ADD_PROVIDER { return self.open_connect(); }
@@ -611,6 +642,7 @@ impl App {
             Kind::McpActions => self.run_mcp_action(&row.value),
             Kind::Connect => self.choose_connect_provider(&row.value),
             Kind::AgentConnections => super::agent_connections::start_sign_in(self, &row.value),
+            Kind::SubagentModels => self.load_subagent_models(&row.value),
             Kind::ConnectAccount => self.choose_account(&row.value),
             Kind::ConnectAccountActions => self.run_account_action(&row.value),
             Kind::ConnectAuth => self.choose_auth_method(&row.value),
@@ -695,6 +727,8 @@ impl App {
         }
         let connect_provider = self.composer.connect.as_ref().and_then(|flow| flow.provider.as_ref().map(|p| p.id.clone()));
         match kind {
+            Kind::AgentConnections if picker.query.text.is_empty() => return self.return_to_subagent_models(),
+            Kind::SubagentModels if picker.query.text.is_empty() => self.open_selection(Kind::Model),
             Kind::McpActions => self.open_mcp(),
             // Back out of choosing an account: the model waiting on it is dropped, so a late
             // reply cannot select it.
@@ -754,6 +788,7 @@ impl App {
                 if picker.kind == Kind::Model && picker.activity.is_none() {
                     tx.scroll_into_view_in(picker.model_scroll_key(), format!("picker-row:{}", picker.selected));
                 }
+                self.sync_subagent_models();
             }
             Key::Escape => { if !self.picker_back() { self.close_prompt_picker(); } }
             Key::Backspace if picker.query.text.is_empty() => { if !self.picker_back() { return false; } }
@@ -809,7 +844,7 @@ impl App {
 
     pub(crate) fn open_connect(&mut self) {
         self.composer.connect = Some(ConnectFlow { waiting: true, ..ConnectFlow::default() });
-        self.focus_picker(Picker::loading(Kind::Connect, "Connect a provider"));
+        self.focus_picker(Picker::loading(Kind::Connect, if self.paired_chat_device() { "Host providers" } else { "Connect a provider" }));
         let request_id = Some(self.composer.request_id("connect"));
         self.agent_send(Client::ConnectListProviders { directory: Some(self.cwd.clone()), request_id });
     }
@@ -821,6 +856,7 @@ impl App {
     }
 
     fn choose_connect_provider(&mut self, value: &str) {
+        let paired = self.paired_chat_device();
         match value {
             DONE => return self.close_prompt_picker(),
             RETRY => {
@@ -832,6 +868,10 @@ impl App {
         }
         let Some(flow) = self.composer.connect.as_mut() else { return };
         let Some(provider) = flow.providers.iter().find(|p| p.id == value).cloned() else { return };
+        if paired && !provider.connected {
+            self.modal = Some(crate::ui::modal::Modal::notice("Provider not connected", "Connect this provider in Neoism on the host Mac."));
+            return;
+        }
         flow.provider = Some(provider.clone());
         flow.waiting = true;
         self.focus_picker(Picker::loading(Kind::ConnectAccount, "Choose an account"));
@@ -839,6 +879,11 @@ impl App {
     }
 
     fn choose_account(&mut self, value: &str) {
+        if self.paired_chat_device() && value == ADD_ACCOUNT {
+            self.modal = Some(crate::ui::modal::Modal::notice("Host account", "Add accounts in Neoism on the host Mac."));
+            return;
+        }
+        let paired = self.paired_chat_device();
         let Some(flow) = self.composer.connect.as_mut() else { return };
         if value == ADD_ACCOUNT {
             flow.adding = true;
@@ -847,6 +892,10 @@ impl App {
         }
         let Some(account) = flow.connections.iter().find(|c| c.connection_id == value).cloned() else { return };
         flow.connection = Some(account.clone());
+        if paired {
+            self.focus_picker(Picker::new(Kind::ConnectAccountActions, "Host account", vec![Row::new("Select account", account.label, "use", "select")]));
+            return;
+        }
         let mut rows = vec![Row::new("Select account", account.label.clone(), "use", "select"), Row::new("Rename", account.label.clone(), "edit label", "rename")];
         if !account.is_default { rows.push(Row::new("Make default", account.label.clone(), "default", "default")); }
         rows.push(Row::new("Disconnect", account.label.clone(), "remove", "disconnect"));
@@ -1004,6 +1053,7 @@ impl App {
     /// Fold catalogs, selection state and connect/MCP replies in. True when the message was
     /// only for the slash system.
     pub(crate) fn apply_slash_event(&mut self, message: &Server) -> bool {
+        if self.apply_subagent_model_event(message) { return true; }
         match message {
             Server::ProviderCatalog { providers, catalog_status, .. } => {
                 self.composer.catalog_received = true;

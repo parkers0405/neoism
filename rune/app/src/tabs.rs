@@ -74,6 +74,7 @@ impl App {
     }
 
     pub(crate) fn open_tab_with_terminal_command(&mut self, kind: TabKind, command: Option<(&'static str, &'static [&'static str])>) -> usize {
+        if self.mobile && !matches!(kind, TabKind::Agent { .. }) { return self.active; }
         let id = self.next_tab;
         self.next_tab += 1;
         let terminal = matches!(kind, TabKind::Home | TabKind::Terminal);
@@ -81,7 +82,7 @@ impl App {
         self.tabs.iter_mut().for_each(|t| t.draft.focused = false);
         self.tabs.push(Tab { id, kind, draft: TextEdit::new(""), pastes: Default::default(), pending_prompt: None, selection: None });
         self.active = self.tabs.len() - 1;
-        self.tabs[self.active].draft.focused = true;
+        self.tabs[self.active].draft.focused = !cfg!(target_os = "ios");
         self.layout.open(id);
         self.restore_composer_selection();
         if terminal { self.open_terminal_with_command(id, command); }
@@ -112,6 +113,7 @@ impl App {
         if index >= self.tabs.len() { return; }
         let removed = self.tabs.remove(index);
         self.attach.pending.remove(&removed.id);
+        self.clear_draft_attachment_images(removed.id);
         if matches!(removed.kind, TabKind::Image { .. }) { self.forget_image_viewer(removed.id); }
         if removed.kind == TabKind::GitDiff { self.clear_git_review(); }
         self.close_terminal(removed.id);
@@ -124,7 +126,7 @@ impl App {
             if !self.tabs.iter().any(|t| t.kind == removed.kind) { self.databases.remove(path); }
         }
         if !self.layout.remove(removed.id) {
-            self.open_tab(TabKind::Home);
+            self.open_tab(if self.mobile { TabKind::Agent { session: None } } else { TabKind::Home });
             return;
         }
         self.show_focused_pane();
@@ -169,8 +171,15 @@ impl App {
     pub fn submit(&mut self) {
         let index = self.active;
         let text = self.expanded_composer_text(index).trim().to_owned();
+        if self.mobile {
+            if text.is_empty() || self.tabs[index].pending_prompt.is_some() { return; }
+            if !matches!(self.connection, crate::app::Connection::Connected) || !self.workspace_ready {
+                self.modal = Some(crate::ui::modal::Modal::notice("Not connected", "Your message is still in the composer. Connect to a Neoism host before sending."));
+                return;
+            }
+        }
         if text.is_empty() { self.replay_empty_wordmark(); return; }
-        if matches!(self.tabs[index].kind, TabKind::Agent { .. }) {
+        if !self.mobile && matches!(self.tabs[index].kind, TabKind::Agent { .. }) {
             if let Some(command) = CloseCommand::parse(&text) {
                 self.tabs[index].draft.clear();
                 self.run_close_command(command);
@@ -178,6 +187,7 @@ impl App {
             }
         }
         if matches!(self.tabs[index].kind, TabKind::Agent { .. }) && self.gate_agent_send() { return; }
+        if !self.check_attachment_budget(index) { return; }
         self.prepare_composer_submit(index);
         self.tabs[index].draft.clear();
         self.tabs[index].pastes.clear();
@@ -222,6 +232,7 @@ impl App {
 
     /// Animate every visible pane's wordmark using the exact key its view draws.
     pub fn visible_wordmarks(&self) -> Vec<String> {
+        if let Some(key) = crate::mobile::pairing_wordmark(self) { return vec![key]; }
         self.layout.panes().iter().filter_map(|pane| {
             let id = pane.active_tab()?;
             let tab = self.tabs.iter().find(|tab| tab.id == id)?;

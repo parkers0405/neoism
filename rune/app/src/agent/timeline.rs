@@ -13,6 +13,8 @@ use rune_kit::markdown::{CodeFrame, Markdown, MarkdownStyle};
 use rune_kit::syntax::{Syntax, SyntaxTheme};
 
 pub const COLUMN_PAD_X: f32 = 102.0;
+const MOBILE_COLUMN_PAD: f32 = 14.0;
+const MOBILE_COLUMN_MAX: f32 = 600.0;
 /// The composer's height over the transcript's foot before its first layout reports it, and
 /// the room left under the last row at rest.
 const FOOT: f32 = 159.0;
@@ -22,10 +24,24 @@ const REST_GAP: f32 = 41.0;
 
 /// One agent tab: the wordmark home before the first prompt, then the transcript.
 pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
+    pane_at_width(app, session, None)
+}
+
+pub(crate) fn mobile_pane(app: &App, session: Option<&str>, width: f32) -> El {
+    pane_at_width(app, session, Some(width))
+}
+
+fn pane_at_width(app: &App, session: Option<&str>, width: Option<f32>) -> El {
     let p = app.pal;
     let tab_id = app.active_tab().id;
-    let available = app.rects.get(&format!("agent-area:{tab_id}")).map_or(app.window[0] - 55.5, |r| r[2]);
+    let available = width.unwrap_or_else(|| app.rects.get(&format!("agent-area:{tab_id}")).map_or(app.window[0] - if app.mobile { 0.0 } else { 55.5 }, |r| r[2]));
     let Some(session_id) = session else {
+        if app.mobile {
+            return col().key("agent-pane").w_full().h_full().justify_center().items_center().px(MOBILE_COLUMN_PAD).pb(10.0).gap(22.0)
+                .on_layout(move |a: &mut App, r| { a.rects.insert(format!("agent-area:{tab_id}"), r); })
+                .child(crate::mobile::welcome(app).w_full())
+                .child(composer(app, MOBILE_COLUMN_MAX).key("agent-composer-shell"));
+        }
         return col().key("agent-pane").w_full().h_full().fill(app.surface(p.bg)).items_center().justify_center()
             .on_layout(move |a: &mut App, r| { a.rects.insert(format!("agent-area:{tab_id}"), r); })
             .child(wordmark::view(app, &wordmark::host_key("agent", tab_id), 640.0_f32.min((available - 32.0).max(16.0))))
@@ -35,7 +51,9 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     let session = app.sessions.get(session_id);
     let messages = session.map(|s| s.messages.as_slice()).unwrap_or(&[]);
     let live_from = session.and_then(|s| s.live_from).unwrap_or(usize::MAX);
-    let pad = if available >= 700.0 { COLUMN_PAD_X } else { 24.0 };
+    let pad = if app.mobile { ((available - MOBILE_COLUMN_MAX) / 2.0).max(MOBILE_COLUMN_PAD) }
+        else if available >= 700.0 { COLUMN_PAD_X } else { 24.0 };
+    let rows_pad = pad;
     let width_id = session_id.to_owned();
     // The transcript's rows: only those in the mounted window (the viewport and up to two
     // viewports either side) are built, so a scroll frame or a streamed delta costs the rows on
@@ -63,7 +81,9 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     // (With a fixed 200 pt the row sat 41 pt above the pinned line: a band of nothing between
     // the reply and "Crafting".)
     let foot = transcript_foot(app, tab_id);
-    let rows = col().key(format!("timeline:{session_id}")).w_full().px(pad).pt(16.0).pb(if activity { foot } else { foot + REST_GAP }).gap(0.0);
+    let rest_gap = if app.mobile { 12.0 } else { REST_GAP };
+    let rows = col().key(format!("timeline:{session_id}")).w_full().px(rows_pad).pt(if app.mobile { 12.0 } else { 16.0 })
+        .pb(if activity { foot } else { foot + rest_gap }).gap(0.0);
     // A just-sent message rests at the top of the view: room for that, whatever the reply
     // under it has come to so far (`turn.rs`). No floor at all otherwise.
     let rows = match session.and_then(|s| s.turn_floor()) { Some(floor) => rows.min_h(floor), None => rows };
@@ -78,7 +98,8 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
         .on_visible_rows(move |a: &mut App, range: std::ops::Range<usize>| a.timeline_rows_visible(&visible_id, &visible_items, &question_rows, range))
         // The rows move on every frame of a scroll; only a new width re-runs the views.
         .on_layout_tx(move |a: &mut App, [_, _, w, _]: [f32; 4], tx: &mut Tx| {
-            let width = (w - 2.0 * pad).max(0.0);
+            let width = if a.mobile { (w - 2.0 * MOBILE_COLUMN_PAD).clamp(0.0, MOBILE_COLUMN_MAX) }
+                else { (w - 2.0 * rows_pad).max(0.0) };
             match a.sessions.get_mut(&width_id) {
                 Some(session) if (session.width - width).abs() > 0.5 => session.width = width,
                 _ => tx.live_only(),
@@ -97,6 +118,8 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     let rows = if session.is_none_or(|s| s.arriving()) { rows.instant_changes() } else { rows };
     let scroll_key = format!("conversation:{session_id}");
     let mirror = session.map(|s| s.scroll.clone()).unwrap_or_default();
+    let touch_scrolled_up = session.filter(|_| app.mobile).map(|s| s.touch_scrolled_up.clone());
+    let following_bottom = session.map(|s| s.following_bottom.clone()).unwrap_or_default();
     let wheel_id = session_id.to_owned();
     let view_id = session_id.to_owned();
     // A notch moves the same distance as in a code file (three code lines), on the same spring.
@@ -104,22 +127,33 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
     let timeline = col().key(scroll_key).w_full().grow(1.0).shrink()
         .scroll(ScrollSpec { stick_bottom: true })
         .scroll_anchor()
-        .on_scroll_offset(move |pos| mirror.set((pos.offset[1], pos.max[1])))
+        .on_scroll_offset(move |pos| {
+            if let Some(up) = &touch_scrolled_up {
+                let (offset, max) = mirror.get();
+                // Ignore geometry changes, including keyboard resize and prepending a page.
+                if (max - pos.max[1]).abs() < 0.5 && pos.offset[1].max(0.0) < offset - 0.1 { up.set(true); }
+            }
+            mirror.set((pos.offset[1], pos.max[1]));
+            following_bottom.set(pos.following_bottom);
+        })
         .on_layout(move |a: &mut App, r: [f32; 4]| {
             a.rects.insert(format!("timeline-view:{tab_id}"), r);
             if let Some(session) = a.sessions.get_mut(&view_id) { session.viewport_h = r[3]; }
         })
-        .on_pointer_move_local(|a: &mut App, p: rune::PointerEvent, _: &mut Tx| {
+        .on_pointer_move_local(|a: &mut App, p: rune::PointerEvent, tx: &mut Tx| {
+            tx.live_only();
             if a.selection.copy.dragging() { a.selection.pointer_y = Some(p.window_y); }
         })
         .on_wheel(move |s: &mut App, e: WheelEvent, tx: &mut Tx| s.timeline_wheel(&wheel_id, e, line_h, tx))
         .child(rows);
-    let mut pane = col().key("agent-pane").w_full().h_full().fill(app.surface(p.bg))
+    let mut pane = col().key("agent-pane").w_full().min_w(0.0).h_full().fill(app.surface(p.bg)).items_center()
         .on_layout(move |a: &mut App, r: [f32; 4]| { a.rects.insert(format!("agent-area:{tab_id}"), r); });
-    if let Some(header) = super::header::view(app, session_id) {
-        pane = pane.child(col().w_full().px(pad).child(header));
+    let header = super::header::view(app, session_id);
+    let fade_top = if header.is_some() { 28.0 * app.ty.scale() } else { 0.0 };
+    if let Some(header) = header {
+        pane = pane.child(col().w_full().px(rows_pad).child(header));
     }
-    // The question rail sits in the transcript's right padding, over the scroll view.
+    // The question rail sits in the transcript's left padding, over the scroll view.
     let rail = match (app.rects.get(&format!("timeline-view:{tab_id}")), app.rects.get(&format!("agent-area:{tab_id}"))) {
         (Some(view), Some(area)) => {
             // The visible transcript: the scroll view runs on under the pinned composer.
@@ -151,10 +185,18 @@ pub fn pane(app: &App, session: Option<&str>, _cx: &mut Cx<App>) -> El {
         }
         _ => el(),
     };
-    let pane = pane.child(timeline).child(pinned).child(rail).child(jump);
+    let timeline = if app.mobile { timeline.clip_rounded(0.0) } else { timeline };
+    let pane = pane.child(timeline)
+        .children(app.mobile.then(|| {
+            let bg = rgb(p.bg);
+            el().key("mobile-chat-title-fade").pin(Some(0.0), Some(fade_top), Some(0.0), None).h(14.0)
+                .gradient(bg.alpha(if app.wallpaper.active() { 0.5 } else { 1.0 }), bg.alpha(0.0))
+        }))
+        .child(pinned).child(rail).child(jump);
     if child { return pane; }
-    pane.child(col().w_full().px((pad - 16.0).max(12.0)).pb(6.0).pin(Some(0.0), None, Some(0.0), Some(0.0))
-        .child(composer(app, f32::INFINITY)))
+    if app.mobile { return pane.child(col().w_full().px(MOBILE_COLUMN_PAD).pb(10.0).items_center().child(composer(app, MOBILE_COLUMN_MAX))); }
+    pane.child(col().w_full().px((pad - 16.0).max(12.0)).pb(6.0)
+        .items_center().pin(Some(0.0), None, Some(0.0), Some(0.0)).child(composer(app, f32::INFINITY)))
 }
 
 /// The window y the transcript is visible down to: the input bar's top, or (a sub-agent's
@@ -169,6 +211,8 @@ fn composer_top(app: &App, tab_id: u64) -> Option<f32> {
 /// How far above the transcript viewport's bottom its content ends: the composer floats over
 /// that much of it.
 fn transcript_foot(app: &App, tab_id: u64) -> f32 {
+    // The mobile composer is outside the scroll viewport, not overlaid on the rows.
+    if app.mobile { return 6.0; }
     let Some(top) = composer_top(app, tab_id) else { return FOOT };
     // Measured from the transcript's own view and from the pane the input bar is pinned to the
     // bottom of, whichever says more: one of the two can be a frame behind the other while the
@@ -501,7 +545,10 @@ fn timeline_width(app: &App) -> f32 {
     if let crate::tabs::TabKind::Agent { session: Some(id) } = &app.active_tab().kind {
         if let Some(session) = app.sessions.get(id).filter(|s| s.width > 0.0) { return session.width; }
     }
-    830.0
+    if app.mobile {
+        let width = app.rects.get(&format!("agent-area:{}", app.active_tab().id)).map_or(app.window[0], |rect| rect[2]);
+        (width - 2.0 * MOBILE_COLUMN_PAD).clamp(1.0, MOBILE_COLUMN_MAX)
+    } else { 830.0 }
 }
 
 pub(crate) fn markdown_style(app: &App) -> MarkdownStyle {
@@ -823,7 +870,7 @@ fn message_row(app: &App, message: &HistoryMessage, streaming: bool) -> El {
                                      let name = if frame.alt.is_empty() { "Image preview" } else { frame.alt }.to_owned();
                                      image.on_press(move |app: &mut App| app.preview_inline_image(&src, &name))
                                  })
-                                .highlights(prose::highlights(piece, p))
+                                 .highlights(if app.mobile { Vec::new() } else { prose::highlights(piece, p) })
                                 .streaming(arriving)
                                 // Words land at full ink: a per-word fade kept the newest line half
                                 // transparent the whole time a reply streamed.
@@ -944,6 +991,7 @@ impl App {
             super::slash::actions::open_in_browser(url);
             return;
         }
+        if self.mobile { return; }
         let Some((path, line, anchor)) = file_link(url) else { return };
         let path = crate::editor::markdown::links::normalize(&std::path::Path::new(&self.cwd).join(path));
         if let Some(anchor) = anchor {
@@ -1091,6 +1139,17 @@ mod reasoning_tests {
                 assert!((current - y).abs() < 0.5, "activity moved: {y} -> {current}");
             }
             assert!(rt.presented(&thought_key).is_some(), "hidden calls don't remove the thought");
+        }
+        let pinned_y = rt.presented("activity-pinned").unwrap().0[1];
+        // The final snapshot can shorten the live thought while its tool runs. The shrinking
+        // stack can temporarily report a distance from the end while following it.
+        rt.update(|a, _| { a.apply_agent(thought("long", 25)); a.tick_activity(); });
+        for i in 0..120 {
+            frame(&mut rt);
+            let y = rt.presented("activity-pinned").unwrap_or_else(|| {
+                panic!("activity went inline during thought replacement on frame {i}: {:?}", rt.state.sessions["work"].scroll.get())
+            }).0[1];
+            assert!((y - pinned_y).abs() < 0.5, "replacing a thought moved activity: {pinned_y} -> {y}");
         }
     }
 

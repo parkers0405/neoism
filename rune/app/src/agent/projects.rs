@@ -85,6 +85,11 @@ impl ProjectMenu {
 fn trimmed(path: &str) -> String { path.trim_end_matches('/').to_owned() }
 
 impl App {
+    pub(crate) fn new_chat_directory(&self) -> Option<String> {
+        if self.paired_chat_device() && (self.cwd == "/" || !crate::startup::absolute(&self.cwd)) { None }
+        else { Some(self.cwd.clone()) }
+    }
+
     /// The project rows (`openProjectPicker`): `~`, then the current root, the window's other
     /// roots and the projects chats live in (newest first), then "Add workspace…" on `~`.
     pub fn project_rows(&self) -> Vec<ProjectRow> {
@@ -96,6 +101,10 @@ impl App {
             footer: if home.is_empty() { "Unavailable".into() } else { String::new() },
             current: self.conv_all || (!home.is_empty() && current == home), disabled: false,
         }];
+        if self.paired_chat_device() && self.sidebar.is_none() {
+            rows[0] = ProjectRow { value: "project:~".into(), title: "Home".into(), description: "Host's default folder".into(),
+                footer: String::new(), current: self.new_chat_directory().is_none(), disabled: false };
+        }
         let mut discovered: Vec<(u64, String)> = Vec::new();
         for thread in &self.threads {
             let Some(directory) = thread.directory.as_deref().map(trimmed) else { continue };
@@ -110,11 +119,11 @@ impl App {
             // Projects the catalog knows of whose chats are not loaded yet.
             .chain(self.catalog.directories().iter().cloned());
         for path in paths {
-            if path.is_empty() || path == "/" || !seen.insert(path.clone()) { continue; }
-            let title = path.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or(&path).to_owned();
+            if path.is_empty() || path == "/" || (self.paired_chat_device() && !crate::startup::absolute(&path)) || !seen.insert(path.clone()) { continue; }
+            let title = super::sidebar::project_name(&path);
             rows.push(ProjectRow { value: format!("project:{path}"), title, description: path.clone(), footer: String::new(), current: !self.conv_all && path == current, disabled: false });
         }
-        if self.conversations_dashboard() {
+        if self.conversations_dashboard() && !self.paired_chat_device() {
             rows.push(ProjectRow { value: ADD_WORKSPACE.into(), title: "Add workspace…".into(), description: "Choose a project folder".into(), footer: String::new(), current: false, disabled: false });
         }
         rows
@@ -122,7 +131,7 @@ impl App {
 
     pub fn open_project_menu(&mut self) {
         let mut query = TextEdit::new("");
-        query.focused = true;
+        query.focused = !cfg!(target_os = "ios");
         let mut menu = ProjectMenu { rows: self.project_rows(), query, selected: 0, top: 0 };
         menu.reset_selection();
         self.project_menu = Some(menu);
@@ -140,7 +149,11 @@ impl App {
         } else if value == ADD_WORKSPACE {
             self.open_file_browser(crate::browser::Mode::ChooseDirectory);
         } else if let Some(path) = value.strip_prefix("project:") {
-            self.change_directory(path);
+            if self.paired_chat_device() {
+                self.resolve_root(path);
+                self.workspace_name = if path == "~" { "Home".into() } else { super::sidebar::project_name(path) };
+                self.slash_connected();
+            } else { self.change_directory(path); }
             self.conv_selected = 0;
             self.conv_header = None;
             return;
@@ -174,7 +187,8 @@ impl App {
 /// field over an accent rule, then the projects, the current one badged with a check.
 pub fn view(app: &App) -> El {
     let Some(menu) = &app.project_menu else { return el() };
-    let Some(anchor) = app.rects.get("conv-header:projects").copied() else { return el() };
+    let anchor_key = if app.paired_chat_device() && app.sidebar.is_none() { "mobile-composer-folder" } else { "conv-header:projects" };
+    let Some(anchor) = app.rects.get(anchor_key).copied() else { return el() };
     let p = app.pal;
     let s = app.ty.scale();
     let pad = PADDING * s;
@@ -202,8 +216,11 @@ pub fn view(app: &App) -> El {
     // The list: content slides to whole-row tops and the highlight glides, both on the
     // navigator's 0.12 s spring; a new query mounts both at rest.
     let reset = menu.query.text.clone();
-    let mut content = col().key(format!("project-menu-content:{reset}")).w(body_w).h(rows.len().max(1) as f32 * row_h)
-        .absolute(0.0, 0.0).offset(0.0, -(menu.top as f32) * row_h).offset_motion(MOTION);
+    let content_h = rows.len().max(1) as f32 * row_h;
+    let mut content = col().key(format!("project-menu-content:{reset}")).w(body_w).h(content_h).min_h(content_h);
+    if !app.mobile {
+        content = content.absolute(0.0, 0.0).offset(0.0, -(menu.top as f32) * row_h).offset_motion(MOTION);
+    }
     if rows.is_empty() {
         content = content.child(text("No matching projects").key("empty").font(app.ty.chat_sized(ROW_FONT)).color(rgb(p.muted)).absolute(10.0 * s, 9.0 * s));
     } else {
@@ -248,16 +265,21 @@ pub fn view(app: &App) -> El {
                 .on_press(move |a: &mut App| if !disabled { a.activate_project(&value) }));
         }
     }
-    let list = el().key(LIST_KEY).w(body_w).h(visible as f32 * row_h).clip_rounded(7.0 * s)
-        .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert(LIST_KEY.into(), r); })
-        .on_wheel(|a: &mut App, e: rune::WheelEvent, _: &mut Tx| {
+    let list = col().key(LIST_KEY).w(body_w).h(visible as f32 * row_h).clip_rounded(7.0 * s)
+        .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert(LIST_KEY.into(), r); });
+    let list = if app.mobile {
+        list.child(col().key(format!("project-scroll:{reset}")).w_full().h(visible as f32 * row_h)
+            .scroll(rune::ScrollSpec { stick_bottom: false }).blur_after_touch_scroll().child(content))
+    } else {
+        list.on_wheel(|a: &mut App, e: rune::WheelEvent, _: &mut Tx| {
             let Some(menu) = a.project_menu.as_mut() else { return false };
             let count = menu.visible().len();
             let steps = if e.dy > 0.0 { -1 } else if e.dy < 0.0 { 1 } else { 0 };
             menu.top = (menu.top as isize + steps).clamp(0, count.saturating_sub(MAX_ROWS) as isize) as usize;
             true
         })
-        .child(content);
+        .child(content)
+    };
 
     let card = col().key("project-menu").w(w).h(h).absolute(x, y)
         .fill(panel).radius(RADIUS * s).border(1.0, rgb(p.fg).alpha(0.1))
@@ -276,6 +298,43 @@ pub fn view(app: &App) -> El {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn swipe_started_on_a_project_row_scrolls_the_dropdown() {
+        let mut app = App::new_surface(String::new(), true);
+        app.window = [390.0, 844.0];
+        app.rects.insert("conv-header:projects".into(), [134.0, 110.0, 40.0, 40.0]);
+        app.project_menu = Some(ProjectMenu {
+            rows: std::iter::once(row(ALL_PROJECTS, false, false))
+                .chain((1..16).map(|i| row(&format!("project-{i}"), false, false))).collect(),
+            query: TextEdit::new(""), selected: 0, top: 0,
+        });
+        let mut rt = rune::Runtime::new(app, |a, _| view(a), (390.0, 844.0), rune::Env::default());
+        rt.state.conv_all = false;
+        rt.frame(0.0);
+        rt.frame(1.0 / 60.0);
+        let [x, y, w, _] = rt.state.project_menu_clip().unwrap();
+        let [qx, qy, qw, qh] = rt.elements().iter().find(|e| e.key.as_deref() == Some("project-menu-query")).unwrap().rect;
+        rt.touch(0, rune::TouchPhase::Started, qx + qw / 2.0, qy + qh / 2.0, 0.5);
+        rt.touch(0, rune::TouchPhase::Ended, qx + qw / 2.0, qy + qh / 2.0, 0.55);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.project_menu.as_ref().unwrap().query.focused);
+        let x = x + w / 2.0;
+        let first = y + ROW_H * rt.state.ty.scale() / 2.0;
+        rt.touch(1, rune::TouchPhase::Started, x, first + 100.0, 1.0);
+        rt.touch(1, rune::TouchPhase::Moved, x, first, 1.1);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.project_menu.as_ref().unwrap().query.focused, "focus stays while the finger is down");
+        rt.touch(1, rune::TouchPhase::Ended, x, first, 1.3);
+        rt.frame(0.1);
+        assert!(rt.state.project_menu.is_some(), "a swipe is not a project selection");
+        assert!(!rt.state.project_menu.as_ref().unwrap().query.focused, "lifting the finger dismisses the keyboard");
+        rt.touch(2, rune::TouchPhase::Started, x, first, 1.4);
+        rt.touch(2, rune::TouchPhase::Ended, x, first, 1.45);
+        rt.frame(0.1);
+        assert!(rt.state.project_menu.is_none());
+        assert!(!rt.state.conv_all, "the first visible row is no longer All projects");
+    }
 
     fn row(value: &str, current: bool, disabled: bool) -> ProjectRow {
         ProjectRow { value: value.into(), title: value.into(), description: String::new(), footer: String::new(), current, disabled }

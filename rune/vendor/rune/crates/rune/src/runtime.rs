@@ -793,6 +793,7 @@ pub struct Runtime<S: 'static> {
     /// The held press's drag repeat (`Tx::drag_repeat_after`).
     press_repeat: press_repeat::PressRepeat,
     titlebar: titlebar::Titlebar,
+    safe_area: [f32; 4],
     /// Two presses closer than this (seconds) are a double press: the system setting on macOS
     /// and Windows, 0.5 elsewhere and headless.
     pub double_click_interval: f64,
@@ -1066,6 +1067,7 @@ impl<S: 'static> Runtime<S> {
             press_clicks: Default::default(),
             press_repeat: Default::default(),
             titlebar: Default::default(),
+            safe_area: [0.0; 4],
             double_click_interval: 0.5,
             os_drag: true,
             drag_out_request: None,

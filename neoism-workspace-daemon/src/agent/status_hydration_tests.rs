@@ -107,7 +107,7 @@ fn catalog_activity_newer_list_wins_per_row_over_older_response() {
 }
 
 #[tokio::test]
-async fn switch_thread_initial_stream_retry_hydrates_background_without_blocking_output() {
+async fn switch_thread_initial_stream_retry_signals_history_catchup_without_blocking_output() {
     use axum::response::IntoResponse;
     use futures::StreamExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -177,10 +177,21 @@ async fn switch_thread_initial_stream_retry_hydrates_background_without_blocking
         status_fetched.notified().await;
         let (mut switched, mut output, mut runtime, mut todos, mut baseline, mut question) =
             (false, false, false, false, false, false);
+        let mut resumed = false;
         while !(switched && output && runtime && todos && question) {
             match rx.recv().await.unwrap() {
                 AgentServerMessage::ThreadSwitched { session_id } => { assert_eq!(session_id, "root"); switched = true; }
-                AgentServerMessage::ContentDelta { text, .. } => { assert_eq!(text, "Live output"); output = true; }
+                AgentServerMessage::SessionEvent { session_id, kind, .. } if kind == events::STREAM_RESUMED => {
+                    assert_eq!(session_id, "root");
+                    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+                    assert!(!resumed, "one catch-up signal per successful retry");
+                    resumed = true;
+                }
+                AgentServerMessage::ContentDelta { text, .. } => {
+                    assert!(resumed, "a tail opened after a failed attach must tell Rune to reconcile missed history");
+                    assert_eq!(text, "Live output");
+                    output = true;
+                }
                 AgentServerMessage::RuntimeSnapshot { session_id, snapshot } => {
                     assert_eq!(session_id, "root");
                     assert!(snapshot.branches_authoritative);
@@ -207,7 +218,7 @@ async fn switch_thread_initial_stream_retry_hydrates_background_without_blocking
     release_status.notify_one();
     events::stop_event_stream(&session.inner, "root");
     server.abort();
-    result.expect("initial retry must restore background count and forward output/interactions while status is pending");
+    result.expect("initial retry must signal catch-up, restore background count and forward output/interactions while status is pending");
 }
 
 #[tokio::test]
@@ -257,10 +268,16 @@ async fn attaching_stream_forwards_output_while_interactions_are_loading() {
     let result = tokio::time::timeout(Duration::from_secs(3), async {
         fetched.notified().await;
         loop {
-            if let AgentServerMessage::ContentDelta { session_id, text, .. } = rx.recv().await.unwrap() {
-                assert_eq!(session_id, "child");
-                assert_eq!(text, "Already working");
-                break;
+            match rx.recv().await.unwrap() {
+                AgentServerMessage::ContentDelta { session_id, text, .. } => {
+                    assert_eq!(session_id, "child");
+                    assert_eq!(text, "Already working");
+                    break;
+                }
+                AgentServerMessage::SessionEvent { kind, .. } if kind == events::STREAM_RESUMED => {
+                    panic!("a first-attempt attach does not need a catch-up signal");
+                }
+                _ => {}
             }
         }
         release.notify_one();
@@ -334,8 +351,13 @@ async fn reconnect_recovers_family_questions_empty_snapshots_and_permissions() {
     let stream = tokio::spawn(async move { events::run_event_stream(inner, "root".into()).await });
     tokio::time::timeout(Duration::from_secs(10), async {
         let (mut root, mut initial_child, mut recovered_child, mut permission, mut empty_permissions, mut child_permissions) = (false, false, false, false, false, false);
+        let mut resumed = false;
         while !(root && initial_child && recovered_child && permission && empty_permissions && child_permissions) {
             match rx.recv().await.unwrap() {
+                AgentServerMessage::SessionEvent { session_id, kind, .. } if kind == events::STREAM_RESUMED => {
+                    assert_eq!(session_id, "root");
+                    resumed = true;
+                }
                 AgentServerMessage::QuestionsUpdated { session_id, requests } => {
                     match session_id.as_str() {
                         "root" => { assert!(requests.is_empty()); root = true; }
@@ -343,7 +365,10 @@ async fn reconnect_recovers_family_questions_empty_snapshots_and_permissions() {
                             assert_eq!(requests[0]["sessionId"], "child");
                             match requests[0]["id"].as_str() {
                                 Some("q1") => initial_child = true,
-                                Some("q2") => recovered_child = true,
+                                Some("q2") => {
+                                    assert!(resumed, "an established stream reconnect also signals history catch-up");
+                                    recovered_child = true;
+                                }
                                 _ => {}
                             }
                         }

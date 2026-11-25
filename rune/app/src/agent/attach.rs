@@ -582,16 +582,16 @@ mod tests {
         let draft = app.active_tab().draft.text.clone();
         app.agent_sent.borrow_mut().clear();
         app.submit();
-        assert_eq!(app.active_tab().draft.text, draft);
-        assert!(app.active_tab().draft.pills().any(|(_, id)| id == "attachment:[image1]"));
-        assert!(app.active_tab().pending_prompt.is_none());
-
-        app.cwd = "/existing-project".into();
-        app.submit();
         assert_eq!(app.active_tab().pending_prompt.as_deref(), Some(draft.trim()));
         assert!(app.attach.pending.contains_key(&tab));
-        assert!(app.agent_sent.borrow().iter().any(|wire| wire.contains("CreateThread")));
-        assert!(!app.agent_sent.borrow().iter().any(|wire| wire.contains("SubmitPrompt")));
+        assert!(app.agent_sent.borrow().iter().any(|wire| matches!(
+            serde_json::from_str::<AgentClientMessage>(wire).unwrap(),
+            AgentClientMessage::CreateThread { directory: None, .. }
+        )));
+        assert!(!app.agent_sent.borrow().iter().any(|wire| matches!(
+            serde_json::from_str::<AgentClientMessage>(wire).unwrap(),
+            AgentClientMessage::SubmitPrompt { .. }
+        )));
         assert!(!app.attach_bytes("another.png", "image/png", vec![4, 5, 6]));
         app.apply_agent(serde_json::from_value::<AgentServerMessage>(serde_json::json!({
             "ThreadCreated": {"session_id": "test-session"}

@@ -9,7 +9,7 @@ struct Control {
 
 enum Service {
     Configured(MobileState),
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     Automatic(Option<(MobileState, Listener)>),
 }
 
@@ -28,7 +28,7 @@ impl Control {
     async fn ready(&self) -> anyhow::Result<MobileState> {
         match &mut *self.service.lock().await {
             Service::Configured(state) => Ok(state.clone()),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux", windows))]
             Service::Automatic(slot) => {
                 if let Some((state, _)) = slot { return Ok(state.clone()); }
                 let config = provision::provision().await?;
@@ -52,7 +52,7 @@ async fn quick_invite(State(control): State<Control>, peer: Option<ConnectInfo<S
             let hint = if error.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::AddrInUse) {
                 "The private phone port is already in use. Close the other phone host, then try again."
             } else {
-                "Could not start private phone access. Make sure Tailscale is installed and connected on this Mac, then try again."
+                "Could not start private phone access. Make sure Tailscale is installed and connected on this computer, then try again."
             };
             (StatusCode::SERVICE_UNAVAILABLE, private_json(serde_json::json!({"error": hint}))).into_response()
         }
@@ -67,10 +67,10 @@ pub(super) fn configured(state: MobileState) -> anyhow::Result<Router> {
     Ok(routes().with_state(Control::new(Service::Configured(state))?))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 fn enabled_file() -> std::path::PathBuf { crate::auth::data_dir().join("phone-access.enabled") }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 async fn active(control: Control, peer: Option<ConnectInfo<SocketAddr>>, headers: &HeaderMap) -> Result<MobileState, StatusCode> {
     if !control.allowed(peer, headers) { return Err(StatusCode::FORBIDDEN); }
     match &*control.service.lock().await {
@@ -79,7 +79,7 @@ async fn active(control: Control, peer: Option<ConnectInfo<SocketAddr>>, headers
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 pub(super) fn automatic() -> anyhow::Result<(Router, Listener)> {
     let control = Control::new(Service::Automatic(None))?;
     let restore = control.clone();

@@ -25,7 +25,7 @@ use tokio::{net::TcpListener, sync::{watch, Semaphore}, task::JoinHandle, time::
 use url::Url;
 use uuid::Uuid;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 mod provision;
 mod quick;
 
@@ -511,9 +511,9 @@ impl Drop for Listener {
 
 pub(crate) async fn start() -> anyhow::Result<Option<(Router, Listener)>> {
     let Some(bind) = std::env::var_os("NEOISM_MOBILE_LISTEN") else {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
         return quick::automatic().map(Some);
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         return Ok(None);
     };
     let addr: SocketAddr = bind.to_str().ok_or_else(|| anyhow::anyhow!("invalid mobile listen address"))?.parse()?;
@@ -559,7 +559,7 @@ async fn listen(addr: SocketAddr, origin: Url, operator_key: Digest32, cert: &st
     let connections = Arc::new(Semaphore::new(64));
     tracing::info!(%addr, "mobile device HTTPS listener ready");
     let task = tokio::spawn(async move {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
         let _renewal = _automatic.then(|| {
             let acceptor = acceptor.clone();
             Listener(tokio::spawn(async move {

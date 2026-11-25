@@ -58,13 +58,13 @@ pub(crate) fn parse(input: &str) -> Result<Invite, String> {
     { return Err("Device pairing requires a trusted HTTPS host".into()); }
     let code = code.filter(|s| !s.is_empty() && s.len() <= 256 && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))).ok_or_else(invalid)?;
     let name = name.filter(|s| !s.is_empty() && s.len() <= 128 && !s.chars().any(char::is_control))
-        .unwrap_or_else(|| origin.host_str().unwrap_or("Mac").to_owned());
+        .unwrap_or_else(|| origin.host_str().unwrap_or("Computer").to_owned());
     Ok(Invite { origin, code, name, ca, scan_only })
 }
 
 /// Only display the local daemon's sanitized diagnostic, not arbitrary upstream HTML or bodies.
 async fn unavailable(mut response: reqwest::Response) -> String {
-    let fallback = "Connect the Mac to Tailscale, check its private HTTPS pairing address, then try again.";
+    let fallback = "Connect this computer to Tailscale, then try again.";
     let mut bytes = Vec::new();
     loop {
         match response.chunk().await {
@@ -101,18 +101,18 @@ pub(crate) fn request<T: serde::de::DeserializeOwned + Send + 'static>(
                 let password = body.get("password").is_some();
                 let request = client.post(url).json(&body);
                 let request = if let Some(token) = bearer { request.bearer_auth(token) } else { request };
-                let response = request.send().await.map_err(|_| if claiming { "Could not reach the Mac. Connect both devices to the same tailnet and scan a fresh code." } else { "Could not reach the local daemon. Restart it and try again." }.to_owned())?;
+                let response = request.send().await.map_err(|_| if claiming { "Could not reach the computer. Connect both devices to the same tailnet and scan a fresh code." } else { "Could not reach the local daemon. Restart it and try again." }.to_owned())?;
                 match response.status().as_u16() {
                     200..=299 => response.json().await.map_err(|_| "Invalid response from pairing service".to_owned()),
                     401 if claiming && password => Err("The pairing password did not match, or the code expired. Generate a fresh code and use its password.".into()),
-                    401 | 403 if claiming => Err("The code expired, was already used, or was denied. Scan a fresh code from the Mac.".into()),
+                    401 | 403 if claiming => Err("The code expired, was already used, or was denied. Scan a fresh code from the computer.".into()),
                     401 | 403 => Err("The local daemon rejected its token. Restart the local Neoism daemon and try again.".into()),
                     429 => Err("The host reached its pairing limit. Wait for unused QR codes to expire or remove an unused paired device.".into()),
                     404 | 405 if !claiming => Err("This daemon does not support quick pairing. Update and restart the local Neoism daemon, then try again.".into()),
                     404 => Err("The host does not have device pairing enabled, or this code has expired".into()),
-                    410 => Err("This code expired. Generate a new code on the Mac".into()),
+                    410 => Err("This code expired. Generate a new code on the computer.".into()),
                     503 if !claiming => Err(unavailable(response).await),
-                    503 => Err("Check that the Mac is connected to Tailscale and its HTTPS pairing service is running.".into()),
+                    503 => Err("Check that the computer is connected to Tailscale and its HTTPS pairing service is running.".into()),
                     _ => Err("The host rejected the pairing request".into()),
                 }
             })

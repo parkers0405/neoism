@@ -11,11 +11,12 @@ use std::{
     fs::{self, File},
     io::{ErrorKind, Write},
     net::{IpAddr, SocketAddr},
-    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
 };
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use time::OffsetDateTime;
 use tokio::{io::AsyncReadExt, process::Command, time::timeout};
 use url::Url;
@@ -29,34 +30,50 @@ pub struct Config {
 }
 
 const PORT: u16 = 8443;
-const CLIS: &[&str] = &[
-    "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-    "/opt/homebrew/bin/tailscale",
-    "/usr/local/bin/tailscale",
-];
+// Use installation paths, never the project's working directory or its PATH.
+fn installed_clis() -> Vec<PathBuf> {
+    #[cfg(target_os = "macos")]
+    return ["/Applications/Tailscale.app/Contents/MacOS/Tailscale", "/opt/homebrew/bin/tailscale", "/usr/local/bin/tailscale"].map(PathBuf::from).into();
+    #[cfg(target_os = "linux")]
+    return ["/usr/bin/tailscale", "/usr/local/bin/tailscale", "/run/current-system/sw/bin/tailscale"].map(PathBuf::from).into();
+    #[cfg(windows)]
+    return ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"].into_iter()
+        .filter_map(std::env::var_os).map(PathBuf::from).filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join("Tailscale").join("tailscale.exe")).collect();
+}
 const STATUS_LIMIT: u64 = 1024 * 1024;
 const EPOCH: i64 = 30 * 86400;
 
 pub async fn provision() -> anyhow::Result<Config> {
-    let ip = discover(CLIS, Duration::from_secs(3)).await?;
+    let ip = discover(&installed_clis(), Duration::from_secs(3)).await?;
     tokio::task::spawn_blocking(move || {
         let base = dirs::data_local_dir()
             .filter(|p| p.is_absolute())
-            .context("cannot locate user Application Support directory")?;
+            .context("cannot locate the user's application data directory")?;
         fs::create_dir_all(&base)?;
         provision_at(&base.join("Neoism Mobile"), ip, OffsetDateTime::now_utc())
     })
     .await?
 }
 
-async fn discover(clis: &[&str], budget: Duration) -> Result<IpAddr> {
-    let mut failure = anyhow!("install Tailscale and connect this Mac to your tailnet");
+async fn discover(clis: &[impl AsRef<Path>], budget: Duration) -> Result<IpAddr> {
+    let mut failure = anyhow!("install Tailscale and connect this computer to your tailnet");
     for cli in clis {
         let probe = async {
-            let mut cmd = Command::new(cli);
-            cmd.env_clear()
-                .env("PATH", "/usr/bin:/bin")
-                .env("TAILSCALE_BE_CLI", "1");
+            let mut cmd = Command::new(cli.as_ref());
+            cmd.env_clear();
+            #[cfg(unix)]
+            cmd.env("PATH", "/usr/bin:/bin");
+            #[cfg(target_os = "macos")]
+            cmd.env("TAILSCALE_BE_CLI", "1");
+            #[cfg(windows)]
+            {
+                // GUI-triggered discovery must not flash a Windows console.
+                cmd.creation_flags(0x08000000);
+                for name in ["SystemRoot", "LOCALAPPDATA", "ProgramData", "USERPROFILE", "TEMP", "TMP"] {
+                    if let Some(value) = std::env::var_os(name) { cmd.env(name, value); }
+                }
+            }
             if let Some(home) = dirs::home_dir() {
                 cmd.env("HOME", home);
             }
@@ -147,26 +164,212 @@ fn ca_params() -> CertificateParams {
     p
 }
 
-fn private(path: &Path, dir: bool) -> Result<()> {
+#[cfg(windows)]
+mod win_store {
+    use super::*;
+    use std::{
+        ffi::c_void,
+        io,
+        mem::{size_of, size_of_val},
+        os::windows::{
+            ffi::OsStrExt,
+            fs::MetadataExt,
+            io::{FromRawHandle, OwnedHandle},
+        },
+        ptr::null_mut,
+    };
+    use windows_sys::Win32::{
+        Foundation::{LocalFree, ERROR_SUCCESS},
+        Security::{
+            Authorization::{
+                ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW,
+                SDDL_REVISION_1, SE_FILE_OBJECT,
+            },
+            EqualSid, GetAce, GetSecurityDescriptorControl, GetTokenInformation, IsWellKnownSid,
+            TokenUser, WinBuiltinAdministratorsSid, WinCreatorOwnerRightsSid, WinLocalSystemSid,
+            ACCESS_ALLOWED_ACE, ACE_HEADER, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION,
+            NO_PROPAGATE_INHERIT_ACE, OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION,
+            PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, SECURITY_MAX_SID_SIZE,
+            SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER,
+        },
+        Storage::FileSystem::{CreateDirectoryW, MoveFileExW, FILE_ATTRIBUTE_REPARSE_POINT, MOVEFILE_WRITE_THROUGH},
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
+    };
+
+    struct Descriptor(PSECURITY_DESCRIPTOR);
+    impl Drop for Descriptor {
+        fn drop(&mut self) {
+            unsafe { LocalFree(self.0) };
+        }
+    }
+
+    pub(super) fn reject_reparse(m: &fs::Metadata) -> io::Result<()> {
+        if m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(io::Error::new(ErrorKind::InvalidData, "reparse point in mobile TLS state path"));
+        }
+        Ok(())
+    }
+
+    fn wide(path: &Path) -> io::Result<Vec<u16>> {
+        let mut w: Vec<_> = path.as_os_str().encode_wide().collect();
+        if w.contains(&0) {
+            return Err(io::Error::new(ErrorKind::InvalidInput, "NUL in TLS state path"));
+        }
+        w.push(0);
+        Ok(w)
+    }
+
+    // Install the root ACL at creation, not after another initializer could
+    // open it. Children (including staging files) start private too. OW is
+    // OWNER RIGHTS; OI/CI propagate these grants to both files and directories.
+    pub(super) fn create_root(path: &Path) -> io::Result<()> {
+        // symlink_metadata checks only the final component. Do not reach the
+        // store through a junction (or other redirection) higher in the path.
+        for ancestor in path.ancestors().skip(1) {
+            reject_reparse(&fs::symlink_metadata(ancestor)?)?;
+        }
+        let path = wide(path)?;
+        unsafe {
+            let mut sd = null_mut();
+            if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                windows_sys::w!("D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)"),
+                SDDL_REVISION_1, &mut sd, null_mut(),
+            ) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let sd = Descriptor(sd);
+            let sa = SECURITY_ATTRIBUTES {
+                nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: sd.0,
+                bInheritHandle: 0,
+            };
+            if CreateDirectoryW(path.as_ptr(), &sa) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    // check_owner_only checks *read* grants. A TLS store must reject foreign
+    // owners, write/delete grants and unrecognized ACE types as well.
+    pub(super) fn closed_acl(path: &Path, kind: StateKind) -> Result<bool> {
+        let path = wide(path)?;
+        unsafe {
+            let (mut sd, mut owner, mut acl) = (null_mut(), null_mut(), null_mut());
+            let status = GetNamedSecurityInfoW(path.as_ptr(), SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &mut owner, null_mut(), &mut acl, null_mut(), &mut sd);
+            if status != ERROR_SUCCESS {
+                return Err(io::Error::from_raw_os_error(status as i32).into());
+            }
+            let _sd = Descriptor(sd);
+            if owner.is_null() || acl.is_null() {
+                return Ok(false);
+            }
+            // The root and PEMs must not start inheriting new grants if their
+            // parent changes. Only the generation dirs inherit our root ACL.
+            if !matches!(kind, StateKind::Generation) {
+                let (mut control, mut revision) = (0, 0);
+                if GetSecurityDescriptorControl(sd, &mut control, &mut revision) == 0 {
+                    return Err(io::Error::last_os_error().into());
+                }
+                if control & SE_DACL_PROTECTED == 0 {
+                    return Ok(false);
+                }
+            }
+            let mut token = null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+                return Err(io::Error::last_os_error().into());
+            }
+            let _token = OwnedHandle::from_raw_handle(token);
+            // TOKEN_USER followed by the SID; usize supplies pointer alignment.
+            const TOKEN_BYTES: usize = size_of::<TOKEN_USER>() + SECURITY_MAX_SID_SIZE as usize;
+            let mut buf = [0usize; TOKEN_BYTES.div_ceil(size_of::<usize>())];
+            let mut len = 0;
+            if GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(),
+                size_of_val(&buf) as u32, &mut len) == 0 {
+                return Err(io::Error::last_os_error().into());
+            }
+            let user = (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid;
+            let trusted = |s| EqualSid(s, user) != 0 || IsWellKnownSid(s, WinLocalSystemSid) != 0
+                || IsWellKnownSid(s, WinBuiltinAdministratorsSid) != 0;
+            if !trusted(owner) {
+                return Ok(false);
+            }
+            let mut inherits = false;
+            for i in 0..u32::from((*acl).AceCount) {
+                let mut ace: *mut c_void = null_mut();
+                if GetAce(acl, i, &mut ace) == 0 {
+                    return Err(io::Error::last_os_error().into());
+                }
+                // ACCESS_ALLOWED_ACE_TYPE (winnt.h).
+                if (*ace.cast::<ACE_HEADER>()).AceType != 0 {
+                    return Ok(false);
+                }
+                let ace = &*ace.cast::<ACCESS_ALLOWED_ACE>();
+                let sid = (&raw const ace.SidStart) as PSID;
+                if !trusted(sid) && IsWellKnownSid(sid, WinCreatorOwnerRightsSid) == 0 {
+                    return Ok(false);
+                }
+                let flags = u32::from(ace.Header.AceFlags);
+                // Without an inheritable ACE a child can get the token's
+                // default DACL instead. Require propagation to grandchildren.
+                let both = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
+                inherits |= flags & (both | NO_PROPAGATE_INHERIT_ACE) == both;
+            }
+            Ok(matches!(kind, StateKind::Pem) || inherits)
+        }
+    }
+
+    pub(super) fn publish(src: &Path, dst: &Path) -> io::Result<()> {
+        let (src, dst) = (wide(src)?, wide(dst)?);
+        // Same-volume, no replacement. Windows does not support Unix-style
+        // fsync of these directory handles; request write-through on the move.
+        if unsafe { MoveFileExW(src.as_ptr(), dst.as_ptr(), MOVEFILE_WRITE_THROUGH) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum StateKind {
+    Root,
+    Generation,
+    Pem,
+}
+
+fn private(path: &Path, kind: StateKind) -> Result<()> {
     let m = fs::symlink_metadata(path)?;
+    #[cfg(windows)]
+    win_store::reject_reparse(&m)?;
+    let dir = !matches!(kind, StateKind::Pem);
     ensure!(
         if dir { m.is_dir() } else { m.is_file() },
         "unexpected mobile TLS state file type"
     );
     ensure!(dir || m.len() <= 8192, "oversized mobile TLS state file");
+    #[cfg(unix)]
     ensure!(
         m.uid() == unsafe { libc::geteuid() } && m.mode() & 0o077 == 0,
         "insecure mobile TLS state permissions"
     );
+    #[cfg(windows)]
+    ensure!(win_store::closed_acl(path, kind)?, "insecure mobile TLS state ACL");
     Ok(())
 }
 
 fn write_private(path: &Path, pem: &str) -> Result<()> {
-    let mut f = File::options()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?;
+    let mut opts = File::options();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    opts.mode(0o600);
+    let mut f = opts.open(path)?;
+    #[cfg(windows)]
+    {
+        crate::windows_acl::harden_owner_only(path)?;
+        private(path, StateKind::Pem)?;
+    }
     f.write_all(pem.as_bytes())?;
     f.sync_all()?;
     Ok(())
@@ -183,48 +386,73 @@ fn pair(
     match fs::symlink_metadata(&dir) {
         Ok(_) => (),
         Err(e) if e.kind() == ErrorKind::NotFound => {
+            #[cfg(unix)]
             let tmp = tempfile::Builder::new()
                 .permissions(fs::Permissions::from_mode(0o700))
                 .tempdir_in(root)?;
+            #[cfg(windows)]
+            let tmp = tempfile::tempdir_in(root)?;
+            private(tmp.path(), StateKind::Generation)?;
             let (cert, key) = make()?;
             write_private(&tmp.path().join("cert.pem"), &cert)?;
             write_private(&tmp.path().join("key.pem"), &key)?;
-            File::open(tmp.path())?.sync_all()?;
-            match fs::rename(tmp.path(), &dir) {
-                Ok(()) => File::open(root)?.sync_all()?,
+            #[cfg(unix)]
+            let published = {
+                File::open(tmp.path())?.sync_all()?;
+                fs::rename(tmp.path(), &dir)
+            };
+            #[cfg(windows)]
+            let published = win_store::publish(tmp.path(), &dir);
+            match published {
+                Ok(()) => {
+                    #[cfg(unix)]
+                    File::open(root)?.sync_all()?;
+                }
                 Err(e)
                     if matches!(
                         e.kind(),
                         ErrorKind::DirectoryNotEmpty | ErrorKind::AlreadyExists
                     ) => {}
+                // Windows may report ACCESS_DENIED for an existing directory.
+                // Only adopt it if it passes all the normal validation below.
+                #[cfg(windows)]
+                Err(e) if e.kind() == ErrorKind::PermissionDenied && fs::symlink_metadata(&dir).is_ok() => {}
                 Err(e) => return Err(e.into()),
             }
         }
         Err(e) => return Err(e.into()),
     }
-    private(&dir, true)?;
+    private(&dir, StateKind::Generation)?;
     let cert = dir.join("cert.pem");
     let key = dir.join("key.pem");
-    private(&cert, false)?;
-    private(&key, false)?;
+    private(&cert, StateKind::Pem)?;
+    private(&key, StateKind::Pem)?;
     Ok((cert, key))
 }
 
 fn provision_at(root: &Path, ip: IpAddr, now: OffsetDateTime) -> Result<Config> {
     ensure!(tailnet(ip), "an explicit Tailscale IP is required");
-    match fs::DirBuilder::new().mode(0o700).create(root) {
+    #[cfg(unix)]
+    let created = fs::DirBuilder::new().mode(0o700).create(root);
+    #[cfg(windows)]
+    let created = win_store::create_root(root);
+    match created {
         Ok(()) => (),
         Err(e) if e.kind() == ErrorKind::AlreadyExists => (),
         Err(e) => return Err(e.into()),
     }
-    private(root, true)?;
+    private(root, StateKind::Root)?;
     let (ca, signer) = pair(root, "ca-v1", || {
         let key = KeyPair::generate()?; // ECDSA P-256
         let cert = ca_params().self_signed(&key)?;
         Ok((cert.pem(), key.serialize_pem()))
     })?;
     let epoch = now.unix_timestamp().div_euclid(EPOCH);
-    let (cert, key) = pair(root, &format!("leaf-{epoch}-{ip}"), || {
+    // Keep existing Unix generation paths. ':' is not a Windows filename character.
+    let ip_name = ip.to_string();
+    #[cfg(windows)]
+    let ip_name = ip_name.replace(':', "_");
+    let (cert, key) = pair(root, &format!("leaf-{epoch}-{ip_name}"), || {
         use rustls::{
             pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer},
             sign::CertifiedKey,
@@ -268,8 +496,11 @@ fn provision_at(root: &Path, ip: IpAddr, now: OffsetDateTime) -> Result<Config> 
         else {
             continue;
         };
+        #[cfg(windows)]
+        let ip = ip.replace('_', ":");
         if n.parse::<i64>().is_ok_and(|n| n <= epoch - 3)
             && ip.parse::<IpAddr>().is_ok_and(tailnet)
+            && private(&entry.path(), StateKind::Generation).is_ok()
         {
             let _ = fs::remove_dir_all(entry.path());
         }
@@ -316,6 +547,7 @@ fn verify(cfg: &Config, now: OffsetDateTime) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
     fn now() -> OffsetDateTime {
@@ -344,6 +576,7 @@ mod tests {
         assert!(self_ip(br#"{"BackendState":"Running","TailscaleIPs":["100.64.0.99"],"Self":{"TailscaleIPs":["100.64.0.1"]}}"#).is_err());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn bounded_cli_fallback_and_private_errors() {
         let tmp = tempfile::tempdir().unwrap();
@@ -391,8 +624,11 @@ echo '{"BackendState":"Running","TailscaleIPs":["100.64.1.2"],"Self":{"Tailscale
         assert_eq!(cfg.origin.as_str(), "https://[fd7a:115c:a1e0::123]:8443/");
         let ca = fs::read(cfg.ca.as_ref().unwrap())?;
         assert_eq!(cfg.cert, provision_at(&root, ip, now())?.cert);
-        for file in [&cfg.key, &root.join("ca-v1/key.pem")] {
+        for file in [&cfg.key, &cfg.cert, cfg.ca.as_ref().unwrap(), &root.join("ca-v1/key.pem")] {
+            #[cfg(unix)]
             assert_eq!(fs::metadata(file)?.mode() & 0o777, 0o600);
+            #[cfg(windows)]
+            assert!(crate::windows_acl::check_owner_only(file)?);
         }
         let later = now() + time::Duration::days(30);
         let next = provision_at(&root, ip, later)?;
@@ -413,23 +649,60 @@ echo '{"BackendState":"Running","TailscaleIPs":["100.64.1.2"],"Self":{"Tailscale
         let tmp = tempfile::tempdir()?;
         let root = tmp.path().join("mobile");
         let create = || provision_at(&root, "100.64.1.2".parse()?, now());
+        let start = std::sync::Barrier::new(2);
         let cfg = std::thread::scope(|s| -> Result<_> {
-            let other = s.spawn(create);
+            let other = s.spawn(|| -> Result<_> {
+                start.wait();
+                let cfg = create()?;
+                Ok((fs::read(cfg.ca.unwrap())?, fs::read(cfg.key)?))
+            });
+            start.wait();
             let cfg = create()?;
-            assert_eq!(cfg.cert, other.join().unwrap()?.cert);
+            let observed = (fs::read(cfg.ca.as_ref().unwrap())?, fs::read(&cfg.key)?);
+            assert!(observed == other.join().unwrap()?, "initializers used different identities");
             verify(&cfg, now())?;
             Ok(cfg)
         })?;
         let signer = root.join("ca-v1/key.pem");
         let ca = cfg.ca.unwrap();
         let pin = fs::read(&ca)?;
+        #[cfg(unix)]
         fs::set_permissions(&signer, fs::Permissions::from_mode(0o644))?;
+        #[cfg(windows)]
+        {
+            // Even a write-only grant could replace a pinned identity.
+            let status = std::process::Command::new("icacls.exe")
+                .arg(&signer).args(["/grant", "*S-1-1-0:(WD)"]).status()?;
+            assert!(status.success());
+        }
         assert!(create().is_err());
         fs::remove_file(&signer)?;
         assert!(create().is_err());
-        symlink(&cfg.key, &signer)?;
-        assert!(create().is_err());
+        #[cfg(unix)]
+        {
+            symlink(&cfg.key, &signer)?;
+            assert!(create().is_err());
+        }
         assert_eq!(pin, fs::read(&ca)?);
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_junction_even_to_a_private_store() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let ip = "100.64.1.2".parse()?;
+        let valid = tmp.path().join("valid");
+        provision_at(&valid, ip, now())?;
+        // Directory junctions don't need SeCreateSymbolicLinkPrivilege.
+        let status = std::process::Command::new("cmd.exe").current_dir(tmp.path())
+            .args(["/d", "/c", "mklink", "/j", "redirect", "valid"]).status()?;
+        assert!(status.success());
+        let redirect = tmp.path().join("redirect");
+        assert!(provision_at(&redirect, ip, now()).is_err());
+        assert!(provision_at(&redirect.join("nested"), ip, now()).is_err());
+        assert!(!valid.join("nested").exists());
+        fs::remove_dir(redirect)?;
         Ok(())
     }
 }

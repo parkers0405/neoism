@@ -223,13 +223,14 @@ fn titlebar(app: &App, cx: &mut Cx<App>) -> Option<El> {
     let insets = cx.chrome_insets();
     if insets.height <= 0.0 || (insets.leading <= 0.0 && insets.trailing <= 0.0) { return None; }
     cx.caption_color(rgb(p.fg));
+    let left = cfg!(windows);
     Some(row().key("titlebar").w_full().h(insets.height).fill(rgb(p.bg)).center_y().window_drag()
         .border_sides([0.0, 0.0, 1.0, 0.0], rgb(p.border))
-        .pl(insets.leading + 12.0).pr(insets.trailing + 48.0)
+        .pl(insets.leading + if left { 48.0 } else { 12.0 }).pr(insets.trailing + if left { 12.0 } else { 48.0 })
         .child(el().grow(1.0))
         .child(text(app.workspace_name.clone()).font(app.ty.sans(12.0, 500.0)).color(rgb(p.muted)).truncate().shrink())
         .child(el().grow(1.0))
-        .child(super::phone_share::button(app, insets.height).pin(None, Some(0.0), Some(insets.trailing + 8.0), None)))
+        .child(super::phone_share::button(app, insets.height).pin(left.then_some(insets.leading + 8.0), Some(0.0), (!left).then_some(insets.trailing + 8.0), None)))
 }
 
 fn rail(app: &App) -> El {
@@ -392,8 +393,10 @@ fn workspace_tabs(app: &App, show_qr: bool) -> El {
         .on_press(|a: &mut App| a.new_workspace())
         .on_layout(|a: &mut App, r: [f32; 4]| { a.rects.insert("workspace-new".into(), r); }));
     // The action stays visible even when the workspace tabs overflow horizontally.
-    row().w_full().h(TAB_ROW_H).fill(rgb(p.surface)).child(strip)
-        .child_if(show_qr, || super::phone_share::button(app, TAB_ROW_H))
+    row().w_full().h(TAB_ROW_H).fill(rgb(p.surface))
+        .child_if(show_qr && cfg!(windows), || super::phone_share::button(app, TAB_ROW_H))
+        .child(strip)
+        .child_if(show_qr && !cfg!(windows), || super::phone_share::button(app, TAB_ROW_H))
 }
 
 /// Keeps Rune drawing every vblank while the app steps a motion itself (`App::keep_vsync`).

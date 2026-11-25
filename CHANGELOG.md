@@ -2,6 +2,11 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.173] - 2026-11-25
+
+- Pair Neoism Mobile with a Windows or Linux desktop over Tailscale using the same short-lived QR flow as macOS.
+- Show actionable setup errors when the desktop cannot start phone pairing.
+
 ## [0.7.172] - 2026-11-25
 
 - Pair an iPhone with a Mac workspace over Tailscale using a short-lived QR code, with no separate pairing password.

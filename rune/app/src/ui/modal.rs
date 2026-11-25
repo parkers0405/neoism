@@ -145,9 +145,10 @@ pub fn view(app: &App) -> El {
     let s = app.ty.scale();
     let can_copy_invite = modal.buttons.iter().any(|b| b.action == Action::CopyServerInvite);
     let desktop_qr = !app.mobile && can_copy_invite;
-    let qr_card = desktop_qr || (modal.title == "Pair this Mac" && app.device_qr.is_some());
+    let device_qr = modal.title == super::phone_share::QR_TITLE && app.device_qr.is_some();
+    let qr_card = desktop_qr || device_qr;
     let mut body = col().w_full().mt(10.0 * s);
-    if modal.title == "Pair this Mac" && let Some(invite) = &app.device_qr {
+    if device_qr && let Some(invite) = &app.device_qr {
         body = body.child(super::phone_share::qr_view(app, invite));
     }
     for line in modal.body.lines() {

@@ -51,9 +51,11 @@ fn open_with(app: &mut App, local: impl FnOnce() -> Result<(url::Url, String), S
 #[derive(serde::Deserialize)]
 pub(crate) struct InviteReply { invite: String }
 
+pub(super) const QR_TITLE: &str = "Pair this computer";
+
 pub(crate) fn ready(app: &mut App, invite: String) -> Modal {
     app.device_qr = Some(invite);
-    Modal::notice("Pair this Mac", "Connect your phone to Tailscale and scan in Neoism. Anyone with this code can pair until it expires or is used.")
+    Modal::notice(QR_TITLE, "Connect your phone to Tailscale and scan in Neoism. Anyone with this code can pair until it expires or is used.")
 }
 
 pub(crate) fn poll(app: &mut App) -> bool {
@@ -62,7 +64,7 @@ pub(crate) fn poll(app: &mut App) -> bool {
     if !app.modal.as_ref().is_some_and(|m| m.title == "Pair a phone") { return false; }
     app.modal = Some(match result {
         Ok(reply) if crate::device_pair::parse(&reply.invite).is_ok_and(|i| i.scan_only) => ready(app, reply.invite),
-        Ok(_) => Modal::notice("Pairing unavailable", "The Mac returned an invalid device invite."),
+        Ok(_) => Modal::notice("Pairing unavailable", "The local daemon returned an invalid device invite."),
         Err(error) => Modal::notice("Pairing unavailable", &error),
     });
     true

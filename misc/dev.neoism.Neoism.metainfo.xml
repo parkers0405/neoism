@@ -52,6 +52,12 @@
   </categories>
 
   <releases>
+    <release version="0.7.173" date="2026-11-25">
+      <description>
+        <p>Extends QR pairing with Neoism Mobile to Linux and Windows desktops and improves setup diagnostics.</p>
+      </description>
+      <url>https://github.com/parkers0405/neoism/releases/tag/v0.7.173</url>
+    </release>
     <release version="0.7.172" date="2026-11-25">
       <description>
         <p>Improves QR pairing with Neoism Mobile and fixes the Linux release test for photos in new paired chats.</p>

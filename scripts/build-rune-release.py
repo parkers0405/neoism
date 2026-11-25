@@ -76,9 +76,9 @@ def download_pinned(url, destination, digest):
     for source in (f'https://pkg.hexops.org/zig/{name}?source=neoism', f'https://ziglang.freetls.fastly.net/{name}?source=neoism', url):
         host = source.split('/')[2]
         print(f'Downloading {name} from {host}…', flush=True)
-        # curl bounds both the connection and a stalled body.
+        # Bound stalled mirrors without cutting off a slow, progressing 100 MB transfer.
         result = subprocess.run(['curl.exe' if SYSTEM == 'windows' else 'curl', '--fail', '--location', '--silent', '--show-error',
-            '--connect-timeout', '15', '--max-time', '180', '--speed-limit', '1024', '--speed-time', '30', '--output', str(pending), source])
+            '--connect-timeout', '15', '--max-time', '600', '--speed-limit', '1024', '--speed-time', '30', '--output', str(pending), source])
         if result.returncode == 0 and sha256(pending) == digest:
             pending.replace(destination)
             return

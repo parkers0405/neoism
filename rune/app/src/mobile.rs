@@ -7,7 +7,7 @@ use rune::{AppSpec, Cx, El, Key, KeyEvent, Tx, col, el, row, text};
 
 const WIDTH: f32 = 390.0;
 const HEIGHT: f32 = 844.0;
-pub(crate) const DEFAULT_FONT_SIZE: f32 = 16.0;
+pub(crate) const DEFAULT_FONT_SIZE: f32 = if cfg!(target_os = "ios") { 17.0 } else { 16.0 };
 
 #[derive(Default)]
 pub(crate) struct Pairing {
@@ -15,6 +15,7 @@ pub(crate) struct Pairing {
     gate: bool,
     adding: bool,
     devices: bool,
+    pub(crate) forgetting: Option<String>,
     invite: rune::TextEdit,
     password: rune::TextEdit,
     pending: Option<Device>,
@@ -40,19 +41,24 @@ impl Device {
 
 pub(crate) fn accept_scanned_invite(app: &mut App, value: &str) {
     if !(app.mobile_pairing.gate || app.mobile_pairing.adding) || app.mobile_pairing.pending.is_some() || app.mobile_pairing.claim.is_some() { return; }
-    if normalize_invite(value, "").is_err() && crate::device_pair::parse(value).is_err() {
+    let device = crate::device_pair::parse(value);
+    if device.is_err() && normalize_invite(value, "").is_err() {
         app.modal = Some(crate::ui::modal::Modal::notice("Invalid pairing QR code", "Scan the code shown by Open on phone in desktop Neoism."));
         return;
     }
     app.mobile_pairing.password = Default::default();
     app.mobile_pairing.invite.replace_text(value.trim());
     app.mobile_pairing.invite.focused = false;
+    if device.is_ok_and(|invite| invite.scan_only) { pair_device(app); }
 }
 
 fn devices_path() -> std::path::PathBuf { crate::config::dir().join("mobile-devices.json") }
 
 fn save_devices(devices: &[Device]) -> std::io::Result<()> {
-    let path = devices_path();
+    save_devices_at(devices, &devices_path())
+}
+
+fn save_devices_at(devices: &[Device], path: &std::path::Path) -> std::io::Result<()> {
     let dir = path.parent().expect("mobile config directory");
     std::fs::create_dir_all(dir)?;
     // NamedTempFile creates a private file (0600 on Unix); never write invite credentials to the desktop config.
@@ -106,6 +112,48 @@ fn select_device(app: &mut App, device: Device) {
     remember_device(app, device);
 }
 
+fn ask_forget(app: &mut App, endpoint: &str) {
+    use crate::ui::modal::{Action, Button, Modal};
+    let Some(device) = app.mobile_pairing.saved.iter().find(|d| d.endpoint == endpoint) else { return };
+    app.mobile_pairing.forgetting = Some(endpoint.to_owned());
+    app.mobile_pairing.devices = false;
+    app.modal = Some(Modal { title: "Forget system?".into(),
+        body: format!("Remove {} from this phone? Its chats and files stay on the host. You can pair again later.", device.name),
+        buttons: vec![Button { label: "Cancel".into(), key: "Esc".into(), action: Action::Close },
+            Button { label: "Forget system".into(), key: String::new(), action: Action::ForgetDevice }], selected: 0 });
+}
+
+pub(crate) fn forget_device(app: &mut App) { forget_at(app, &devices_path()); }
+
+fn forget_at(app: &mut App, path: &std::path::Path) {
+    let Some(endpoint) = app.mobile_pairing.forgetting.take() else { return };
+    let mut remaining = app.mobile_pairing.saved.clone();
+    remaining.retain(|d| d.endpoint != endpoint);
+    if let Err(error) = save_devices_at(&remaining, path) {
+        app.modal = Some(crate::ui::modal::Modal::notice("Could not forget system", &error.to_string()));
+        return;
+    }
+    app.mobile_pairing.saved = remaining;
+    let id = format!("mobile:{endpoint}");
+    if app.workspaces[app.workspace_active].server.as_deref() == Some(&id) {
+        if let Some(next) = app.mobile_pairing.saved.first().cloned() {
+            select_device(app, next);
+        } else if let Some(local) = app.workspaces.iter().position(|w| w.server.is_none()) {
+            app.select_workspace(local);
+            close_history(app);
+            if app.mobile_pairing.local_name.is_some() { select_local_device(app); }
+            else { app.mobile_pairing.gate = true; }
+        }
+    }
+    // Drop the phone's parked socket and reconnect target, not the remote workspace.
+    for i in (0..app.workspaces.len()).rev() {
+        if i != app.workspace_active && app.workspaces[i].server.as_deref() == Some(&id) {
+            app.workspaces.remove(i);
+            if i < app.workspace_active { app.workspace_active -= 1; }
+        }
+    }
+}
+
 fn remember_device(app: &mut App, device: Device) {
     let saved = &mut app.mobile_pairing.saved;
     if saved.first().is_some_and(|first| first.endpoint == device.endpoint && first.token == device.token && first.name == device.name) { return; }
@@ -120,16 +168,15 @@ fn pair_device(app: &mut App) {
     if app.server.progress().is_some() || app.mobile_pairing.pending.is_some() || app.mobile_pairing.claim.is_some() { return; }
     if crate::device_pair::is_device_link(&app.mobile_pairing.invite.text) {
         match crate::device_pair::parse(&app.mobile_pairing.invite.text) {
-            Ok(invite) if !app.mobile_pairing.password.text.is_empty() => {
+            Ok(invite) if invite.scan_only || !app.mobile_pairing.password.text.is_empty() => {
                 let mut claim = invite.origin.clone();
                 claim.set_path("/mobile-device/claim");
+                let body = claim_body(&invite, &app.mobile_pairing.password.text);
                 let mut socket = invite.origin;
                 if socket.set_scheme("wss").is_err() { return; }
                 socket.set_path(crate::device_pair::SESSION);
                 socket.set_fragment(invite.ca.as_deref());
-                let reply = crate::device_pair::request(claim, serde_json::json!({
-                    "code": invite.code, "device_label": "Neoism Mobile", "password": app.mobile_pairing.password.text,
-                }), None, invite.ca, app.waker.clone());
+                let reply = crate::device_pair::request(claim, body, None, invite.ca, app.waker.clone());
                 app.mobile_pairing.invite.focused = false;
                 app.mobile_pairing.password = Default::default();
                 app.mobile_pairing.claim = Some(PendingClaim { reply, name: invite.name, endpoint: socket.to_string() });
@@ -157,6 +204,12 @@ fn pair_device(app: &mut App) {
         }
         Err(error) => app.modal = Some(crate::ui::modal::Modal::notice("Could not pair device", &error)),
     }
+}
+
+fn claim_body(invite: &crate::device_pair::Invite, password: &str) -> serde_json::Value {
+    let mut body = serde_json::json!({ "code": invite.code, "device_label": "Neoism Mobile" });
+    if !invite.scan_only { body["password"] = password.into(); }
+    body
 }
 
 fn normalize_invite(input: &str, password: &str) -> Result<crate::fast_servers::FastJoin, String> {
@@ -507,14 +560,15 @@ fn pairing_view(app: &App, width: f32, height: f32) -> El {
         .on_submit(|a: &mut App, _| pair_device(a));
     let surface = |child| row().w_full().h(48.0).px(14.0).center_y().radius(14.0)
         .fill(rgb(p.surface)).border(1.0, rgb(p.border)).child(child);
-    let needs_password = crate::device_pair::parse(&state.invite.text).is_ok()
-        || normalize_invite(&state.invite.text, "").is_ok_and(|invite| invite.token.is_none());
+    let needs_password = if crate::device_pair::is_device_link(&state.invite.text) {
+        crate::device_pair::parse(&state.invite.text).is_ok_and(|invite| !invite.scan_only)
+    } else { normalize_invite(&state.invite.text, "").is_ok_and(|invite| invite.token.is_none()) };
     let ready = !state.invite.text.trim().is_empty() && state.pending.is_none() && state.claim.is_none()
         && (!needs_password || !state.password.text.is_empty());
     let wordmark = crate::wordmark::view(app, &pairing_wordmark(app).expect("pairing view is visible"), splash_width(width));
     let form = col().w_full().max_w(450.0).px(26.0).gap(14.0).items_center()
             .child(text("Pair a device").font(app.ty.sans(28.0, 650.0)).color(rgb(p.fg)))
-            .child(text("Connect to Tailscale, then open the QR button in desktop Neoism. Scan the code and enter its pairing password, or paste an invite link.")
+            .child(text("Connect to Tailscale, then scan the QR code from desktop Neoism or paste an invite link. Older invites may ask for a password.")
                 .font(app.ty.sans(14.0, 450.0).lh(21.0)).color(rgb(p.dim)).w_full().wrap())
             .child(surface(field(&state.invite, "pair-invite", "Pairing link").on_edit(|a: &mut App| &mut a.mobile_pairing.invite)))
             .child_if(needs_password, || {
@@ -525,7 +579,7 @@ fn pairing_view(app: &App, width: f32, height: f32) -> El {
                     .on_press_tx(|a: &mut App, tx| {
                         a.mobile_pairing.invite.focused = false;
                         a.mobile_pairing.password.focused = false;
-                        if a.mobile_pairing.pending.is_none() { crate::mobile_qr::scan(a, tx); }
+                        if a.mobile_pairing.pending.is_none() && a.mobile_pairing.claim.is_none() { crate::mobile_qr::scan(a, tx); }
                     }))
                 .child(pair_button(app, "pair-submit", if state.pending.is_some() || state.claim.is_some() { "Pairing..." } else { "Pair device" }, ready).grow(1.0)
                     .on_press(move |a: &mut App| if ready { pair_device(a) })));
@@ -583,12 +637,15 @@ fn device_picker(app: &App, top: f32, bottom: f32) -> El {
     for device in &app.mobile_pairing.saved {
         let selected = app.server.link.current.as_ref().is_some_and(|s| s.endpoint == device.endpoint);
         let device = device.clone();
-        devices = devices.child(row().key(format!("device:{}", device.endpoint)).w_full().h(44.0).px(10.0).gap(9.0).center_y()
+        let endpoint = device.endpoint.clone();
+        let forget = el().key(format!("forget:{endpoint}")).label(format!("Forget {}", device.name)).w(44.0).h(44.0).center().radius(7.0).hover(rgb(p.hover))
+            .child(crate::ui::feather::view(app, Icon::Trash, 16.0, p.dim)).on_press(move |a: &mut App| ask_forget(a, &endpoint));
+        devices = devices.child(row().w_full().h(44.0).child(row().key(format!("device:{}", device.endpoint)).grow(1.0).shrink().h(44.0).px(10.0).gap(9.0).center_y()
             .radius(7.0).fill(if selected { rgb(p.fg).alpha(0.07) } else { rune::Color::TRANSPARENT }).hover(rgb(p.hover))
             .child(crate::ui::feather::view(app, Icon::Server, 15.0, if selected { p.blue } else { p.dim }))
             .child(text(device.name.clone()).font(app.ty.sans(13.0, 550.0)).color(rgb(p.fg)).grow(1.0).shrink().truncate())
             .child_if(selected, || text(crate::ui::theme::glyph::CHECK).font(app.ty.icon_sized(12.0)).color(rgb(p.blue)))
-            .on_press(move |a: &mut App| select_device(a, device.clone())));
+            .on_press(move |a: &mut App| select_device(a, device.clone()))).child(forget));
     }
     let panel = col().key("mobile-devices").absolute(x, below - top).w(w)
         .padding(6.0).radius(13.0).fill(rgb(p.bg)).border(1.0, rgb(p.fg).alpha(0.13))
@@ -626,6 +683,65 @@ fn button(app: &App, key: &'static str, label: &'static str, icon: Icon) -> El {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forget_system_cancels_safely_and_drops_only_the_confirmed_saved_connection() {
+        let mut app = App::new_surface(String::new(), true);
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("mobile-devices.json");
+        let device = |host: &str| Device { name: "Studio".into(), endpoint: format!("wss://{host}.invalid/session"), token: host.into() };
+        let first = device("one");
+        let other = device("two");
+        app.mobile_pairing.saved = vec![first.clone(), other.clone()];
+        select_device(&mut app, first.clone());
+        ask_forget(&mut app, &first.endpoint);
+        app.run_modal_action(crate::ui::modal::Action::Close);
+        assert_eq!(app.mobile_pairing.saved.len(), 2);
+        ask_forget(&mut app, &first.endpoint);
+        forget_at(&mut app, &path);
+        let saved: Vec<Device> = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].endpoint, other.endpoint);
+        assert_eq!(app.server.link.current.as_ref().unwrap().endpoint, other.endpoint);
+        assert!(!app.workspaces.iter().any(|w| w.server.as_deref() == Some(&first.selection().id)));
+        ask_forget(&mut app, &other.endpoint);
+        forget_at(&mut app, &path);
+        assert!(app.mobile_pairing.gate && app.mobile_pairing.saved.is_empty());
+        assert!(app.server.link.current.is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), b"[]");
+    }
+
+    #[test]
+    fn scan_pinned_v2_immediately_starts_a_claim_and_retains_the_ca_for_reconnect() {
+        let mut app = App::new_surface(String::new(), true);
+        app.mobile_pairing.gate = true;
+        let qr = include_str!("../fixtures/device-v2-qr.txt").trim().replace("studio.example.invalid", "127.0.0.1:1");
+        let invite = crate::device_pair::parse(&qr).unwrap();
+        let ca = invite.ca.as_deref().unwrap();
+        assert_eq!(claim_body(&invite, "stale password"), serde_json::json!({"code":"fixture", "device_label":"Neoism Mobile"}));
+        accept_scanned_invite(&mut app, &qr);
+        let pending = app.mobile_pairing.claim.as_ref().unwrap();
+        assert_eq!(pending.endpoint, format!("wss://127.0.0.1:1/mobile-device/session#{ca}"));
+        assert!(app.mobile_pairing.password.text.is_empty());
+    }
+
+    #[test]
+    fn scan_only_starts_claim_immediately_and_never_sends_stale_password() {
+        let mut app = App::new_surface(String::new(), true);
+        app.mobile_pairing.gate = true;
+        // Reserve a local port; never contact a real host or save a credential.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let legacy = format!("neoism://device?origin=https://{}&code=sample", listener.local_addr().unwrap());
+        accept_scanned_invite(&mut app, &legacy);
+        pair_device(&mut app);
+        assert!(app.mobile_pairing.claim.is_none());
+        assert_eq!(claim_body(&crate::device_pair::parse(&legacy).unwrap(), "secret")["password"], "secret");
+        let scan = format!("{legacy}&v=2");
+        app.mobile_pairing.password.replace_text("stale");
+        accept_scanned_invite(&mut app, &scan);
+        assert!(app.mobile_pairing.claim.is_some());
+        assert_eq!(claim_body(&crate::device_pair::parse(&scan).unwrap(), "stale"), serde_json::json!({"code":"sample", "device_label":"Neoism Mobile"}));
+    }
 
     #[test]
     fn password_protected_desktop_qr_is_accepted_before_password_entry() {

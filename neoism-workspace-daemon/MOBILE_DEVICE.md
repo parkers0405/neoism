@@ -1,6 +1,12 @@
 # Pair a phone with the local daemon
 
-The standalone daemon's phone listener is **off by default**. Use a private Tailscale node address and the certificate/key for its MagicDNS name (for example, provision them with `tailscale cert`). Set the following variables before starting the daemon. Do not enable Tailscale Funnel or forward the main daemon listener.
+On macOS, connect the Mac and iPhone to the same Tailscale network. Click **Pair a phone** in a local Neoism workspace, then scan the QR in Neoism Mobile. No Terminal, separate pairing password, Tailscale HTTPS admin setting, or daemon restart is required. Treat the QR like a password: the first phone that presents its code within 60 seconds can claim it.
+
+The private phone listener is off until requested. The standalone Mac daemon remembers that phone access is enabled, reopens its private listener on subsequent starts, and retries if Tailscale is not connected yet. The phone remembers the Mac and can reconnect when it is reachable. This does not wake a sleeping Mac or start a daemon that is not running.
+
+### Explicit listener configuration (optional)
+
+Operators can still supply a private Tailscale address and a certificate/key for its MagicDNS name (for example, provision them with `tailscale cert`). The following variables apply to the explicitly configured listener, not to normal Mac QR setup. Do not enable Tailscale Funnel or forward the main daemon listener.
 
 | Variable | Example / meaning |
 | --- | --- |
@@ -17,13 +23,14 @@ Use tailnet ACLs to restrict access. The phone listener serves TLS directly, doe
 
 | Listener | Request | Success |
 | --- | --- | --- |
+| Local daemon | `POST /mobile-device/quick-invite`, local daemon bearer | `200 {"invite":"neoism://device?...&v=2"}`; enables the automatic Mac listener on first use |
 | Local daemon (loopback or Unix socket) | `POST /mobile-device/invite`, operator bearer, `{"password":"…"}` | `200 {"invite":"neoism://device?origin=…&code=…&name=…"}` |
 | Phone TLS origin | `POST /mobile-device/claim`, `{"code":"…","device_label":"…","password":"…"}` | `200 {"token":"…"}` |
 | Phone TLS origin | `GET /mobile-device/session`, WebSocket upgrade with `Authorization: Bearer <token>` | `101`, then Workspace `Hello` / `HelloAck` |
 | Local daemon (loopback or Unix socket) | `GET /mobile-device/devices`, operator bearer | `200 [{"device_id":"…","device_label":"…"}]` |
 | Local daemon (loopback or Unix socket) | `DELETE /mobile-device/devices/<device_id>`, operator bearer | `204`; active sessions for that device disconnect |
 
-Only the invite code goes in the QR; enter the password on the phone. An invite expires in 60 seconds, permits five incorrect password attempts, and can succeed once. A bad password, expired invite, or replay returns `401`. Registry state is in memory: restarting the daemon invalidates all invites and phone tokens. Use the operator routes to revoke one device without restarting. The operator key and phone bearer are separate credentials; the WebSocket does not accept tokens in URLs.
+The automatic QR contains a single-use code and the public trust information needed to verify the Mac; no TLS private key or phone token goes in the QR. A v2 claim omits `password`. Legacy password-protected invites still require the separate password and allow five incorrect attempts. A bad password, expired invite, or replay returns `401`. Unclaimed invites disappear on restart. Approved device token hashes persist outside the app bundle, and revocation survives restart. The local control credential and phone bearer are separate; the WebSocket does not accept tokens in URLs. On the first upgrade from an older in-memory-only daemon, previously paired phones need one new scan because the old daemon never saved their approvals.
 
 ## Rune bootstrap
 

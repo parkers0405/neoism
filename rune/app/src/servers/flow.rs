@@ -392,16 +392,6 @@ impl App {
         if self.server.pending.is_some() { return; }
         let Some(form) = &mut self.form else { return };
         match &form.kind {
-            Kind::PairPhone => {
-                let password = form.value("token").unwrap_or_default();
-                if password.trim().is_empty() || password.len() > 256 || password.chars().any(char::is_control) {
-                    form.error = Some("Enter a pairing password of up to 256 bytes without control characters.".into());
-                    return;
-                }
-                let password = password.to_owned();
-                self.form = None;
-                crate::ui::phone_share::generate(self, password);
-            }
             Kind::System => {
                 let target = form.value("system_target").unwrap_or("").to_owned();
                 let name = form.value("system_name").unwrap_or("").to_owned();

@@ -26,6 +26,7 @@ pub enum Action {
     CancelConnect,
     /// Remove the server or system awaiting confirmation.
     ConfirmRemove,
+    ForgetDevice,
     CopyServerInvite,
     Workflow(crate::workflows::Operation),
 }
@@ -96,12 +97,15 @@ impl App {
     pub fn run_modal_action(&mut self, action: Action) {
         self.modal = None;
         self.device_qr = None;
+        self.device_invite = None;
+        if action != Action::ForgetDevice { self.mobile_pairing.forgetting = None; }
         match action {
             Action::Close => {},
             Action::DiscardTab(id) => { if let Some(i) = self.tabs.iter().position(|t| t.id == id) { self.close_tab_now(i); } }
             Action::SaveTab(id) => self.save_and_close(id),
             Action::CancelConnect => self.cancel_connect(),
             Action::ConfirmRemove => self.confirm_remove(),
+            Action::ForgetDevice => crate::mobile::forget_device(self),
             Action::CopyServerInvite => {},
             Action::Workflow(operation) => self.confirm_workflow_operation(operation),
         }
@@ -111,7 +115,10 @@ impl App {
     pub fn dismiss_modal(&mut self) {
         let cancels = self.modal.as_ref().is_some_and(|m| m.buttons.iter().any(|b| b.action == Action::CancelConnect));
         self.modal = None;
+        self.device_qr = None;
+        self.device_invite = None;
         self.server.confirm = None;
+        self.mobile_pairing.forgetting = None;
         if cancels { self.cancel_connect(); }
     }
 
@@ -138,6 +145,7 @@ pub fn view(app: &App) -> El {
     let s = app.ty.scale();
     let can_copy_invite = modal.buttons.iter().any(|b| b.action == Action::CopyServerInvite);
     let desktop_qr = !app.mobile && can_copy_invite;
+    let qr_card = desktop_qr || (modal.title == "Pair this Mac" && app.device_qr.is_some());
     let mut body = col().w_full().mt(10.0 * s);
     if modal.title == "Pair this Mac" && let Some(invite) = &app.device_qr {
         body = body.child(super::phone_share::qr_view(app, invite));
@@ -179,8 +187,8 @@ pub fn view(app: &App) -> El {
         .child(body)
         .child(actions);
     col().key("modal-scrim").pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).items_center()
-        .fill(if desktop_qr { Color::BLACK.alpha(0.5) } else { Color::TRANSPARENT })
-        .pt(if desktop_qr { (MARGIN_TOP * s).min(app.window[1] * 0.08) } else { MARGIN_TOP * s })
+        .fill(if qr_card { Color::BLACK.alpha(0.5) } else { Color::TRANSPARENT })
+        .pt(if qr_card { (MARGIN_TOP * s).min(app.window[1] * 0.08) } else { MARGIN_TOP * s })
         .on_press(|a: &mut App| a.dismiss_modal())
         .child(card)
 }

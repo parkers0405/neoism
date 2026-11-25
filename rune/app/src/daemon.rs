@@ -224,6 +224,57 @@ pub fn probe(target: &Target, timeout: Duration) -> Result<(), String> {
 fn token_file() -> PathBuf { neoism_agent_service_api::daemon_credential::canonical_daemon_token_path() }
 fn endpoint_file() -> PathBuf { token_file().with_file_name("daemon-endpoint.json") }
 
+/// Never send a local control credential to a workspace/SSH target or an arbitrary URL override.
+pub(crate) fn quick_invite_target() -> Result<(url::Url, String), String> {
+    let published = std::fs::read(endpoint_file()).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    let addr = published.as_ref().and_then(|v| v["address"].as_str()).and_then(|s| s.parse::<std::net::SocketAddr>().ok());
+    let endpoint = quick_invite_endpoint(addr, std::env::var("NEOISM_GPUIX_DAEMON_URL").ok().as_deref())?;
+    // Match daemon_token::ensure_daemon_token: an explicitly provisioned daemon may have no token file.
+    // Neither a workspace URL's query token nor a hosted server's pairing credential is a source here.
+    let token = quick_invite_token(std::env::var("NEOISM_DAEMON_TOKEN").ok(), &token_file())
+        .ok_or("Missing local daemon token. Restart the local Neoism daemon and try again.")?;
+    Ok((endpoint, token))
+}
+
+fn quick_invite_token(provisioned: Option<String>, path: &std::path::Path) -> Option<String> {
+    provisioned.filter(|s| !s.trim().is_empty()).or_else(|| {
+        std::fs::read_to_string(path).ok().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
+    })
+}
+
+#[test]
+fn quick_invite_uses_provisioned_token_or_existing_canonical_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("daemon-token");
+    assert_eq!(quick_invite_token(None, &path), None);
+    assert_eq!(quick_invite_token(Some("env".into()), &path).as_deref(), Some("env"));
+    std::fs::write(&path, "file\n").unwrap();
+    assert_eq!(quick_invite_token(None, &path).as_deref(), Some("file"));
+    assert_eq!(quick_invite_token(Some("env".into()), &path).as_deref(), Some("env"));
+}
+
+fn quick_invite_endpoint(addr: Option<std::net::SocketAddr>, active: Option<&str>) -> Result<url::Url, String> {
+    let addr = addr.filter(|a| a.ip().is_loopback()).ok_or("Connect to the local Neoism daemon on loopback before pairing.")?;
+    let published = url::Url::parse(&format!("ws://{addr}/session")).map_err(|_| "Invalid local daemon address")?;
+    if let Some(active) = active && !url::Url::parse(active).is_ok_and(|url| url.origin() == published.origin()
+        && url.path() == published.path() && url.username().is_empty() && url.password().is_none()) {
+        return Err("Open a workspace on the published local daemon, not a remote server or proxy, before pairing.".into());
+    }
+    url::Url::parse(&format!("http://{addr}/mobile-device/quick-invite")).map_err(|_| "Invalid local daemon address".into())
+}
+
+#[test]
+fn quick_invite_uses_only_published_numeric_loopback_not_override_credentials() {
+    let local = Some("127.0.0.1:3210".parse().unwrap());
+    let url = quick_invite_endpoint(local, Some("ws://127.0.0.1:3210/session?token=not-the-key#ignore")).unwrap();
+    assert_eq!(url.as_str(), "http://127.0.0.1:3210/mobile-device/quick-invite");
+    assert!(quick_invite_endpoint(Some("[::1]:3210".parse().unwrap()), None).is_ok());
+    assert!(quick_invite_endpoint(Some("192.0.2.1:3210".parse().unwrap()), None).is_err());
+    for other in ["ws://127.0.0.1:3211/session", "ws://127.0.0.1:3210/proxy/session", "ws://localhost:3210/session", "ws://alice@127.0.0.1:3210/session", "ws://host.invalid/session"] {
+        assert!(quick_invite_endpoint(local, Some(other)).is_err());
+    }
+}
+
 /// The daemon address without credentials (`publicEndpoint`), for the Servers list.
 pub fn public_endpoint() -> Option<String> {
     if let Ok(url) = std::env::var("NEOISM_GPUIX_DAEMON_URL") {

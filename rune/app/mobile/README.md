@@ -2,9 +2,11 @@
 
 The phone surface reuses Rune's agent transcript, activity indicator, composer controls, and workspace daemon connection. The Chats button toggles a sidebar with desktop's search and project grouping. Choose a device from the dropdown just below search; there is no separate workspace-selection step. Use **+ > Photo** in an existing chat to open the native picture picker. The app has no terminal, editor, or general-purpose file browser. It does not start a daemon on the phone.
 
-On first launch, pair with a desktop workspace. Open the workspace in desktop Neoism, click the QR icon at the top right, and start sharing with a password. Select **Scan QR Code** in Neoism Mobile, then **Pair device**. In the Mac preview, select an image of the desktop QR code; in the iOS Simulator, paste the invite into the **Pairing link** field instead. The phone remembers verified devices and retries the last connection on launch or after an interruption. **Choose device** is below search in Chats. If the host stops sharing and starts a new Fast Server, use its new invite.
+On first launch, connect the Mac and phone to the same tailnet. From a local workspace in desktop Neoism, click the QR icon at the top right. Select **Scan QR Code** in Neoism Mobile; scanning the one-time code pairs immediately. In the Mac preview, select an image of the desktop QR code; in the iOS Simulator, paste the invite into **Pairing link** and select **Pair device**. Older device invites and password-protected Fast Servers still ask for their password. The phone remembers verified devices and retries the last connection on launch or after an interruption. **Choose device** is below search in Chats.
 
 ## Preview
+
+To forget a saved system, open **Chats > Choose device**, tap the trash can to its right, and confirm **Forget system**. This removes the connection from this phone, not the chats or files on the host.
 
 From `rune/app`, build the desktop binary and run the local browser viewer:
 
@@ -37,7 +39,7 @@ For TestFlight, use `bash mobile/device.sh --app-store BUILD_NUMBER /path/to/App
 
 For on-device performance comparisons, pass `--release` as the first argument to `mobile/device.sh`. This builds an optimized app with the same bundle ID, so a development-signed install updates the app in place without restarting the host daemon.
 
-For device-wide chat pairing, connect both devices to the same Tailscale network. On the configured desktop daemon, open the title-bar QR button, set a pairing password, and generate the code. Scan it in Neoism Mobile and enter that password. The resulting connection uses the Mac's chat catalog and models across projects; provider sign-in stays on the Mac. Fast Server links are still supported as single-workspace invites.
+Device-wide pairing uses the Mac's chat catalog and models across projects; provider sign-in stays on the Mac. Keep the one-time QR private: anyone who can reach the host and scan it before it expires can pair. If the desktop says quick pairing is unavailable, follow its daemon update or Tailscale instructions before generating a new code. Fast Server links are still supported as single-workspace invites.
 
 Install the `aarch64-apple-ios` target for the pinned Rust toolchain. From `rune/app`, run `bash mobile/device.sh` to build an iPhoneOS bundle without provisioning, or `bash mobile/device.sh /path/to/development.mobileprovision 'Apple Development: …' DEVICE` to sign, install, and launch. The development profile must cover `ai.neoism.mobile`, the selected signing certificate, and the phone. Unlock the connected phone, trust the Mac, and enable Developer Mode. Use `xcrun devicectl list devices` to obtain its identifier. USB is for installation only; use the Fast Server QR code above to connect to the desktop workspace over the network.
 

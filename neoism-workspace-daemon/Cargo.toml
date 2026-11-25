@@ -61,6 +61,10 @@ hyper-util = { version = "0.1", features = ["server", "tokio", "http1", "service
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+rcgen = "0.14.10"
+tempfile = "3.27"
+
 # Owner+SYSTEM-only DACLs on secret files — the Windows counterpart of the
 # unix 0o600/0o700 tightening (see src/windows_acl.rs).
 [target.'cfg(windows)'.dependencies]

@@ -24,7 +24,6 @@ const FIELD_H: f32 = 32.0;
 pub enum Kind {
     Server(Draft),
     System,
-    PairPhone,
 }
 
 /// `ServerDraft`: Host or Join, Fast tunnel, and every field's last value.
@@ -73,15 +72,6 @@ fn field(id: &'static str, label: &'static str, value: &str, placeholder: &'stat
 }
 
 impl Form {
-    pub(crate) fn pair_phone() -> Self {
-        let mut form = Self { kind: Kind::PairPhone, title: "Pair a phone",
-            description: Some("Pair over Tailscale to read and continue this Mac's Neoism chats across projects. Agents run on this Mac. Use a separate pairing password."),
-            fields: vec![field("token", "Pairing password", "", "Enter a pairing password", true)],
-            submit: "Generate QR Code", focus: Focus::Field(0), error: None };
-        form.set_focus(Focus::Field(0));
-        form
-    }
-
     /// `server-form`: the target field by mode (project folder to host, address or invite to
     /// join, address when editing), then the optional name and the password.
     pub fn server(draft: Draft) -> Form {

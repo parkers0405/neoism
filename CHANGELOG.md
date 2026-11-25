@@ -2,6 +2,11 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.172] - 2026-11-25
+
+- Pair an iPhone with a Mac workspace over Tailscale using a short-lived QR code, with no separate pairing password.
+- Update the regression test for photos sent in a new paired chat so it verifies the host default folder and waits for thread creation.
+
 ## [0.7.171] - 2026-11-25
 
 - Rebuilds the desktop release with the up-to-date bundled API reference and a longer timeout for slow Zig downloads.

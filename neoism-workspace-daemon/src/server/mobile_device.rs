@@ -18,11 +18,16 @@ use rand::{rngs::OsRng, RngCore};
 use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::{fs, io, path::{Path as FsPath, PathBuf}};
 use std::{collections::HashMap, net::{IpAddr, SocketAddr}, sync::Arc, time::{Duration, Instant}};
 use subtle::ConstantTimeEq;
 use tokio::{net::TcpListener, sync::{watch, Semaphore}, task::JoinHandle, time::timeout};
 use url::Url;
 use uuid::Uuid;
+
+#[cfg(target_os = "macos")]
+mod provision;
+mod quick;
 
 const INVITE_TTL: Duration = Duration::from_secs(60);
 const MAX_INVITES: usize = 16;
@@ -42,10 +47,12 @@ struct MobileState {
     sessions: Arc<Semaphore>,
 }
 
-#[derive(Default)]
+#[cfg_attr(test, derive(Default))]
 struct Credentials {
     invites: HashMap<Digest32, Invite>,
     devices: HashMap<Digest32, Device>,
+    // Only isolated router tests run without backing storage.
+    store: Option<RegistryStore>,
 }
 
 struct Invite {
@@ -57,13 +64,139 @@ struct Invite {
 struct Device {
     info: DeviceInfo,
     // Dropping the sender terminates all active sessions for this device.
-    alive: watch::Sender<()>,
+    // None while a failed durable revoke awaits retry. Keep its ID listable,
+    // but neither existing nor new sessions may use this credential.
+    alive: Option<watch::Sender<()>>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct DeviceInfo {
     device_id: Uuid,
     device_label: String,
+}
+
+// This is the entire on-disk schema. Invites, passwords, plaintext bearers,
+// and session handles have no representation here.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoredDevice {
+    token_hash: Digest32,
+    info: DeviceInfo,
+}
+
+const REGISTRY_FILE: &str = "devices-v1.json";
+
+struct RegistryStore {
+    dir: PathBuf,
+    // One live authoritative device map, even across multiple daemon processes.
+    // Lock a stable sibling, not the inode replaced on each write.
+    lock: fs::File,
+}
+
+impl Drop for RegistryStore {
+    fn drop(&mut self) {
+        let _ = self.lock.unlock();
+    }
+}
+
+fn private_options() -> fs::OpenOptions {
+    let mut opts = fs::OpenOptions::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    opts
+}
+
+fn check_private(path: &FsPath, directory: bool) -> anyhow::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    anyhow::ensure!(if directory { metadata.is_dir() } else { metadata.is_file() }, "unexpected mobile registry file type");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        anyhow::ensure!(metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o077 == 0,
+            "mobile registry requires owner-only permissions");
+    }
+    #[cfg(windows)]
+    anyhow::ensure!(crate::windows_acl::check_owner_only(path)?, "mobile registry requires owner-only permissions");
+    Ok(())
+}
+
+impl RegistryStore {
+    fn open(root: &FsPath) -> anyhow::Result<Self> {
+        anyhow::ensure!(root.is_absolute(), "mobile registry requires an absolute user state directory");
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.recursive(true).create(root)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let meta = fs::symlink_metadata(root)?;
+            anyhow::ensure!(meta.is_dir() && meta.uid() == unsafe { libc::geteuid() } && meta.mode() & 0o022 == 0,
+                "mobile registry state root must be user-owned and not writable by others");
+        }
+        let dir = root.join("mobile-device");
+        match builder.recursive(false).create(&dir) {
+            Ok(()) => {
+                #[cfg(unix)]
+                fs::File::open(root)?.sync_all()?;
+                #[cfg(windows)]
+                crate::windows_acl::harden_owner_only(&dir)?;
+            }
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => (),
+            Err(err) => return Err(err.into()),
+        }
+        check_private(&dir, true)?;
+        let lock_path = dir.join("registry.lock");
+        let lock = private_options().read(true).write(true).create(true).truncate(false).open(&lock_path)?;
+        #[cfg(windows)]
+        crate::windows_acl::harden_owner_only(&lock_path)?;
+        check_private(&lock_path, false)?;
+        lock.try_lock().map_err(|e| anyhow::anyhow!("cannot lock mobile device registry: {e}"))?;
+        Ok(Self { dir, lock })
+    }
+
+    fn load(&self) -> anyhow::Result<Vec<StoredDevice>> {
+        let path = self.dir.join(REGISTRY_FILE);
+        match fs::symlink_metadata(&path) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            result => { result?; }
+        }
+        check_private(&path, false)?;
+        let file = private_options().read(true).open(path)?;
+        anyhow::ensure!(file.metadata()?.len() <= 128 * 1024, "oversized mobile registry");
+        let devices: Vec<StoredDevice> = serde_json::from_reader(file)?;
+        anyhow::ensure!(devices.len() <= MAX_DEVICES, "too many stored mobile devices");
+        Ok(devices)
+    }
+
+    fn replace(&self, devices: &[StoredDevice]) -> io::Result<()> {
+        let tmp = self.dir.join(format!(".{}.tmp", Uuid::new_v4()));
+        let file = private_options().write(true).create_new(true).open(&tmp)?;
+        let result = (|| {
+            #[cfg(windows)]
+            crate::windows_acl::harden_owner_only(&tmp)?;
+            serde_json::to_writer(&file, devices)?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&tmp, self.dir.join(REGISTRY_FILE))?;
+            #[cfg(unix)]
+            fs::File::open(&self.dir)?.sync_all()?;
+            Ok(())
+        })();
+        if result.is_err() { let _ = fs::remove_file(tmp); }
+        result
+    }
+}
+
+fn write_error(err: io::Error) -> StatusCode {
+    tracing::error!(%err, "could not commit mobile device registry");
+    StatusCode::INTERNAL_SERVER_ERROR
 }
 
 fn digest(value: &str) -> Digest32 {
@@ -86,6 +219,31 @@ fn secret(prefix: &str) -> String {
 }
 
 impl Credentials {
+    fn open_default() -> anyhow::Result<Self> {
+        Self::open(&crate::persistence::resolve_state_dir(None))
+    }
+
+    fn open(root: &FsPath) -> anyhow::Result<Self> {
+        let store = RegistryStore::open(root)?;
+        let mut devices = HashMap::new();
+        let mut ids = std::collections::HashSet::new();
+        for StoredDevice { token_hash, info } in store.load()? {
+            anyhow::ensure!(ids.insert(info.device_id) && !devices.contains_key(&token_hash), "duplicate stored mobile device");
+            devices.insert(token_hash, Device { info, alive: Some(watch::channel(()).0) });
+        }
+        Ok(Self { devices, invites: HashMap::new(), store: Some(store) })
+    }
+
+    fn persist_change(&self, add: Option<StoredDevice>) -> Result<(), StatusCode> {
+        if let Some(store) = &self.store {
+            let devices = self.devices.iter().filter(|(_, device)| device.alive.is_some())
+                .map(|(hash, device)| StoredDevice { token_hash: *hash, info: device.info.clone() })
+                .chain(add).collect::<Vec<_>>();
+            store.replace(&devices).map_err(write_error)?;
+        }
+        Ok(())
+    }
+
     fn mint(&mut self, password: &str, now: Instant) -> Result<String, StatusCode> {
         self.invites.retain(|_, invite| invite.expires > now);
         if self.invites.len() >= MAX_INVITES || self.devices.len() >= MAX_DEVICES {
@@ -114,12 +272,12 @@ impl Credentials {
         if self.devices.len() >= MAX_DEVICES {
             return Err(StatusCode::TOO_MANY_REQUESTS);
         }
-        self.invites.remove(&key);
         let token = secret("ndm_");
-        self.devices.insert(digest(&token), Device {
-            info: DeviceInfo { device_id: Uuid::new_v4(), device_label: label },
-            alive: watch::channel(()).0,
-        });
+        let token_hash = digest(&token);
+        let info = DeviceInfo { device_id: Uuid::new_v4(), device_label: label };
+        self.persist_change(Some(StoredDevice { token_hash, info: info.clone() }))?;
+        self.invites.remove(&key);
+        self.devices.insert(token_hash, Device { info, alive: Some(watch::channel(()).0) });
         Ok(token)
     }
 
@@ -128,13 +286,17 @@ impl Credentials {
             return None;
         }
         let device = self.devices.get(&digest(token))?;
-        Some((device.info.device_label.clone(), device.alive.subscribe()))
+        Some((device.info.device_label.clone(), device.alive.as_ref()?.subscribe()))
     }
 
-    fn revoke(&mut self, id: Uuid) -> bool {
-        let before = self.devices.len();
-        self.devices.retain(|_, device| device.info.device_id != id);
-        self.devices.len() < before
+    fn revoke(&mut self, id: Uuid) -> Result<bool, StatusCode> {
+        let Some((&hash, device)) = self.devices.iter_mut().find(|(_, d)| d.info.device_id == id) else {
+            return Ok(false);
+        };
+        device.alive = None;
+        self.persist_change(None)?;
+        self.devices.remove(&hash);
+        Ok(true)
     }
 }
 
@@ -152,7 +314,7 @@ struct MintBody { password: String }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ClaimBody { code: String, device_label: String, password: String }
+struct ClaimBody { code: String, device_label: String, #[serde(default)] password: String }
 
 #[derive(Serialize)]
 struct InviteReply { invite: String }
@@ -175,19 +337,24 @@ async fn invite(State(state): State<MobileState>, peer: Option<ConnectInfo<Socke
     if !valid_password(&body.password) {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let code = state.credentials.lock().mint(&body.password, Instant::now())?;
+    mint_invite(&state, &body.password)
+}
+
+fn mint_invite(state: &MobileState, password: &str) -> Result<Response, StatusCode> {
+    let code = state.credentials.lock().mint(password, Instant::now())?;
     let mut uri = Url::parse("neoism://device").expect("static invite URI");
     uri.query_pairs_mut()
         .append_pair("origin", state.origin.as_str().trim_end_matches('/'))
         .append_pair("code", &code)
         .append_pair("name", &state.name);
     if let Some(ca) = &state.ca { uri.query_pairs_mut().append_pair("ca", ca); }
+    if password.is_empty() { uri.query_pairs_mut().append_pair("v", "2"); }
     Ok(private_json(InviteReply { invite: uri.into() }))
 }
 
 async fn claim(State(state): State<MobileState>, uri: Uri, Json(body): Json<ClaimBody>) -> Result<Response, StatusCode> {
     let label = body.device_label.trim();
-    if uri.query().is_some() || !valid_password(&body.password) || label.is_empty() || label.len() > 128 || label.chars().any(char::is_control) {
+    if uri.query().is_some() || (!body.password.is_empty() && !valid_password(&body.password)) || label.is_empty() || label.len() > 128 || label.chars().any(char::is_control) {
         return Err(StatusCode::BAD_REQUEST);
     }
     let token = state.credentials.lock().claim(&body.code, label.into(), &body.password, Instant::now())?;
@@ -205,7 +372,11 @@ async fn revoke(State(state): State<MobileState>, peer: Option<ConnectInfo<Socke
     if !operator_allowed(&state, peer, &headers) {
         return StatusCode::FORBIDDEN;
     }
-    if state.credentials.lock().revoke(id) { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
+    match state.credentials.lock().revoke(id) {
+        Ok(true) => StatusCode::NO_CONTENT,
+        Ok(false) => StatusCode::NOT_FOUND,
+        Err(status) => status,
+    }
 }
 
 async fn upgrade(State(state): State<MobileState>, uri: Uri, headers: HeaderMap, ws: WebSocketUpgrade) -> Result<Response, StatusCode> {
@@ -339,46 +510,80 @@ impl Drop for Listener {
 }
 
 pub(crate) async fn start() -> anyhow::Result<Option<(Router, Listener)>> {
-    let Some(bind) = std::env::var_os("NEOISM_MOBILE_LISTEN") else { return Ok(None); };
+    let Some(bind) = std::env::var_os("NEOISM_MOBILE_LISTEN") else {
+        #[cfg(target_os = "macos")]
+        return quick::automatic().map(Some);
+        #[cfg(not(target_os = "macos"))]
+        return Ok(None);
+    };
     let addr: SocketAddr = bind.to_str().ok_or_else(|| anyhow::anyhow!("invalid mobile listen address"))?.parse()?;
     anyhow::ensure!(private_bind(addr.ip()) && addr.port() != 0, "mobile listener requires an explicit Tailscale or loopback address and port");
     let origin = https_origin(&std::env::var("NEOISM_MOBILE_ORIGIN")?)?;
     let operator_key = std::env::var("NEOISM_MOBILE_OPERATOR_KEY")?;
     anyhow::ensure!(URL_SAFE_NO_PAD.decode(&operator_key).is_ok_and(|bytes| bytes.len() == 32),
         "NEOISM_MOBILE_OPERATOR_KEY must be 32 random bytes, base64url without padding");
+    let cert = std::env::var_os("NEOISM_MOBILE_TLS_CERT").ok_or_else(|| anyhow::anyhow!("missing NEOISM_MOBILE_TLS_CERT"))?;
+    let key = std::env::var_os("NEOISM_MOBILE_TLS_KEY").ok_or_else(|| anyhow::anyhow!("missing NEOISM_MOBILE_TLS_KEY"))?;
+    let (state, listener) = listen(addr, origin, digest(&operator_key), cert.as_ref(), key.as_ref(), std::env::var_os("NEOISM_MOBILE_TLS_CA").as_deref().map(std::path::Path::new), false).await?;
+    Ok(Some((operator_router(state.clone()).merge(quick::configured(state)?), listener)))
+}
+
+fn tls_acceptor(cert: &std::path::Path, key: &std::path::Path) -> anyhow::Result<tokio_rustls::TlsAcceptor> {
+    let certs = CertificateDer::pem_file_iter(cert)?
+        .collect::<Result<Vec<_>, _>>()?;
+    let key = PrivateKeyDer::from_pem_file(key)?;
+    let mut tls = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()?.with_no_client_auth().with_single_cert(certs, key)?;
+    tls.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(tls)))
+}
+
+async fn listen(addr: SocketAddr, origin: Url, operator_key: Digest32, cert: &std::path::Path, key: &std::path::Path, ca: Option<&std::path::Path>, _automatic: bool) -> anyhow::Result<(MobileState, Listener)> {
     let endpoint = agent::configured_agent_server();
     anyhow::ensure!(agent::mobile::local_endpoint(&endpoint), "mobile chat requires the local Agent endpoint");
-    let certs = CertificateDer::pem_file_iter(std::env::var_os("NEOISM_MOBILE_TLS_CERT").ok_or_else(|| anyhow::anyhow!("missing NEOISM_MOBILE_TLS_CERT"))?)?
-        .collect::<Result<Vec<_>, _>>()?;
-    let key = PrivateKeyDer::from_pem_file(std::env::var_os("NEOISM_MOBILE_TLS_KEY").ok_or_else(|| anyhow::anyhow!("missing NEOISM_MOBILE_TLS_KEY"))?)?;
-    let ca = std::env::var_os("NEOISM_MOBILE_TLS_CA").map(|path| -> anyhow::Result<_> {
+    let ca = ca.map(|path| -> anyhow::Result<_> {
         let cert = CertificateDer::from_pem_file(path)?;
         let encoded = URL_SAFE_NO_PAD.encode(cert.as_ref());
         anyhow::ensure!(encoded.len() <= 1400, "mobile pairing CA is too large for a QR code");
         Ok(encoded)
     }).transpose()?;
-    let mut tls = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .with_safe_default_protocol_versions()?.with_no_client_auth().with_single_cert(certs, key)?;
-    tls.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let acceptor = Arc::new(parking_lot::RwLock::new(tls_acceptor(cert, key)?));
     let listener = TcpListener::bind(addr).await?;
     let state = MobileState {
         ca,
         origin, name: gethostname::gethostname().to_string_lossy().into_owned(),
-        operator_key: digest(&operator_key), agent_endpoint: endpoint,
-        credentials: Default::default(), sessions: Arc::new(Semaphore::new(32)),
+        operator_key, agent_endpoint: endpoint,
+        credentials: Arc::new(Mutex::new(Credentials::open_default()?)), sessions: Arc::new(Semaphore::new(32)),
     };
     let app = phone_router(state.clone());
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
     let connections = Arc::new(Semaphore::new(64));
     tracing::info!(%addr, "mobile device HTTPS listener ready");
     let task = tokio::spawn(async move {
+        #[cfg(target_os = "macos")]
+        let _renewal = _automatic.then(|| {
+            let acceptor = acceptor.clone();
+            Listener(tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
+                    let renewal: anyhow::Result<_> = async {
+                        let cfg = provision::provision().await?;
+                        anyhow::ensure!(cfg.addr == addr, "Tailscale node address changed");
+                        tls_acceptor(&cfg.cert, &cfg.key)
+                    }.await;
+                    match renewal {
+                        Ok(next) => *acceptor.write() = next,
+                        Err(error) => tracing::warn!(%error, "could not refresh phone listener certificate"),
+                    }
+                }
+            }))
+        });
         loop {
             let (stream, _) = match listener.accept().await {
                 Ok(peer) => peer,
                 Err(_) => { tokio::time::sleep(Duration::from_millis(250)).await; continue; }
             };
             let Ok(permit) = connections.clone().try_acquire_owned() else { continue; };
-            let acceptor = acceptor.clone();
+            let acceptor = acceptor.read().clone();
             let service = TowerToHyperService::new(app.clone());
             tokio::spawn(async move {
                 let _permit = permit;
@@ -393,7 +598,7 @@ pub(crate) async fn start() -> anyhow::Result<Option<(Router, Listener)>> {
             });
         }
     });
-    Ok(Some((operator_router(state), Listener(task))))
+    Ok((state, Listener(task)))
 }
 
 #[cfg(test)]
@@ -403,7 +608,7 @@ mod tests {
     use serde_json::{json, Value};
     use tokio_tungstenite::{connect_async, tungstenite::{client::IntoClientRequest, Error, Message as Frame}};
 
-    fn state() -> MobileState {
+    pub(super) fn state() -> MobileState {
         MobileState {
             ca: None,
             origin: https_origin("https://desk.example.ts.net:8443").unwrap(),
@@ -413,11 +618,93 @@ mod tests {
         }
     }
 
-    async fn serve(app: Router) -> (SocketAddr, JoinHandle<()>) {
+    pub(super) async fn serve(app: Router) -> (SocketAddr, JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         (listener.local_addr().unwrap(), tokio::spawn(async move {
             axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
         }))
+    }
+
+    #[test]
+    fn mobile_registry_restores_devices_not_invites_and_revoke_survives_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let now = Instant::now();
+        let password = "private pairing phrase";
+        let mut registry = Credentials::open(root.path()).unwrap();
+        assert!(Credentials::open(root.path()).is_err(), "two listeners must not overwrite each other's snapshots");
+        let code = registry.mint(password, now).unwrap();
+        let pending = registry.mint(password, now).unwrap();
+        let token = registry.claim(&code, "phone".into(), password, now).unwrap();
+        let id = registry.devices[&digest(&token)].info.device_id;
+        let dir = root.path().join("mobile-device");
+        let path = dir.join(REGISTRY_FILE);
+        let contents = fs::read_to_string(&path).unwrap();
+        let records: Vec<StoredDevice> = serde_json::from_str(&contents).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].token_hash, digest(&token));
+        for secret in [&token[..], &code, &pending, password] {
+            assert!(!contents.contains(secret));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        drop(registry);
+
+        let mut restored = Credentials::open(root.path()).unwrap();
+        assert_eq!(restored.claim(&pending, "other".into(), password, now), Err(StatusCode::UNAUTHORIZED));
+        let (label, session) = restored.authenticate(&token).unwrap();
+        assert_eq!(label, "phone");
+        assert_eq!(restored.revoke(id), Ok(true));
+        assert!(session.has_changed().is_err(), "revoke must close restored sessions");
+        drop(restored);
+
+        let mut reopened = Credentials::open(root.path()).unwrap();
+        assert!(reopened.authenticate(&token).is_none());
+        assert_eq!(reopened.revoke(id), Ok(false));
+    }
+
+    #[test]
+    fn mobile_registry_rejects_corruption_without_resetting_devices() {
+        let root = tempfile::tempdir().unwrap();
+        let mut registry = Credentials::open(root.path()).unwrap();
+        let now = Instant::now();
+        let code = registry.mint("password", now).unwrap();
+        registry.claim(&code, "phone".into(), "password", now).unwrap();
+        drop(registry);
+        let path = root.path().join("mobile-device").join(REGISTRY_FILE);
+        fs::write(&path, b"truncated").unwrap();
+        assert!(Credentials::open(root.path()).is_err());
+        assert_eq!(fs::read(path).unwrap(), b"truncated");
+    }
+
+    #[test]
+    fn mobile_registry_failed_rename_denies_access_and_allows_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let mut registry = Credentials::open(root.path()).unwrap();
+        let now = Instant::now();
+        let code = registry.mint("password", now).unwrap();
+        let path = root.path().join("mobile-device").join(REGISTRY_FILE);
+        fs::create_dir(&path).unwrap(); // an atomic file replacement cannot replace a directory
+        assert_eq!(registry.claim(&code, "phone".into(), "password", now), Err(StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(registry.devices.is_empty());
+        fs::remove_dir(&path).unwrap();
+        let token = registry.claim(&code, "phone".into(), "password", now).unwrap();
+        let id = registry.devices[&digest(&token)].info.device_id;
+        let (_, session) = registry.authenticate(&token).unwrap();
+        let backup = path.with_extension("bak");
+        fs::rename(&path, &backup).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert_eq!(registry.revoke(id), Err(StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(registry.authenticate(&token).is_none());
+        assert!(session.has_changed().is_err());
+        fs::remove_dir(&path).unwrap();
+        fs::rename(backup, path).unwrap();
+        assert_eq!(registry.revoke(id), Ok(true));
+        drop(registry);
+        assert!(Credentials::open(root.path()).unwrap().authenticate(&token).is_none());
     }
 
     #[test]

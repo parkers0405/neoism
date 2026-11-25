@@ -641,10 +641,9 @@ fn app_spec() -> AppSpec<App> {
                 s.modal = Some(ui::modal::Modal::fast_server_ready("Team project", invite));
             }),
             ("workspace-phone-share", |s| {
-                // Reserved hostname, same URL shape as production; no host or credentials.
-                let invite = "https://phone-share.example.invalid/?name=Team+project";
-                s.server.ready_invite = Some(invite.into());
-                s.modal = Some(ui::modal::Modal::fast_server_ready("Team project", invite));
+                // Offline fixture: a public test CA (private key discarded), not a live invite.
+                let invite = include_str!("../fixtures/device-v2-qr.txt").trim();
+                s.modal = Some(ui::phone_share::ready(s, invite.into()));
             }),
             ("server-form-join", |s| {
                 s.open_server_form();

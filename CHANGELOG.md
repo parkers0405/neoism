@@ -2,6 +2,10 @@
 
 All notable user-facing changes to Neoism are documented here.
 
+## [0.7.171] - 2026-11-25
+
+- Rebuilds the desktop release with the up-to-date bundled API reference and a longer timeout for slow Zig downloads.
+
 ## [0.7.170] - 2026-11-25
 
 - Share a desktop workspace with Neoism Mobile using a password-protected QR invite. The iOS app is distributed separately through TestFlight.

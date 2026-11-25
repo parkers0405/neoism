@@ -51,6 +51,10 @@ jobs:
         with:
           ref: ${{ inputs.source_ref || github.sha }}
           submodules: recursive
+      - name: Verify bundled documentation before building
+        run: |
+          cmp neoism-agent/openapi/v2.json vendor/neoism-docs/reference/openapi.json
+          node vendor/neoism-docs/scripts/content-bundle.mjs --check
       - name: Prepare shared release and independent platform jobs
         id: release
         env:
